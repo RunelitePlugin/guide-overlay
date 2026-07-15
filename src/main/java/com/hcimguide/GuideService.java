@@ -43,6 +43,21 @@ public class GuideService
 	private final OkHttpClient okHttpClient;
 	private final Gson gson;
 	private final WikitextParser parser = new WikitextParser();
+	private final JsonGuideParser jsonParser = new JsonGuideParser();
+
+	/**
+	 * Parse dispatch: structured-JSON guides (BRUHsailer) vs wikitext (wiki
+	 * guides). Content-sniffed, so a snapshot needs no format tag - the stored
+	 * text speaks for itself.
+	 */
+	private Guide parseGuide(String text)
+	{
+		if (JsonGuideParser.looksLikeJsonGuide(text))
+		{
+			return jsonParser.parse(text);
+		}
+		return parser.parse(text);
+	}
 
 	@Inject
 	public GuideService(OkHttpClient okHttpClient, Gson gson)
@@ -94,7 +109,7 @@ public class GuideService
 			if (f.isFile())
 			{
 				String wikitext = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
-				Guide g = parser.parse(wikitext);
+				Guide g = parseGuide(wikitext);
 				if (!g.isEmpty())
 				{
 					return g;
@@ -116,7 +131,7 @@ public class GuideService
 	 */
 	public Guide importText(String guideId, String wikitext) throws IOException
 	{
-		Guide guide = parser.parse(wikitext);
+		Guide guide = parseGuide(wikitext);
 		if (guide.isEmpty())
 		{
 			throw new IllegalArgumentException("Text could not be parsed as a guide (no sections with steps found)");
@@ -143,7 +158,7 @@ public class GuideService
 				return null;
 			}
 			String backupText = new String(Files.readAllBytes(backup.toPath()), StandardCharsets.UTF_8);
-			Guide guide = parser.parse(backupText);
+			Guide guide = parseGuide(backupText);
 			if (guide.isEmpty())
 			{
 				return null;
@@ -212,7 +227,7 @@ public class GuideService
 					}
 					else
 					{
-						JsonObject root = gson.fromJson(body.string(), JsonObject.class);
+						JsonObject root = gson.fromJson(readBounded(body), JsonObject.class);
 						if (root == null || !root.has("parse"))
 						{
 							error = root != null && root.has("error")
@@ -222,7 +237,7 @@ public class GuideService
 						else
 						{
 							String wikitext = root.getAsJsonObject("parse").get("wikitext").getAsString();
-							guide = parser.parse(wikitext);
+							guide = parseGuide(wikitext);
 							if (guide.isEmpty())
 							{
 								guide = null;
@@ -253,6 +268,116 @@ public class GuideService
 
 				// exactly one callback fires, and a throwing consumer can't trigger the
 				// other or propagate into the OkHttp dispatcher thread
+				if (guide != null)
+				{
+					try
+					{
+						onSuccess.accept(guide, storageWarning);
+					}
+					catch (Exception e)
+					{
+						log.warn("Guide success handler failed", e);
+					}
+				}
+				else
+				{
+					safeError(onError, error != null ? error : "Unknown error");
+				}
+			}
+		});
+	}
+
+	/** Body cap for guide downloads (a real guide is well under 1MB). */
+	private static final long MAX_GUIDE_BYTES = 16L * 1024 * 1024;
+
+	/**
+	 * Reads a response body while COUNTING BYTES, aborting past the cap.
+	 * Content-Length can't be trusted for this: transparent gzip decoding
+	 * makes OkHttp report -1, and a hostile server can lie - so the only
+	 * reliable bound is counting what actually comes off the wire.
+	 */
+	private static String readBounded(ResponseBody body) throws IOException
+	{
+		java.io.InputStream in = body.byteStream();
+		java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+		byte[] buf = new byte[8192];
+		int n;
+		while ((n = in.read(buf)) > 0)
+		{
+			out.write(buf, 0, n);
+			if (out.size() > MAX_GUIDE_BYTES)
+			{
+				throw new IOException("guide download exceeds " + (MAX_GUIDE_BYTES / (1024 * 1024)) + "MB - aborted");
+			}
+		}
+		return new String(out.toByteArray(), StandardCharsets.UTF_8);
+	}
+
+	/**
+	 * Fetches a built-in guide directly from a trusted raw URL (e.g. the
+	 * BRUHsailer JSON) and stores it as the snapshot. The URL is only ever a
+	 * hardcoded built-in source, never user-supplied. Same one-of/exactly-one
+	 * callback contract as {@link #fetch}.
+	 */
+	public void fetchUrl(String guideId, String sourceUrl, java.util.function.BiConsumer<Guide, String> onSuccess, Consumer<String> onError)
+	{
+		Request request = new Request.Builder()
+			.url(sourceUrl)
+			.header("User-Agent", "guide-overlay RuneLite plugin")
+			.build();
+
+		okHttpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.warn("Guide download failed", e);
+				safeError(onError, "Download failed: " + e.getMessage());
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				Guide guide = null;
+				String error = null;
+				String storageWarning = null;
+				try (ResponseBody body = response.body())
+				{
+					if (!response.isSuccessful() || body == null)
+					{
+						error = "Source returned HTTP " + response.code();
+					}
+					else
+					{
+						String text = readBounded(body);
+						guide = parseGuide(text);
+						if (guide.isEmpty())
+						{
+							guide = null;
+							error = "The downloaded guide has no parseable steps";
+						}
+						else
+						{
+							try
+							{
+								saveSnapshot(guideId, text);
+							}
+							catch (IOException e)
+							{
+								log.warn("Snapshot write failed", e);
+								storageWarning = "Guide imported but could NOT be saved to disk ("
+									+ e.getMessage() + ") - check free space/permissions on ~/.runelite; "
+									+ "it will need re-importing after a restart";
+							}
+						}
+					}
+				}
+				catch (Exception e)
+				{
+					log.warn("Guide parse failed", e);
+					error = "Parse failed: " + e.getMessage();
+				}
+
 				if (guide != null)
 				{
 					try

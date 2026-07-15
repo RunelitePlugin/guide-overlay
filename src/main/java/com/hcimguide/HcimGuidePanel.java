@@ -205,6 +205,25 @@ public class HcimGuidePanel extends PluginPanel
 		});
 		menu.add(addFromLink);
 
+		JMenuItem addFromFile = new JMenuItem("Add guide from file...");
+		addFromFile.addActionListener(e ->
+		{
+			String name = JOptionPane.showInputDialog(this,
+				"Name for the new guide (shown in the dropdown):",
+				"Add guide from file", JOptionPane.PLAIN_MESSAGE);
+			if (name == null || name.trim().isEmpty())
+			{
+				return;
+			}
+			JFileChooser chooser = new JFileChooser();
+			chooser.setDialogTitle("Choose the guide's wikitext file");
+			if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION)
+			{
+				plugin.addGuideFromFile(name.trim(), chooser.getSelectedFile());
+			}
+		});
+		menu.add(addFromFile);
+
 		JMenuItem fromWiki = new JMenuItem("Re-import selected guide from wiki...");
 		fromWiki.addActionListener(e ->
 		{
@@ -379,6 +398,7 @@ public class HcimGuidePanel extends PluginPanel
 		bankSections.clear();
 		overallProgress.setValue(0);
 		overallProgress.setString("no guide");
+		setTargetStatus(null, false); // the old guide's pin no longer exists
 		setStatus(status);
 		banksContainer.revalidate();
 		banksContainer.repaint();
@@ -493,6 +513,13 @@ public class HcimGuidePanel extends PluginPanel
 	void setGuide(Guide guide, String status)
 	{
 		this.guide = guide;
+		// guide switched: the old pin was cleared (selectGuideInternal pins
+		// null first), so drop the stale "Tracking: ..." label. A same-guide
+		// re-import keeps its pin, so keep the label then.
+		if (plugin.getPinnedStepKey() == null)
+		{
+			setTargetStatus(null, false);
+		}
 		setStatus(status);
 
 		rebuilding = true;
@@ -555,12 +582,18 @@ public class HcimGuidePanel extends PluginPanel
 			gbc.fill = GridBagConstraints.HORIZONTAL;
 			gbc.insets = new Insets(0, 0, 6, 0);
 
+			String activeId = plugin.getActiveBankId();
 			for (GuideBank bank : ep.getBanks())
 			{
 				BankSection section = new BankSection(bank);
 				bankSections.add(section);
 				banksContainer.add(section, gbc);
 				gbc.gridy++;
+				// only the bank you're actually working on opens (and builds) by default
+				if (bank.getId().equals(activeId))
+				{
+					section.setExpanded(true);
+				}
 			}
 		}
 
@@ -680,7 +713,10 @@ public class HcimGuidePanel extends PluginPanel
 		private final JLabel headerTitle = new JLabel();
 		private final JLabel headerCount = new JLabel();
 		private final List<StepRow> rows = new ArrayList<>();
-		private boolean expanded = true;
+		private boolean expanded;
+		/** Rows and item grids are created on FIRST expand, so an episode with
+		 * hundreds of steps loads instantly - only the ~50 headers are built. */
+		private boolean built;
 		private final JPanel headerPanel;
 
 		BankSection(GuideBank bank)
@@ -733,27 +769,34 @@ public class HcimGuidePanel extends PluginPanel
 
 			add(headerPanel, BorderLayout.NORTH);
 
-			// body
+			// body - populated lazily on first expand
 			body.setBackground(ColorScheme.DARKER_GRAY_COLOR.darker());
+			body.setVisible(false);
+			chevron.setText(COLLAPSED);
+			add(body, BorderLayout.CENTER);
+
+			updateHeader();
+		}
+
+		/** Builds the step rows the first time the section is opened. */
+		private void ensureBuilt()
+		{
+			if (built)
+			{
+				return;
+			}
+			built = true;
 			GridBagConstraints gbc = new GridBagConstraints();
 			gbc.gridx = 0;
 			gbc.gridy = 0;
 			gbc.weightx = 1;
 			gbc.fill = GridBagConstraints.HORIZONTAL;
-
 			for (GuideStep step : bank.getSteps())
 			{
 				StepRow row = new StepRow(this, step);
 				rows.add(row);
 				body.add(row, gbc);
 				gbc.gridy++;
-			}
-			add(body, BorderLayout.CENTER);
-
-			updateHeader();
-			if (config.autoCollapseCompleted() && isComplete() && !bank.getSteps().isEmpty())
-			{
-				setExpanded(false);
 			}
 		}
 
@@ -764,6 +807,10 @@ public class HcimGuidePanel extends PluginPanel
 
 		void setExpanded(boolean value)
 		{
+			if (value)
+			{
+				ensureBuilt();
+			}
 			expanded = value;
 			body.setVisible(value);
 			chevron.setText(value ? EXPANDED : COLLAPSED);
@@ -785,18 +832,35 @@ public class HcimGuidePanel extends PluginPanel
 
 		void filter(String query)
 		{
-			boolean any = false;
-			for (StepRow row : rows)
+			if (query.isEmpty())
 			{
-				boolean visible = query.isEmpty()
-					|| row.step.getText().toLowerCase(Locale.ROOT).contains(query);
-				row.setVisible(visible);
-				any |= visible;
+				setVisible(true);
+				for (StepRow row : rows)
+				{
+					row.setVisible(true);
+				}
+				return;
+			}
+			// match against the MODEL so unbuilt (collapsed) sections can be
+			// searched without constructing their rows
+			boolean any = false;
+			for (GuideStep step : bank.getSteps())
+			{
+				if (step.getText().toLowerCase(Locale.ROOT).contains(query))
+				{
+					any = true;
+					break;
+				}
 			}
 			setVisible(any);
-			if (!query.isEmpty() && any && !expanded)
+			if (!any)
 			{
-				setExpanded(true);
+				return;
+			}
+			setExpanded(true); // builds rows on demand, only for matching sections
+			for (StepRow row : rows)
+			{
+				row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
 			}
 		}
 
@@ -821,6 +885,7 @@ public class HcimGuidePanel extends PluginPanel
 				return;
 			}
 			List<GuideStep> steps = new ArrayList<>();
+			boolean found = false;
 			outer:
 			for (GuideEpisode ep : guide.getEpisodes())
 			{
@@ -828,10 +893,18 @@ public class HcimGuidePanel extends PluginPanel
 				{
 					if (b.getId().equals(bank.getId()))
 					{
+						found = true;
 						break outer;
 					}
 					steps.addAll(b.getSteps());
 				}
+			}
+			if (!found)
+			{
+				// guide was replaced while the menu was open - never complete
+				// the whole guide off a stale anchor
+				setStatus("Guide changed - nothing was marked");
+				return;
 			}
 			plugin.setCompletedBulk(steps, true);
 			rebuildBanks();
@@ -876,6 +949,25 @@ public class HcimGuidePanel extends PluginPanel
 				}
 			});
 			add(checkBox, BorderLayout.CENTER);
+
+			// catch-up on ANY step of ANY guide, even ones without bank sections
+			JPopupMenu rowMenu = new JPopupMenu();
+			JMenuItem upToHere = new JMenuItem("Complete every previous step");
+			upToHere.addActionListener(e ->
+			{
+				int choice = JOptionPane.showConfirmDialog(HcimGuidePanel.this,
+					"Mark every step BEFORE this one complete, across all chapters\n"
+						+ "and banks? (This step itself stays unchecked. Steps can\n"
+						+ "always be unticked individually afterwards.)",
+					"Complete previous steps", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+				if (choice == JOptionPane.OK_OPTION)
+				{
+					plugin.completeAllStepsBefore(step.getKey());
+					rebuildBanks();
+				}
+			});
+			rowMenu.add(upToHere);
+			checkBox.setComponentPopupMenu(rowMenu);
 
 			StepCondition cond = plugin.getCondition(step.getKey());
 			String target = plugin.getStepTarget(step.getKey());

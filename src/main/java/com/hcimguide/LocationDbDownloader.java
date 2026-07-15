@@ -36,7 +36,7 @@ public class LocationDbDownloader
 	/**
 	 * Before a Plugin Hub submission, pin this to a commit SHA instead of
 	 * "master" so the download is reproducible and review-friendly:
-	 * {@code git ls-remote https://github.com/mejrs/data_osrs 6a3ca6f19d65c5609434b51cac8dee9d4af97c02}
+	 * {@code git ls-remote https://github.com/mejrs/data_osrs master}
 	 * and replace "master" below with the returned hash.
 	 */
 	static final String SOURCE_URL =
@@ -58,7 +58,11 @@ public class LocationDbDownloader
 
 	/**
 	 * Exactly one of onSuccess (number of NEW locations added) / onError is
-	 * invoked, on an OkHttp worker thread.
+	 * invoked, on an OkHttp worker thread. Parsing runs on that worker thread
+	 * DELIBERATELY: the reader streams straight off the socket (bounded by
+	 * MAX_BODY_BYTES), so the multi-MB file is never buffered whole, and the
+	 * store merge is thread-safe (putIfAbsent on a concurrent map). Nothing
+	 * here touches the client thread or the EDT.
 	 */
 	public void download(Consumer<Integer> onSuccess, Consumer<String> onError)
 	{

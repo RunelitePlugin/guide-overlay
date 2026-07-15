@@ -133,6 +133,31 @@ public class WikitextParser
 				continue;
 			}
 
+			// the live guide marks banks as BOLD STANDALONE LINES ('''Bank 40'''),
+			// not wiki headings - treat a short non-bullet line as a section
+			// start only when it is EXPLICITLY BOLD, or when its entire text is
+			// just the bank label (optionally "Bank 40 - somewhere"). Plain
+			// prose like "Bank 9 duplicates Bank 8 if skipped" must stay a
+			// paragraph, or later steps would silently change ids/keys.
+			if (episode != null && !BULLET.matcher(line).matches() && line.length() < 60)
+			{
+				boolean explicitlyBold = line.startsWith("'''") && line.endsWith("'''");
+				String cleaned = cleanInline(line);
+				boolean anchoredLabel = cleaned.matches("(?i)Bank\\s+[0-9]+[A-Za-z]?\\s*(?:[-:–—].*)?");
+				if ((explicitlyBold || anchoredLabel)
+					&& BANK_TITLE.matcher(cleaned).matches() && cleaned.length() < 40)
+				{
+					Matcher bk = BANK_TITLE.matcher(cleaned);
+					//noinspection ResultOfMethodCallIgnored
+					bk.matches();
+					bank = new GuideBank("E" + episode.getNumber() + ".B" + bk.group(1).toUpperCase(),
+						cleaned, episode.getNumber());
+					episode.getBanks().add(bank);
+					occurrence.clear();
+					continue;
+				}
+			}
+
 			Matcher b = BULLET.matcher(line);
 			if (b.matches() && episode != null)
 			{
@@ -223,6 +248,23 @@ public class WikitextParser
 		out = out.replace("<", "").replace(">", "");
 		out = out.replaceAll("\\s+", " ").trim();
 		return out;
+	}
+
+	/**
+	 * HTML-safety for display strings from ANY source (used by the JSON guide
+	 * parser too): strip tags and angle brackets so Swing can never render a
+	 * label/tooltip as live HTML, and collapse whitespace. Does not touch wiki
+	 * markup - JSON text has none.
+	 */
+	static String sanitizeDisplay(String s)
+	{
+		if (s == null)
+		{
+			return "";
+		}
+		String out = HTML_TAG.matcher(s).replaceAll("");
+		out = out.replace("<", "").replace(">", "");
+		return out.replaceAll("\\s+", " ").trim();
 	}
 
 	private static String replaceTemplates(String s)

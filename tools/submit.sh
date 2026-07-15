@@ -56,6 +56,19 @@ else
 	echo "   already pinned - skipping"
 fi
 
+echo "-> Pinning the BRUHsailer guide source to a commit hash (reproducible builds)..."
+BRUH_SHA=$(git ls-remote https://github.com/umkyzn/BRUHsailer HEAD | cut -f1)
+[ -n "$BRUH_SHA" ] || { echo "ERROR: could not resolve umkyzn/BRUHsailer"; exit 1; }
+GR=src/main/java/com/hcimguide/GuideRegistry.java
+if grep -q "BRUHsailer/main/" "$GR"; then
+	sed -i.bak "s|BRUHsailer/main/|BRUHsailer/$BRUH_SHA/|" "$GR" && rm -f "$GR.bak"
+	git add "$GR"
+	git commit -m "Pin BRUHsailer guide source to commit $BRUH_SHA"
+	echo "   pinned to $BRUH_SHA"
+else
+	echo "   already pinned - skipping"
+fi
+
 echo "-> Creating repository $GH_USER/guide-overlay (public)..."
 api POST /user/repos '{"name":"guide-overlay","description":"RuneLite plugin: wiki guides as an in-client checklist with auto-completion and target highlighting","has_wiki":false}' >/dev/null || true
 
@@ -82,7 +95,7 @@ api PUT "/repos/$GH_USER/plugin-hub/contents/plugins/guide-overlay" \
 	"{\"message\":\"Add Guide Overlay\",\"content\":\"$MANIFEST\",\"branch\":\"$HUB_BRANCH\"}" >/dev/null
 
 echo "-> Opening the pull request..."
-PR_BODY="Adds Guide Overlay: wiki guides (B0aty HCIM Guide V3 built in, any OSRS-wiki guide addable by link) as an in-client checklist with verifiable-step auto-completion, NPC/ground-item highlighting, a far-target compass, and per-character progress.\n\nNetwork disclosure: two HTTPS endpoints, both strictly one-time and behind explicit user confirmation dialogs - the OSRS wiki API (guide text import) and a commit-pinned mejrs/data_osrs file (optional NPC location dataset, the data behind the wiki's world map). Zero automatic network traffic; everything is cached locally. No automation of any kind - display and tracking only."
+PR_BODY="Adds Guide Overlay: wiki guides (B0aty HCIM Guide V3 and the BRUHsailer Ironman Guide built in, any OSRS-wiki guide addable by link) as an in-client checklist with verifiable-step auto-completion, NPC/ground-item highlighting, a far-target compass, and per-character progress.\n\nNetwork disclosure: three HTTPS endpoints, all strictly one-time and behind explicit user confirmation dialogs - the OSRS wiki API (guide text import), a commit-pinned umkyzn/BRUHsailer file (the built-in BRUHsailer guide's JSON), and a commit-pinned mejrs/data_osrs file (optional NPC location dataset, the data behind the wiki's world map). Zero automatic network traffic; everything is cached locally. No automation of any kind - display and tracking only."
 PR_URL=$(api POST /repos/runelite/plugin-hub/pulls \
 	"{\"title\":\"Add Guide Overlay\",\"head\":\"$GH_USER:$HUB_BRANCH\",\"base\":\"$HUB_BRANCH\",\"body\":\"$PR_BODY\"}" \
 	| sed -n 's/.*"html_url": *"\(https:[^"]*\/pull\/[0-9]*\)".*/\1/p' | head -1)

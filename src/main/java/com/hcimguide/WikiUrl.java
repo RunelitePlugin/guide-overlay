@@ -54,7 +54,10 @@ public final class WikiUrl
 			// UTF-8 is always present; fall through with the raw value
 		}
 		s = s.trim().replace(' ', '_');
-		if (s.isEmpty() || s.length() > 255)
+		// MediaWiki forbids these in titles; for us they're also the Swing-HTML
+		// injection characters - reject outright
+		if (s.isEmpty() || s.length() > 255 || s.contains("<") || s.contains(">")
+			|| s.contains("[") || s.contains("]") || s.contains("{") || s.contains("}") || s.contains("|"))
 		{
 			throw new IllegalArgumentException("Not a valid wiki page title");
 		}

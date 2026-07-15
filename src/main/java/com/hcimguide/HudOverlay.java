@@ -21,6 +21,7 @@ public class HudOverlay extends OverlayPanel
 	private static final int MAX_LINE_CHARS = 38;
 	private static final Color NEXT_STEP_COLOR = Color.WHITE;
 	private static final Color LATER_STEP_COLOR = new Color(180, 180, 180);
+	private static final Color ROUTE_COLOR = new Color(120, 220, 160);
 
 	private final HcimGuidePlugin plugin;
 	private final HcimGuideConfig config;
@@ -72,6 +73,16 @@ public class HudOverlay extends OverlayPanel
 			{
 				break;
 			}
+		}
+
+		// fastest-route hint (config-gated in the plugin; null = walk/nothing)
+		String route = plugin.getRouteSuggestion();
+		if (route != null && config.routeSuggestions())
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("★ " + truncate(route))
+				.leftColor(ROUTE_COLOR)
+				.build());
 		}
 
 		return super.render(graphics);

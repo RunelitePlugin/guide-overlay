@@ -80,6 +80,41 @@ public class WikitextParserTest
 	}
 
 	@Test
+	public void proseStartingWithBankIsNotASection()
+	{
+		// "Bank 9 duplicates Bank 8..." is a paragraph, not a section marker -
+		// treating it as one would silently re-key later steps
+		Guide g = new WikitextParser().parse("== Episode 1 - x ==\n"
+			+ "'''Bank 8'''\n* step a\n"
+			+ "Bank 9 duplicates Bank 8 if you skipped it\n* step b\n"
+			+ "'''Bank 9'''\n* step c\n");
+		assertEquals(2, g.getEpisodes().get(0).getBanks().size());
+		assertEquals(2, g.getEpisodes().get(0).getBanks().get(0).getSteps().size());
+
+		// but a bare anchored label (with optional "- location" suffix) is one
+		Guide h = new WikitextParser().parse("== Episode 1 - x ==\nBank 12 - Falador\n* step\n");
+		assertEquals("E1.B12", h.getEpisodes().get(0).getBanks().get(0).getId());
+	}
+
+	@Test
+	public void recognizesBoldLineBankMarkers()
+	{
+		// the live guide marks banks as bold standalone lines, NOT headings
+		String wiki = "== Episode 2 - Banks 24 through 75: ==\n"
+			+ "'''Bank 40'''\n"
+			+ "* Withdraw: Teleport Runes, Coins, Molten Glass (11 Inventory Slots)\n"
+			+ "* Do a thing\n"
+			+ "'''Bank 41'''\n"
+			+ "* Another step\n";
+		Guide g = new WikitextParser().parse(wiki);
+		assertEquals(1, g.getEpisodes().size());
+		assertEquals(2, g.getEpisodes().get(0).getBanks().size());
+		assertEquals("E2.B40", g.getEpisodes().get(0).getBanks().get(0).getId());
+		assertEquals(2, g.getEpisodes().get(0).getBanks().get(0).getSteps().size());
+		assertEquals("E2.B41", g.getEpisodes().get(0).getBanks().get(1).getId());
+	}
+
+	@Test
 	public void neutralizesEntityEscapedMarkup()
 	{
 		// entity-escaped HTML must never survive into display strings: Swing

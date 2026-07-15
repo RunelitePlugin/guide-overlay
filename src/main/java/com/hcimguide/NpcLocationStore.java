@@ -128,7 +128,10 @@ public class NpcLocationStore
 		for (Map.Entry<String, int[]> e : raw.entrySet())
 		{
 			int[] v = e.getValue();
-			if (e.getKey() != null && v != null && v.length == 3)
+			// same range check as importJson: a corrupted on-disk store must
+			// not feed nonsense coordinates to the compass/world map
+			if (e.getKey() != null && v != null && v.length == 3
+				&& v[0] >= 0 && v[0] < 20000 && v[1] >= 0 && v[1] < 20000 && v[2] >= 0 && v[2] <= 3)
 			{
 				locations.putIfAbsent(Names.normalize(e.getKey()), v);
 			}

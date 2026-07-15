@@ -49,38 +49,66 @@ public interface HcimGuideConfig extends Config
 
 	@ConfigSection(
 		name = "Target tracking",
-		description = "Pinned-step target: hint arrow, far-target compass, world map marker",
+		description = "Pinned-step target: hint arrow, target highlight, far-target compass",
 		position = 0
 	)
 	String targetSection = "target";
 
 	@ConfigSection(
+		name = "World map",
+		description = "World map markers for the pinned target and the next step",
+		position = 1
+	)
+	String mapSection = "map";
+
+	@ConfigSection(
+		name = "Bank tags",
+		description = "Tag and open the current bank's items via the built-in Bank Tags plugin",
+		position = 2
+	)
+	String bankSection = "bank";
+
+	@ConfigSection(
+		name = "On-screen HUD",
+		description = "The movable on-screen step overlay. Alt+drag to reposition; every option below adjusts it.",
+		position = 3
+	)
+	String hudSection = "hud";
+
+	@ConfigSection(
 		name = "Step highlighting",
 		description = "Outlines and tile highlights for the active bank's NPCs and items",
-		position = 1
+		position = 4
 	)
 	String highlightSection = "highlight";
 
 	@ConfigSection(
 		name = "Auto-completion",
 		description = "Automatic check-off of verifiable steps",
-		position = 2
+		position = 5
 	)
 	String autoSection = "auto";
 
 	@ConfigSection(
-		name = "Panel & overlays",
-		description = "Side panel and on-screen overlay appearance. All overlays can be MOVED by holding Alt and dragging.",
-		position = 3
+		name = "Side panel",
+		description = "Side-panel text and layout appearance",
+		position = 6
 	)
 	String uiSection = "ui";
 
 	@ConfigSection(
 		name = "Progress",
 		description = "How checklist progress is stored",
-		position = 4
+		position = 7
 	)
 	String progressSection = "progress";
+
+	@ConfigSection(
+		name = "Routing & teleports",
+		description = "Fastest-way-there suggestions using teleports you own (bank checked), plus optional path drawing via the Shortest Path plugin",
+		position = 8
+	)
+	String routeSection = "route";
 
 	// ------------------------------------------------------------------ target tracking
 
@@ -158,14 +186,66 @@ public interface HcimGuideConfig extends Config
 		return true;
 	}
 
+	// ------------------------------------------------------------------ world map
+
 	@ConfigItem(
 		keyName = "showWorldMapMarker",
-		name = "World map marker",
+		name = "Pinned target marker",
 		description = "Mark the pinned target's last known location on the world map",
-		position = 7,
-		section = targetSection
+		position = 1,
+		section = mapSection
 	)
 	default boolean showWorldMapMarker()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "showNextStepOnMap",
+		name = "Next step marker",
+		description = "When nothing is pinned, automatically mark the next unchecked step's target on the world map, so opening the map always shows where to go",
+		position = 2,
+		section = mapSection
+	)
+	default boolean showNextStepOnMap()
+	{
+		return true;
+	}
+
+	// ------------------------------------------------------------------ bank tags
+
+	@ConfigItem(
+		keyName = "bankTagIntegration",
+		name = "Tag current bank items",
+		description = "Keeps the CURRENT bank section's remaining withdraw items under a 'guide-overlay' bank tag and opens that tab when you open the bank - you still click and withdraw items yourself. Requires the built-in Bank Tags plugin. Turning this off removes the tag from every item.",
+		position = 1,
+		section = bankSection
+	)
+	default boolean bankTagIntegration()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "bankTagUseLayout",
+		name = "Apply bank tag layout",
+		description = "Let the built-in Bank Tag Layouts feature arrange the guide-overlay tab (your saved layout, if any). Turn off to show items in a plain grid.",
+		position = 2,
+		section = bankSection
+	)
+	default boolean bankTagUseLayout()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "bankTagAutoOpen",
+		name = "Open tab when bank opens",
+		description = "Automatically switch to the guide-overlay tag tab each time you open the bank. Turn off to keep the tag but not change your tab.",
+		position = 3,
+		section = bankSection
+	)
+	default boolean bankTagAutoOpen()
 	{
 		return true;
 	}
@@ -258,14 +338,14 @@ public interface HcimGuideConfig extends Config
 		return false;
 	}
 
-	// ------------------------------------------------------------------ panel & overlays
+	// ------------------------------------------------------------------ on-screen HUD
 
 	@ConfigItem(
 		keyName = "showHudOverlay",
-		name = "On-screen step overlay",
+		name = "Show HUD overlay",
 		description = "Show a small movable overlay with your active bank and its next unchecked steps. Movable with Alt+drag.",
 		position = 1,
-		section = uiSection
+		section = hudSection
 	)
 	default boolean showHudOverlay()
 	{
@@ -275,10 +355,10 @@ public interface HcimGuideConfig extends Config
 	@Range(min = 1, max = 5)
 	@ConfigItem(
 		keyName = "hudMaxSteps",
-		name = "Overlay step count",
+		name = "Step count",
 		description = "How many upcoming steps the on-screen overlay lists",
 		position = 2,
-		section = uiSection
+		section = hudSection
 	)
 	default int hudMaxSteps()
 	{
@@ -288,10 +368,10 @@ public interface HcimGuideConfig extends Config
 	@Range(min = 160, max = 320)
 	@ConfigItem(
 		keyName = "hudWidth",
-		name = "Overlay width",
+		name = "Width",
 		description = "Width of the on-screen step overlay, in pixels",
 		position = 3,
-		section = uiSection
+		section = hudSection
 	)
 	default int hudWidth()
 	{
@@ -303,18 +383,20 @@ public interface HcimGuideConfig extends Config
 		name = "Overlay font",
 		description = "Font used by this plugin's overlays (step HUD, compass distance, NPC name labels). 'Client default' follows RuneLite's own overlay font setting.",
 		position = 4,
-		section = uiSection
+		section = hudSection
 	)
 	default FontStyle overlayFontStyle()
 	{
 		return FontStyle.CLIENT_DEFAULT;
 	}
 
+	// ------------------------------------------------------------------ side panel
+
 	@ConfigItem(
 		keyName = "panelTextSize",
 		name = "Panel text size",
 		description = "Text size of steps in the side panel",
-		position = 5,
+		position = 1,
 		section = uiSection
 	)
 	default PanelTextSize panelTextSize()
@@ -326,7 +408,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "showItemGrids",
 		name = "Show item icons",
 		description = "Show an inventory-style grid of item icons under Withdraw/Collect steps, with green borders when the item is in your inventory",
-		position = 6,
+		position = 2,
 		section = uiSection
 	)
 	default boolean showItemGrids()
@@ -338,7 +420,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "dimCompletedSteps",
 		name = "Dim completed steps",
 		description = "Gray out and strike through steps you have checked off",
-		position = 7,
+		position = 3,
 		section = uiSection
 	)
 	default boolean dimCompletedSteps()
@@ -350,12 +432,123 @@ public interface HcimGuideConfig extends Config
 		keyName = "autoCollapseCompleted",
 		name = "Auto-collapse finished banks",
 		description = "Collapse a bank section automatically once every step in it is checked",
-		position = 8,
+		position = 4,
 		section = uiSection
 	)
 	default boolean autoCollapseCompleted()
 	{
 		return true;
+	}
+
+	@Range(min = 0, max = 3)
+	@ConfigItem(
+		keyName = "preloadNextBanks",
+		name = "Preload upcoming banks",
+		description = "How many upcoming bank sections to warm up in the background (item icons resolved ahead of time) beyond the current one. 0 = load everything on demand; higher preloads more but does more background work.",
+		position = 5,
+		section = uiSection
+	)
+	default int preloadNextBanks()
+	{
+		return 1;
+	}
+
+	// ------------------------------------------------------------------ routing & teleports
+
+	@ConfigItem(
+		keyName = "routeSuggestions",
+		name = "Suggest fastest route",
+		description = "Show the fastest teleport toward the current objective on the HUD - only teleports whose runes/jewelry you actually have (carried, or in the bank). Suggestion only; you always click the teleport yourself.",
+		position = 1,
+		section = routeSection
+	)
+	default boolean routeSuggestions()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "routeUseShortestPath",
+		name = "Draw path (Shortest Path plugin)",
+		description = "Hand the current objective to the community 'Shortest Path' plugin (if installed from the Plugin Hub) so it draws the actual tile path with your transport settings. Does nothing when that plugin is absent.",
+		position = 2,
+		section = routeSection
+	)
+	default boolean routeUseShortestPath()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "routeIncludeBanked",
+		name = "Count banked items",
+		description = "Also suggest teleports whose runes/jewelry are in your bank (marked 'in bank'). Bank contents refresh whenever you open the bank.",
+		position = 3,
+		section = routeSection
+	)
+	default boolean routeIncludeBanked()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "routeSpells",
+		name = "Spellbook teleports",
+		description = "Consider standard spellbook teleports (rune costs bank-checked)",
+		position = 4,
+		section = routeSection
+	)
+	default boolean routeSpells()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "routeTabs",
+		name = "Teleport tablets",
+		description = "Consider teleport tablets you own",
+		position = 5,
+		section = routeSection
+	)
+	default boolean routeTabs()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "routeJewelry",
+		name = "Jewelry teleports",
+		description = "Consider charged jewelry (glory, dueling, games, passage, skills, combat)",
+		position = 6,
+		section = routeSection
+	)
+	default boolean routeJewelry()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "routeOther",
+		name = "Other teleports",
+		description = "Consider other teleport items (Ectophial, Chronicle, ...)",
+		position = 7,
+		section = routeSection
+	)
+	default boolean routeOther()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "routeExcluded",
+		name = "Excluded teleports",
+		description = "Comma-separated names to never suggest, matched loosely - e.g. 'Karamja, Castle Wars, Home Teleport'",
+		position = 8,
+		section = routeSection
+	)
+	default String routeExcluded()
+	{
+		return "";
 	}
 
 	// ------------------------------------------------------------------ progress

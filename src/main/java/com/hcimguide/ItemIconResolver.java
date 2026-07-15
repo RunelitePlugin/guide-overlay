@@ -50,6 +50,54 @@ public class ItemIconResolver
 		KNOWN_IDS.put("ghostspeakamulet", 552);
 		KNOWN_IDS.put("chefshat", 1949);
 		KNOWN_IDS.put("piedish", 2313);
+		// elemental/common runes (guide says "Air Runes"; plural handled by lookup)
+		KNOWN_IDS.put("airrune", 556);
+		KNOWN_IDS.put("waterrune", 555);
+		KNOWN_IDS.put("earthrune", 557);
+		KNOWN_IDS.put("firerune", 554);
+		KNOWN_IDS.put("mindrune", 558);
+		KNOWN_IDS.put("bodyrune", 559);
+		KNOWN_IDS.put("lawrune", 563);
+		KNOWN_IDS.put("naturerune", 561);
+		KNOWN_IDS.put("chaosrune", 562);
+		KNOWN_IDS.put("cosmicrune", 564);
+		// common early/mid-game tools and materials the price search misses
+		KNOWN_IDS.put("plank", 960);
+		KNOWN_IDS.put("moltenglass", 1775);
+		KNOWN_IDS.put("coal", 453);
+		KNOWN_IDS.put("ironore", 440);
+		KNOWN_IDS.put("silverore", 442);
+		KNOWN_IDS.put("bronzebar", 2349);
+		KNOWN_IDS.put("ironbar", 2351);
+		KNOWN_IDS.put("steelbar", 2353);
+		KNOWN_IDS.put("bronzepickaxe", 1265);
+		KNOWN_IDS.put("steelpickaxe", 1269);
+		KNOWN_IDS.put("bronzeaxe", 1351);
+		KNOWN_IDS.put("adamantaxe", 1357);
+		KNOWN_IDS.put("hammer", 2347);
+		KNOWN_IDS.put("needle", 1733);
+		KNOWN_IDS.put("thread", 1734);
+		KNOWN_IDS.put("chisel", 1755);
+		KNOWN_IDS.put("shears", 1735);
+		KNOWN_IDS.put("rope", 954);
+		KNOWN_IDS.put("pestlemortar", 233);
+		KNOWN_IDS.put("pestleandmortar", 233);
+		KNOWN_IDS.put("vialofwater", 227);
+		KNOWN_IDS.put("swamptar", 1939);
+		KNOWN_IDS.put("bucketofwater", 1929);
+		KNOWN_IDS.put("bucketofmilk", 1927);
+		KNOWN_IDS.put("jugofwater", 1937);
+		KNOWN_IDS.put("potofflour", 1933);
+		KNOWN_IDS.put("egg", 1944);
+		KNOWN_IDS.put("batbones", 530);
+		KNOWN_IDS.put("ballofwool", 1759);
+		KNOWN_IDS.put("guam", 249);
+		KNOWN_IDS.put("guamleaf", 249);
+		KNOWN_IDS.put("dramenstaff", 772);
+		KNOWN_IDS.put("wateringcan", 5331);
+		KNOWN_IDS.put("seeddibber", 5343);
+		KNOWN_IDS.put("candle", 36);
+		KNOWN_IDS.put("bootsoflightness", 88);
 	}
 
 	private final ItemManager itemManager;
