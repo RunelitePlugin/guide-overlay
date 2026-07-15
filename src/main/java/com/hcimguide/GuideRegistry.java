@@ -43,7 +43,7 @@ public class GuideRegistry
 		// download is reproducible (tools/submit.sh does this automatically):
 		//   git ls-remote https://github.com/umkyzn/BRUHsailer HEAD
 		BUILTINS.add(new Entry(BRUHSAILER_ID, "BRUHsailer Ironman Guide", null,
-			"https://raw.githubusercontent.com/umkyzn/BRUHsailer/main/data/guide_data.json"));
+			"https://raw.githubusercontent.com/umkyzn/BRUHsailer/ec20b7e843da2cca69bf2343734dd2c25fef913f/data/guide_data.json"));
 	}
 
 	/** One selectable guide. wikiPage/sourceUrl are null for file-only guides. */
