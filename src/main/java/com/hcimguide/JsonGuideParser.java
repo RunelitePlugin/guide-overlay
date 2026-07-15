@@ -43,7 +43,9 @@ public class JsonGuideParser
 		}
 		try
 		{
-			JsonElement root = JsonParser.parseString(t);
+			// instance API, not JsonParser.parseString: the client bundles an
+			// older gson where the static method does not exist
+			JsonElement root = new JsonParser().parse(t);
 			return root.isJsonObject() && root.getAsJsonObject().has("chapters");
 		}
 		catch (Exception e)
@@ -62,7 +64,7 @@ public class JsonGuideParser
 		JsonObject root;
 		try
 		{
-			JsonElement parsed = JsonParser.parseString(text);
+			JsonElement parsed = new JsonParser().parse(text);
 			if (!parsed.isJsonObject())
 			{
 				return guide;
