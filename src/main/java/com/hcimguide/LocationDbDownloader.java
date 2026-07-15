@@ -40,7 +40,7 @@ public class LocationDbDownloader
 	 * and replace "master" below with the returned hash.
 	 */
 	static final String SOURCE_URL =
-		"https://raw.githubusercontent.com/mejrs/data_osrs/master/NPCList_OSRS.json";
+		"https://raw.githubusercontent.com/mejrs/data_osrs/6a3ca6f19d65c5609434b51cac8dee9d4af97c02/NPCList_OSRS.json";
 
 	/** Refuse absurd responses before parsing. */
 	private static final long MAX_BODY_BYTES = 64L * 1024 * 1024;
