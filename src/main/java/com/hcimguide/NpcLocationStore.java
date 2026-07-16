@@ -3,11 +3,15 @@ package com.hcimguide;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,6 +47,8 @@ public class NpcLocationStore
 
 	/** Import size guard: covers full-game spawn dumps with generous headroom. */
 	private static final int MAX_IMPORT_ENTRIES = 50_000;
+	private static final int MAX_IMPORT_CHARS = 16 * 1024 * 1024;
+	private static final long MAX_STORE_BYTES = 32L * 1024 * 1024;
 
 	private final Gson gson;
 	/** normalized NPC name -> {x, y, plane}. */
@@ -81,7 +87,7 @@ public class NpcLocationStore
 		{
 			try
 			{
-				String json = new String(Files.readAllBytes(STORE_FILE.toPath()), StandardCharsets.UTF_8);
+				String json = readStoreText();
 				mergeIfAbsent(gson.fromJson(json, MAP_TYPE));
 			}
 			catch (Exception e)
@@ -133,7 +139,11 @@ public class NpcLocationStore
 			if (e.getKey() != null && v != null && v.length == 3
 				&& v[0] >= 0 && v[0] < 20000 && v[1] >= 0 && v[1] < 20000 && v[2] >= 0 && v[2] <= 3)
 			{
-				locations.putIfAbsent(Names.normalize(e.getKey()), v);
+				String key = Names.normalize(e.getKey());
+				if (!key.isEmpty())
+				{
+					locations.putIfAbsent(key, v);
+				}
 			}
 		}
 	}
@@ -214,6 +224,18 @@ public class NpcLocationStore
 	 */
 	public int importJson(String json)
 	{
+		if (json == null)
+		{
+			throw new IllegalArgumentException("No locations found in the text");
+		}
+		if (json.length() > MAX_IMPORT_CHARS)
+		{
+			throw new IllegalArgumentException("Location JSON is too large (over 16MB)");
+		}
+		if (json.trim().isEmpty())
+		{
+			throw new IllegalArgumentException("No locations found in the text");
+		}
 		Map<String, int[]> raw;
 		try
 		{
@@ -298,13 +320,56 @@ public class NpcLocationStore
 		{
 			//noinspection ResultOfMethodCallIgnored
 			STORE_FILE.getParentFile().mkdirs();
-			Files.write(STORE_FILE.toPath(),
+			atomicWrite(STORE_FILE,
 				gson.toJson(new HashMap<>(locations)).getBytes(StandardCharsets.UTF_8));
 		}
 		catch (Exception e)
 		{
 			dirty = true;
 			log.warn("Could not save npc location store", e);
+		}
+	}
+
+	private static void atomicWrite(File target, byte[] bytes) throws IOException
+	{
+		Path directory = target.getParentFile().toPath();
+		Files.createDirectories(directory);
+		Path temp = Files.createTempFile(directory, target.getName(), ".tmp");
+		try
+		{
+			Files.write(temp, bytes);
+			try
+			{
+				Files.move(temp, target.toPath(), StandardCopyOption.ATOMIC_MOVE,
+					StandardCopyOption.REPLACE_EXISTING);
+			}
+			catch (AtomicMoveNotSupportedException e)
+			{
+				Files.move(temp, target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+			}
+		}
+		finally
+		{
+			Files.deleteIfExists(temp);
+		}
+	}
+
+	private static String readStoreText() throws IOException
+	{
+		try (InputStream in = Files.newInputStream(STORE_FILE.toPath()))
+		{
+			java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+			byte[] buffer = new byte[8192];
+			int n;
+			while ((n = in.read(buffer)) > 0)
+			{
+				out.write(buffer, 0, n);
+				if (out.size() > MAX_STORE_BYTES)
+				{
+					throw new IOException("location store exceeds 32MB");
+				}
+			}
+			return new String(out.toByteArray(), StandardCharsets.UTF_8);
 		}
 	}
 }

@@ -23,8 +23,14 @@ import net.runelite.client.util.AsyncBufferedImage;
  */
 public class ItemGridPanel extends JPanel
 {
-	private static final int COLUMNS = 4;
-	private static final int SLOT = 38;
+	/**
+	 * Sized to FIT the RuneLite side panel: usable row width is roughly
+	 * 200px (225px panel minus borders, scrollbar, and step indentation),
+	 * so 5 columns x 32px slots + gaps + border = ~172px always fits.
+	 * Icons wider than a slot are scaled down on load.
+	 */
+	private static final int COLUMNS = 5;
+	private static final int SLOT = 32;
 	private static final Color PRESENT = new Color(0, 200, 120);
 	private static final Color MISSING = new Color(190, 60, 60);
 
@@ -52,9 +58,11 @@ public class ItemGridPanel extends JPanel
 	ItemGridPanel(List<ItemReq> items)
 	{
 		int rows = (items.size() + COLUMNS - 1) / COLUMNS;
-		setLayout(new GridLayout(rows, COLUMNS, 2, 2));
+		setLayout(new GridLayout(rows, COLUMNS, 1, 1));
 		setBackground(ColorScheme.DARKER_GRAY_COLOR.darker());
-		setBorder(BorderFactory.createEmptyBorder(2, 2, 4, 2));
+		setBorder(BorderFactory.createEmptyBorder(2, 1, 4, 1));
+		// the step row wraps this panel in a left-aligned FlowLayout, which
+		// respects preferred size - so the grid keeps its natural width
 
 		for (ItemReq req : items)
 		{
@@ -110,7 +118,17 @@ public class ItemGridPanel extends JPanel
 					return;
 				}
 				slot.label.setText(null);
-				slot.label.setIcon(new ImageIcon(img));
+				// item sprites are 36x32; scale down so nothing clips in a
+				// narrower slot (aspect ratio preserved)
+				if (img.getWidth() > SLOT - 2)
+				{
+					slot.label.setIcon(new ImageIcon(img.getScaledInstance(
+						SLOT - 2, -1, java.awt.Image.SCALE_SMOOTH)));
+				}
+				else
+				{
+					slot.label.setIcon(new ImageIcon(img));
+				}
 				slot.label.revalidate();
 				slot.label.repaint();
 			};

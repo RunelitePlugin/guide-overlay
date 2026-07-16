@@ -46,9 +46,10 @@ public class PathfinderIntegration
 
 	/**
 	 * Ignore target drift below this many tiles: a pinned NPC wandering its
-	 * few-tile patrol must not make the pathfinder replan every cycle.
+	 * patrol must not make the pathfinder replan every tick. Kept small so
+	 * the drawn path still tracks a moving target near-realtime.
 	 */
-	private static final int RESEND_DEADBAND_TILES = 5;
+	private static final int RESEND_DEADBAND_TILES = 2;
 
 	/** Send a path target (client thread). Null clears. */
 	public void setTarget(WorldPoint target)

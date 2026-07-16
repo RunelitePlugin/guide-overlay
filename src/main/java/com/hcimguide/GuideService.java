@@ -5,9 +5,12 @@ import com.google.gson.JsonObject;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import net.runelite.client.RuneLite;
@@ -39,6 +42,9 @@ public class GuideService
 	private static final File GUIDES_DIR = new File(DATA_DIR, "guides");
 	/** Pre-multi-guide store location, migrated to the built-in guide's slot. */
 	private static final File LEGACY_FILE = new File(DATA_DIR, "guide-wikitext.txt");
+	private static final Pattern GUIDE_ID = Pattern.compile("[a-z0-9-]{1,64}");
+	/** Body/on-disk cap for guide content (real guides are well under 1MB). */
+	private static final long MAX_GUIDE_BYTES = 16L * 1024 * 1024;
 
 	private final OkHttpClient okHttpClient;
 	private final Gson gson;
@@ -68,12 +74,21 @@ public class GuideService
 
 	private static File snapshotFile(String guideId)
 	{
-		return new File(GUIDES_DIR, guideId + ".txt");
+		return new File(GUIDES_DIR, requireGuideId(guideId) + ".txt");
 	}
 
 	private static File backupFile(String guideId)
 	{
-		return new File(GUIDES_DIR, guideId + ".bak");
+		return new File(GUIDES_DIR, requireGuideId(guideId) + ".bak");
+	}
+
+	private static String requireGuideId(String guideId)
+	{
+		if (guideId == null || !GUIDE_ID.matcher(guideId).matches())
+		{
+			throw new IllegalArgumentException("Invalid guide id");
+		}
+		return guideId;
 	}
 
 	/** One-time move of the pre-multi-guide snapshot into the built-in guide's slot. */
@@ -108,7 +123,7 @@ public class GuideService
 			File f = snapshotFile(guideId);
 			if (f.isFile())
 			{
-				String wikitext = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+				String wikitext = readStoredText(f);
 				Guide g = parseGuide(wikitext);
 				if (!g.isEmpty())
 				{
@@ -131,6 +146,7 @@ public class GuideService
 	 */
 	public Guide importText(String guideId, String wikitext) throws IOException
 	{
+		validateGuideText(wikitext);
 		Guide guide = parseGuide(wikitext);
 		if (guide.isEmpty())
 		{
@@ -157,19 +173,19 @@ public class GuideService
 			{
 				return null;
 			}
-			String backupText = new String(Files.readAllBytes(backup.toPath()), StandardCharsets.UTF_8);
+			String backupText = readStoredText(backup);
 			Guide guide = parseGuide(backupText);
 			if (guide.isEmpty())
 			{
 				return null;
 			}
 			String currentText = snapshot.isFile()
-				? new String(Files.readAllBytes(snapshot.toPath()), StandardCharsets.UTF_8)
+				? readStoredText(snapshot)
 				: null;
-			Files.write(snapshot.toPath(), backupText.getBytes(StandardCharsets.UTF_8));
+			atomicWrite(snapshot, backupText.getBytes(StandardCharsets.UTF_8));
 			if (currentText != null)
 			{
-				Files.write(backup.toPath(), currentText.getBytes(StandardCharsets.UTF_8));
+				atomicWrite(backup, currentText.getBytes(StandardCharsets.UTF_8));
 			}
 			return guide;
 		}
@@ -287,9 +303,6 @@ public class GuideService
 		});
 	}
 
-	/** Body cap for guide downloads (a real guide is well under 1MB). */
-	private static final long MAX_GUIDE_BYTES = 16L * 1024 * 1024;
-
 	/**
 	 * Reads a response body while COUNTING BYTES, aborting past the cap.
 	 * Content-Length can't be trusted for this: transparent gzip decoding
@@ -321,8 +334,22 @@ public class GuideService
 	 */
 	public void fetchUrl(String guideId, String sourceUrl, java.util.function.BiConsumer<Guide, String> onSuccess, Consumer<String> onError)
 	{
+		HttpUrl parsedUrl;
+		try
+		{
+			parsedUrl = HttpUrl.get(sourceUrl);
+			if (!"https".equals(parsedUrl.scheme()) || !"raw.githubusercontent.com".equals(parsedUrl.host()))
+			{
+				throw new IllegalArgumentException("unsupported built-in guide source");
+			}
+		}
+		catch (Exception e)
+		{
+			safeError(onError, "Built-in guide source is invalid");
+			return;
+		}
 		Request request = new Request.Builder()
-			.url(sourceUrl)
+			.url(parsedUrl)
 			.header("User-Agent", "guide-overlay RuneLite plugin")
 			.build();
 
@@ -411,14 +438,89 @@ public class GuideService
 
 	private static void saveSnapshot(String guideId, String wikitext) throws IOException
 	{
-		//noinspection ResultOfMethodCallIgnored
-		GUIDES_DIR.mkdirs();
+		validateGuideText(wikitext);
+		Files.createDirectories(GUIDES_DIR.toPath());
 		File snapshot = snapshotFile(guideId);
 		// keep the previous snapshot so a bad import can be undone
 		if (snapshot.isFile())
 		{
-			Files.copy(snapshot.toPath(), backupFile(guideId).toPath(), StandardCopyOption.REPLACE_EXISTING);
+			copyAtomically(snapshot, backupFile(guideId));
 		}
-		Files.write(snapshot.toPath(), wikitext.getBytes(StandardCharsets.UTF_8));
+		atomicWrite(snapshot, wikitext.getBytes(StandardCharsets.UTF_8));
+	}
+
+	private static String readStoredText(File file) throws IOException
+	{
+		try (java.io.InputStream in = Files.newInputStream(file.toPath()))
+		{
+			java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+			byte[] buffer = new byte[8192];
+			int n;
+			while ((n = in.read(buffer)) > 0)
+			{
+				out.write(buffer, 0, n);
+				if (out.size() > MAX_GUIDE_BYTES)
+				{
+					throw new IOException("stored guide exceeds 16MB");
+				}
+			}
+			return new String(out.toByteArray(), StandardCharsets.UTF_8);
+		}
+	}
+
+	private static void validateGuideText(String text) throws IOException
+	{
+		if (text == null)
+		{
+			throw new IOException("guide text is missing");
+		}
+		if (text.getBytes(StandardCharsets.UTF_8).length > MAX_GUIDE_BYTES)
+		{
+			throw new IOException("guide exceeds 16MB");
+		}
+	}
+
+	private static void copyAtomically(File source, File target) throws IOException
+	{
+		Path directory = target.getParentFile().toPath();
+		Files.createDirectories(directory);
+		Path temp = Files.createTempFile(directory, target.getName(), ".tmp");
+		try
+		{
+			Files.copy(source.toPath(), temp, StandardCopyOption.REPLACE_EXISTING);
+			moveReplacing(temp, target.toPath());
+		}
+		finally
+		{
+			Files.deleteIfExists(temp);
+		}
+	}
+
+	private static void atomicWrite(File target, byte[] bytes) throws IOException
+	{
+		Path directory = target.getParentFile().toPath();
+		Files.createDirectories(directory);
+		Path temp = Files.createTempFile(directory, target.getName(), ".tmp");
+		try
+		{
+			Files.write(temp, bytes);
+			moveReplacing(temp, target.toPath());
+		}
+		finally
+		{
+			Files.deleteIfExists(temp);
+		}
+	}
+
+	private static void moveReplacing(Path source, Path target) throws IOException
+	{
+		try
+		{
+			Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+		}
+		catch (AtomicMoveNotSupportedException e)
+		{
+			Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+		}
 	}
 }

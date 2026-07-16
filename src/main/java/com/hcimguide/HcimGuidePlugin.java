@@ -164,6 +164,7 @@ public class HcimGuidePlugin extends Plugin
 	private WorldPoint farTarget;
 	private WorldMapPoint mapMarker;
 	private WorldPoint markerPoint;
+	private String markerName;
 	private WorldPoint lastArrowPoint;
 
 	// cache for findActiveBank: invalidated whenever completion state or the guide changes
@@ -189,6 +190,13 @@ public class HcimGuidePlugin extends Plugin
 	private final Map<TileItem, GroundHighlight> groundItems = new HashMap<>();
 	private List<NPC> stepNpcs = new ArrayList<>();
 	private List<GroundHighlight> groundHighlights = new ArrayList<>();
+	/**
+	 * Scene scans are only needed when guide/progress/config or scene contents
+	 * change. A periodic refresh is retained as a safety net for NPC transforms
+	 * that do not arrive as spawn/despawn events.
+	 */
+	private volatile boolean stepHighlightsDirty = true;
+	private static final int HIGHLIGHT_SAFETY_REFRESH_TICKS = 20;
 
 	// routing (computed on the client thread every EVAL_INTERVAL_TICKS with
 	// movement/target/stock guards, so most cycles are a few comparisons)
@@ -288,6 +296,7 @@ public class HcimGuidePlugin extends Plugin
 		activeBankCache = null;
 		activeBankCacheGuide = null;
 		activeBankDirty = true;
+		stepHighlightsDirty = true;
 		routeSuggestion = null;
 		routeDirty = true;
 		lastPrefetchKey = null;
@@ -362,6 +371,7 @@ public class HcimGuidePlugin extends Plugin
 		activeBankCache = null;
 		activeBankCacheGuide = null;
 		activeBankDirty = true;
+		stepHighlightsDirty = true;
 
 		currentGuideId = guideId;
 		configManager.setConfiguration(HcimGuideConfig.GROUP, "selectedGuide", guideId);
@@ -507,7 +517,8 @@ public class HcimGuidePlugin extends Plugin
 			GuideRegistry.Entry entry = guideRegistry.add(title, null);
 			SwingUtilities.invokeLater(() -> panel.setGuides(guideRegistry.list(), entry.getId()));
 			selectGuideInternal(entry.getId(), false);
-			importFromFile(file);
+			SwingUtilities.invokeLater(() -> panel.setStatus("Importing guide from file..."));
+			importFileOnExecutor(file, entry.getId(), true);
 		});
 	}
 
@@ -559,35 +570,68 @@ public class HcimGuidePlugin extends Plugin
 	{
 		final String guideId = currentGuideId;
 		SwingUtilities.invokeLater(() -> panel.setStatus("Importing guide from file..."));
-		executor.execute(() ->
+		executor.execute(() -> importFileOnExecutor(file, guideId, false));
+	}
+
+	/** Runs on the plugin executor. New file-only entries are rolled back on failure. */
+	private void importFileOnExecutor(java.io.File file, String guideId, boolean removeEntryOnFailure)
+	{
+		if (!active)
 		{
-			if (!active)
+			if (removeEntryOnFailure)
 			{
-				return;
+				guideRegistry.remove(guideId);
 			}
-			try
+			return;
+		}
+		try
+		{
+			if (file == null || !file.isFile())
 			{
-				if (file.length() > 10L * 1024 * 1024)
-				{
-					SwingUtilities.invokeLater(() ->
-						panel.setStatus("File too large (over 10MB) - guides are plain wikitext"));
-					return;
-				}
-				String text = new String(java.nio.file.Files.readAllBytes(file.toPath()),
-					java.nio.charset.StandardCharsets.UTF_8);
-				Guide guide = guideService.importText(guideId, text);
+				throw new IllegalArgumentException("Selected file no longer exists");
+			}
+			String text = readLocalGuideFile(file);
+			Guide guide = guideService.importText(guideId, text);
+			if (guideId.equals(currentGuideId))
+			{
+				applyGuide(guide, "Guide imported from " + file.getName());
+			}
+			SwingUtilities.invokeLater(() -> panel.refreshGuideListLabels());
+		}
+		catch (Exception e)
+		{
+			log.warn("File import failed", e);
+			if (removeEntryOnFailure)
+			{
+				guideRegistry.remove(guideId);
 				if (guideId.equals(currentGuideId))
 				{
-					applyGuide(guide, "Guide imported from " + file.getName());
+					selectGuideInternal(GuideRegistry.BUILTIN_ID, false);
 				}
-				SwingUtilities.invokeLater(() -> panel.refreshGuideListLabels());
+				SwingUtilities.invokeLater(() -> panel.setGuides(guideRegistry.list(), currentGuideId));
 			}
-			catch (Exception e)
+			SwingUtilities.invokeLater(() -> panel.setStatus("Import failed: " + e.getMessage()));
+		}
+	}
+
+	private static String readLocalGuideFile(java.io.File file) throws java.io.IOException
+	{
+		final int maxBytes = 10 * 1024 * 1024;
+		try (java.io.InputStream in = java.nio.file.Files.newInputStream(file.toPath()))
+		{
+			java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+			byte[] buffer = new byte[8192];
+			int n;
+			while ((n = in.read(buffer)) > 0)
 			{
-				log.warn("File import failed", e);
-				SwingUtilities.invokeLater(() -> panel.setStatus("Import failed: " + e.getMessage()));
+				out.write(buffer, 0, n);
+				if (out.size() > maxBytes)
+				{
+					throw new IllegalArgumentException("File too large (over 10MB) - guides are plain wikitext");
+				}
 			}
-		});
+			return new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+		}
 	}
 
 	/**
@@ -642,6 +686,8 @@ public class HcimGuidePlugin extends Plugin
 	 */
 	void importProgress(String code)
 	{
+		final String destinationGuideId = currentGuideId;
+		final Guide destinationGuide = currentGuide;
 		// decode (gzip/base64, possibly hostile input) off the EDT
 		executor.execute(() ->
 		{
@@ -651,22 +697,61 @@ public class HcimGuidePlugin extends Plugin
 			}
 			try
 			{
+				if (destinationGuide == null)
+				{
+					// imported keys are validated against the loaded guide's
+					// steps, so a guide must be loaded first
+					SwingUtilities.invokeLater(() ->
+						panel.setStatus("Import the guide first, then import its progress"));
+					return;
+				}
+				if (!destinationGuideId.equals(currentGuideId))
+				{
+					SwingUtilities.invokeLater(() ->
+						panel.setStatus("Guide changed before progress could be imported - nothing changed"));
+					return;
+				}
 				ProgressCodec.Decoded decoded = ProgressCodec.decode(code);
-				final String note = decoded.guideId != null && !decoded.guideId.equals(currentGuideId)
+				final String note = decoded.guideId != null && !decoded.guideId.equals(destinationGuideId)
 					? " (note: exported from a different guide)"
 					: "";
+				Set<String> validKeys = new HashSet<>();
+				for (GuideEpisode episode : destinationGuide.getEpisodes())
+				{
+					for (GuideBank bank : episode.getBanks())
+					{
+						for (GuideStep step : bank.getSteps())
+						{
+							validKeys.add(step.getKey());
+						}
+					}
+				}
+				Set<String> imported = new HashSet<>(decoded.keys);
+				imported.retainAll(validKeys);
+				int ignored = decoded.keys.size() - imported.size();
+				// Decoding and validation run off the EDT and may take long enough for
+				// the user to switch guides. Re-check immediately before mutating the
+				// shared progress set so another guide can never receive this import.
+				if (destinationGuide != currentGuide || !destinationGuideId.equals(currentGuideId))
+				{
+					SwingUtilities.invokeLater(() ->
+						panel.setStatus("Guide changed during progress import - nothing changed"));
+					return;
+				}
 				synchronized (completedSteps)
 				{
 					completedSteps.clear();
-					completedSteps.addAll(decoded.keys);
+					completedSteps.addAll(imported);
 				}
 				autoSuppressed.clear();
 				activeBankDirty = true;
+				stepHighlightsDirty = true;
 				persistCompletedSteps();
 				SwingUtilities.invokeLater(() ->
 				{
 					panel.refreshFromModel();
-					panel.setStatus("Progress imported: " + decoded.keys.size() + " steps" + note);
+					panel.setStatus("Progress imported: " + imported.size() + " steps"
+						+ (ignored > 0 ? " (ignored " + ignored + " unknown keys)" : "") + note);
 				});
 			}
 			catch (IllegalArgumentException e)
@@ -835,6 +920,7 @@ public class HcimGuidePlugin extends Plugin
 		targetNamesNorm = namesNorm;
 		currentGuide = guide;
 		activeBankDirty = true;
+		stepHighlightsDirty = true;
 		routeDirty = true;      // new model -> new objective/candidates
 		lastPrefetchKey = null; // re-warm icons for the new active bank
 		SwingUtilities.invokeLater(() -> panel.setGuide(guide, status));
@@ -895,6 +981,7 @@ public class HcimGuidePlugin extends Plugin
 			}
 		}
 		activeBankDirty = true;
+		stepHighlightsDirty = true;
 		persistCompletedSteps();
 	}
 
@@ -917,6 +1004,7 @@ public class HcimGuidePlugin extends Plugin
 			}
 		}
 		activeBankDirty = true;
+		stepHighlightsDirty = true;
 		persistCompletedSteps();
 	}
 
@@ -1023,6 +1111,7 @@ public class HcimGuidePlugin extends Plugin
 			}
 		}
 		activeBankDirty = true;
+		stepHighlightsDirty = true;
 	}
 
 	private void persistCompletedSteps()
@@ -1143,13 +1232,17 @@ public class HcimGuidePlugin extends Plugin
 		if (name != null && !"null".equals(name))
 		{
 			groundItems.put(item, new GroundHighlight(event.getTile(), name));
+			stepHighlightsDirty = true;
 		}
 	}
 
 	@Subscribe
 	public void onItemDespawned(ItemDespawned event)
 	{
-		groundItems.remove(event.getItem());
+		if (groundItems.remove(event.getItem()) != null)
+		{
+			stepHighlightsDirty = true;
+		}
 	}
 
 	/**
@@ -1161,6 +1254,7 @@ public class HcimGuidePlugin extends Plugin
 	public void onNpcSpawned(NpcSpawned event)
 	{
 		NPC npc = event.getNpc();
+		stepHighlightsDirty = true;
 		if (npc.getName() == null || targetNamesNorm.isEmpty())
 		{
 			return;
@@ -1176,6 +1270,7 @@ public class HcimGuidePlugin extends Plugin
 	public void onNpcDespawned(NpcDespawned event)
 	{
 		stepNpcs.remove(event.getNpc());
+		stepHighlightsDirty = true;
 		if (targetNpc == event.getNpc())
 		{
 			// clear the arrow NOW: updateTargetTracking's change-detection would
@@ -1199,6 +1294,7 @@ public class HcimGuidePlugin extends Plugin
 			groundItems.clear();
 			groundHighlights = new ArrayList<>();
 			stepNpcs = new ArrayList<>();
+			stepHighlightsDirty = true;
 			targetNpc = null;
 			clearArrowOnClientThread();
 			final String name = targetName;
@@ -1247,6 +1343,11 @@ public class HcimGuidePlugin extends Plugin
 			|| "autoCollapseCompleted".equals(key) || "panelTextSize".equals(key))
 		{
 			SwingUtilities.invokeLater(() -> panel.onConfigChanged());
+		}
+
+		if ("highlightStepNpcs".equals(key) || "highlightGroundItems".equals(key))
+		{
+			stepHighlightsDirty = true;
 		}
 
 		// switching progress scope re-routes reads to the other store
@@ -1303,16 +1404,43 @@ public class HcimGuidePlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
+		++tickCounter;
 		updateTargetTracking();
-		updateStepHighlights();
+		updateStepHighlights(tickCounter % HIGHLIGHT_SAFETY_REFRESH_TICKS == 0);
+		// every tick so the drawn path reacts to a completed step within one
+		// game tick - it's a few cached-field reads and a deduped message
+		updatePathHandoff();
 
-		if (++tickCounter % EVAL_INTERVAL_TICKS == 0)
+		if (tickCounter % EVAL_INTERVAL_TICKS == 0)
 		{
 			evaluateAutoCompletion();
 			syncBankTag();
 			updateRouting();
 			prefetchUpcomingIcons();
 		}
+	}
+
+	/**
+	 * Keep the Shortest Path plugin (if installed) pointed at the CURRENT
+	 * objective. Runs every tick: the objective comes from fields already
+	 * maintained by updateTargetTracking, and PathfinderIntegration dedups,
+	 * so the common case is a couple of comparisons and no message at all.
+	 */
+	private void updatePathHandoff()
+	{
+		if (!config.routeUseShortestPath() || currentGuide == null
+			|| client.getGameState() != GameState.LOGGED_IN)
+		{
+			pathfinder.clear();
+			return;
+		}
+		WorldPoint objective = currentObjective();
+		if (objective == null)
+		{
+			pathfinder.clear();
+			return;
+		}
+		pathfinder.setTarget(objective);
 	}
 
 	// ------------------------------------------------------------------ routing & teleports
@@ -1351,31 +1479,16 @@ public class HcimGuidePlugin extends Plugin
 	 */
 	private void updateRouting()
 	{
-		boolean wantSuggest = config.routeSuggestions();
-		boolean wantPath = config.routeUseShortestPath();
-		if ((!wantSuggest && !wantPath) || currentGuide == null
+		// the Shortest Path hand-off runs per-tick in updatePathHandoff();
+		// this method only maintains the HUD suggestion text
+		if (!config.routeSuggestions() || currentGuide == null
 			|| client.getGameState() != GameState.LOGGED_IN)
 		{
 			routeSuggestion = null;
-			pathfinder.clear();
 			return;
 		}
 		WorldPoint objective = currentObjective();
 		if (objective == null)
-		{
-			routeSuggestion = null;
-			pathfinder.clear();
-			return;
-		}
-		if (wantPath)
-		{
-			pathfinder.setTarget(objective);
-		}
-		else
-		{
-			pathfinder.clear();
-		}
-		if (!wantSuggest)
 		{
 			routeSuggestion = null;
 			return;
@@ -1544,9 +1657,9 @@ public class HcimGuidePlugin extends Plugin
 						reqs.addAll(c.getItems());
 					}
 				}
-				if (--remaining <= 0)
+				if (--remaining <= 0 || reqs.size() > 200)
 				{
-					break outer;
+					break outer; // bounded background work even for huge sections
 				}
 			}
 		}
@@ -1584,6 +1697,11 @@ public class HcimGuidePlugin extends Plugin
 			bankTagIntegration.requestSync(null, null);
 			return;
 		}
+		// A bank trip is at most 28 inventory slots: tagging beyond the next
+		// handful of item-steps is noise. The cap also bounds this walk (and
+		// the tag size) for guides that parse into one huge section.
+		final int maxItemSteps = 12;
+		int itemSteps = 0;
 		List<ItemReq> items = new ArrayList<>();
 		StringBuilder signature = new StringBuilder(active.getId());
 		for (GuideStep step : active.getSteps())
@@ -1597,6 +1715,10 @@ public class HcimGuidePlugin extends Plugin
 			{
 				items.addAll(c.getItems());
 				signature.append('|').append(step.getKey());
+				if (++itemSteps >= maxItemSteps)
+				{
+					break;
+				}
 			}
 		}
 		bankTagIntegration.requestSync(signature.toString(), items);
@@ -1615,8 +1737,14 @@ public class HcimGuidePlugin extends Plugin
 	 * Recompute which NPCs and ground items the current bank's unchecked steps
 	 * reference, so the overlay can highlight them. Client thread only.
 	 */
-	private void updateStepHighlights()
+	private void updateStepHighlights(boolean forceRefresh)
 	{
+		if (!stepHighlightsDirty && !forceRefresh)
+		{
+			return;
+		}
+		stepHighlightsDirty = false;
+
 		Guide guide = currentGuide;
 		boolean npcsWanted = config.highlightStepNpcs();
 		boolean itemsWanted = config.highlightGroundItems();
@@ -1627,7 +1755,14 @@ public class HcimGuidePlugin extends Plugin
 			return;
 		}
 
-		// wanted names come from precomputed maps - no regex on step text here
+		// wanted names come from precomputed maps - no regex on step text here.
+		// This runs only after relevant changes (plus a periodic safety refresh),
+		// but still bound the walk: only the next unchecked
+		// steps matter for what's on screen anyway, and the cap keeps a guide
+		// that parses into one huge section from turning this into a 600-step
+		// scan per tick.
+		final int maxScanSteps = 40;
+		int scanned = 0;
 		Set<String> wantedNorm = new HashSet<>();
 		List<ItemReq> itemReqs = new ArrayList<>();
 		GuideBank active = findActiveBank(guide);
@@ -1638,6 +1773,10 @@ public class HcimGuidePlugin extends Plugin
 				if (isCompleted(step.getKey()))
 				{
 					continue;
+				}
+				if (++scanned > maxScanSteps)
+				{
+					break;
 				}
 				if (npcsWanted)
 				{
@@ -2096,10 +2235,11 @@ public class HcimGuidePlugin extends Plugin
 		setMarker(point, name);
 	}
 
-	/** Idempotent: same point -> no churn; new point -> marker replaced. */
+	/** Idempotent: same point and label -> no churn; changed label replaces it. */
 	private void setMarker(WorldPoint point, String name)
 	{
-		if (point != null && point.equals(markerPoint) && mapMarker != null)
+		if (point != null && point.equals(markerPoint) && mapMarker != null
+			&& (name == null ? markerName == null : name.equals(markerName)))
 		{
 			return;
 		}
@@ -2112,6 +2252,7 @@ public class HcimGuidePlugin extends Plugin
 		marker.setTooltip("Guide Overlay: " + name);
 		mapMarker = marker;
 		markerPoint = point;
+		markerName = name;
 		worldMapPointManager.add(marker);
 	}
 
@@ -2123,5 +2264,6 @@ public class HcimGuidePlugin extends Plugin
 			mapMarker = null;
 		}
 		markerPoint = null;
+		markerName = null;
 	}
 }

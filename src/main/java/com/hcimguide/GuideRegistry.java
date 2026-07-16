@@ -39,9 +39,10 @@ public class GuideRegistry
 	static
 	{
 		BUILTINS.add(new Entry(BUILTIN_ID, "B0aty HCIM Guide V3", "Guide:B0aty_HCIM_Guide_V3", null));
-		// Before a Plugin Hub submission, pin "main" to a commit SHA so the
-		// download is reproducible (tools/submit.sh does this automatically):
-		//   git ls-remote https://github.com/umkyzn/BRUHsailer HEAD
+		// PINNED to a commit SHA for reproducible downloads. To pick up a
+		// newer BRUHsailer guide in a future release, replace the hash:
+		//   git ls-remote https://github.com/umkyzn/BRUHsailer refs/heads/main
+		// (tools/submit.sh re-pins automatically if set back to "main")
 		BUILTINS.add(new Entry(BRUHSAILER_ID, "BRUHsailer Ironman Guide", null,
 			"https://raw.githubusercontent.com/umkyzn/BRUHsailer/ec20b7e843da2cca69bf2343734dd2c25fef913f/data/guide_data.json"));
 	}

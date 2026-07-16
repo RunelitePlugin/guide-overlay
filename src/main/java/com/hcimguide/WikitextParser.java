@@ -18,6 +18,13 @@ public class WikitextParser
 	private static final Pattern EPISODE_TITLE = Pattern.compile("^Episode\\s+(\\d{1,3})\\b.*", Pattern.CASE_INSENSITIVE);
 	private static final Pattern BANK_TITLE = Pattern.compile("^Bank\\s+([0-9]+[A-Za-z]?)\\b.*", Pattern.CASE_INSENSITIVE);
 
+	/**
+	 * File/Image embeds, including piped captions and ONE level of nested
+	 * links inside the caption. Removed entirely - before piped-link handling,
+	 * which would otherwise keep the caption as text.
+	 */
+	private static final Pattern FILE_LINK = Pattern.compile(
+		"(?i)\\[\\[(?:File|Image):[^\\[\\]]*(?:\\[\\[[^\\[\\]]*]][^\\[\\]]*)*]]");
 	private static final Pattern WIKILINK_PIPED = Pattern.compile("\\[\\[[^\\[\\]|]*\\|([^\\[\\]]*)]]");
 	private static final Pattern WIKILINK = Pattern.compile("\\[\\[([^\\[\\]|]*)]]");
 	private static final Pattern EXTLINK_LABELED = Pattern.compile("\\[(?:https?|ftp)://\\S*\\s+([^\\]]*)]");
@@ -133,25 +140,56 @@ public class WikitextParser
 				continue;
 			}
 
-			// the live guide marks banks as BOLD STANDALONE LINES ('''Bank 40'''),
-			// not wiki headings - treat a short non-bullet line as a section
-			// start only when it is EXPLICITLY BOLD, or when its entire text is
-			// just the bank label (optionally "Bank 40 - somewhere"). Plain
-			// prose like "Bank 9 duplicates Bank 8 if skipped" must stay a
-			// paragraph, or later steps would silently change ids/keys.
-			if (episode != null && !BULLET.matcher(line).matches() && line.length() < 60)
+			// The live guide marks banks as BOLD LINES ('''Bank 40'''), not wiki
+			// headings - and each label usually carries its screenshot on the
+			// SAME line ("'''Bank 1'''[[File:Bank 1.png|thumb|...]]"), which
+			// makes the raw line long. So: detect a LEADING bold run whose text
+			// is a bank label, no matter what images/whitespace follow - but
+			// only accept trailing content that cleans away to nothing (files,
+			// templates) or a "- location" style suffix. Plain prose such as
+			// "Bank 9 duplicates Bank 8 if skipped", or a sentence that merely
+			// CONTAINS a bold bank name mid-line, must stay a paragraph, or
+			// later steps would silently change ids/keys.
+			if (episode != null && !BULLET.matcher(line).matches())
 			{
-				boolean explicitlyBold = line.startsWith("'''") && line.endsWith("'''");
-				String cleaned = cleanInline(line);
-				boolean anchoredLabel = cleaned.matches("(?i)Bank\\s+[0-9]+[A-Za-z]?\\s*(?:[-:–—].*)?");
-				if ((explicitlyBold || anchoredLabel)
-					&& BANK_TITLE.matcher(cleaned).matches() && cleaned.length() < 40)
+				String bankLabel = null;
+				if (line.startsWith("'''"))
 				{
-					Matcher bk = BANK_TITLE.matcher(cleaned);
+					int close = line.indexOf("'''", 3);
+					if (close > 3)
+					{
+						String boldText = cleanInline(line.substring(3, close));
+						String rest = cleanInline(line.substring(close + 3));
+						// leftover bracket/pipe debris from deeply nested image
+						// captions counts as empty - it is never real prose
+						boolean restIsJunk = rest.isEmpty() || rest.matches("[\\[\\]|:;,.\\s]*");
+						if (BANK_TITLE.matcher(boldText).matches() && boldText.length() < 40
+							&& (restIsJunk || rest.matches("[-:–—].*")))
+						{
+							bankLabel = restIsJunk || rest.length() > 30
+								? boldText
+								: (boldText + " " + rest);
+						}
+					}
+				}
+				if (bankLabel == null && line.length() < 60)
+				{
+					// unbolded standalone label: the entire cleaned line must BE
+					// the label (optionally "Bank 40 - somewhere")
+					String cleaned = cleanInline(line);
+					if (cleaned.matches("(?i)Bank\\s+[0-9]+[A-Za-z]?\\s*(?:[-:–—].*)?")
+						&& BANK_TITLE.matcher(cleaned).matches() && cleaned.length() < 40)
+					{
+						bankLabel = cleaned;
+					}
+				}
+				if (bankLabel != null)
+				{
+					Matcher bk = BANK_TITLE.matcher(bankLabel);
 					//noinspection ResultOfMethodCallIgnored
 					bk.matches();
 					bank = new GuideBank("E" + episode.getNumber() + ".B" + bk.group(1).toUpperCase(),
-						cleaned, episode.getNumber());
+						bankLabel, episode.getNumber());
 					episode.getBanks().add(bank);
 					occurrence.clear();
 					continue;
@@ -208,6 +246,10 @@ public class WikitextParser
 		{
 			out = replaceTemplates(out);
 		}
+
+		// image embeds vanish entirely (BEFORE piped links, which would keep
+		// the caption as if it were step text)
+		out = FILE_LINK.matcher(out).replaceAll("");
 
 		out = WIKILINK_PIPED.matcher(out).replaceAll("$1");
 

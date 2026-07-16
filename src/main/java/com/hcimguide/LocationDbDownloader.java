@@ -34,10 +34,12 @@ public class LocationDbDownloader
 	private static final Logger log = LoggerFactory.getLogger(LocationDbDownloader.class);
 
 	/**
-	 * Before a Plugin Hub submission, pin this to a commit SHA instead of
-	 * "master" so the download is reproducible and review-friendly:
-	 * {@code git ls-remote https://github.com/mejrs/data_osrs master}
-	 * and replace "master" below with the returned hash.
+	 * PINNED to a commit SHA so the download is reproducible and
+	 * review-friendly. To update the dataset for a future release, replace
+	 * the hash with the current one:
+	 * {@code git ls-remote https://github.com/mejrs/data_osrs refs/heads/master}
+	 * (tools/submit.sh re-pins automatically if this is ever set back to
+	 * "master").
 	 */
 	static final String SOURCE_URL =
 		"https://raw.githubusercontent.com/mejrs/data_osrs/6a3ca6f19d65c5609434b51cac8dee9d4af97c02/NPCList_OSRS.json";

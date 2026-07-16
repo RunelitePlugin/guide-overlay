@@ -19,12 +19,10 @@ set -euo pipefail
 api() { # method path [json-body]
 	local method="$1" path="$2" body="${3:-}"
 	if [ -n "$body" ]; then
-		curl -sS -X "$method" -H "Authorization: token $TOKEN" \
-			-H "Accept: application/vnd.github+json" \
+		curl -sS --config "$CURL_AUTH" -X "$method" \
 			-d "$body" "https://api.github.com$path"
 	else
-		curl -sS -X "$method" -H "Authorization: token $TOKEN" \
-			-H "Accept: application/vnd.github+json" \
+		curl -sS --config "$CURL_AUTH" -X "$method" \
 			"https://api.github.com$path"
 	fi
 }
@@ -35,6 +33,30 @@ echo "== Guide Overlay -> RuneLite Plugin Hub submission =="
 read -rp "Your pseudonymous GitHub username: " GH_USER
 read -rsp "Personal access token (input hidden; revoke it afterwards): " TOKEN; echo
 
+# Keep the token out of command-line arguments and .git/config. curl reads it
+# from a mode-600 config file; git obtains it through a temporary askpass
+# helper and a child-only environment variable. Cleanup also runs on failure.
+CURL_AUTH=$(mktemp)
+ASKPASS=$(mktemp)
+chmod 600 "$CURL_AUTH"
+chmod 700 "$ASKPASS"
+printf 'header = "Authorization: token %s"\nheader = "Accept: application/vnd.github+json"\n' "$TOKEN" > "$CURL_AUTH"
+cat > "$ASKPASS" <<'EOF'
+#!/bin/sh
+case "$1" in
+	*Username*) printf '%s\n' 'x-access-token' ;;
+	*Password*) printf '%s\n' "$GUIDE_OVERLAY_GH_TOKEN" ;;
+esac
+EOF
+export GUIDE_OVERLAY_GH_TOKEN="$TOKEN"
+unset TOKEN
+
+cleanup() {
+	rm -f "${CURL_AUTH:-}" "${ASKPASS:-}"
+	unset GUIDE_OVERLAY_GH_TOKEN
+}
+trap cleanup EXIT HUP INT TERM
+
 echo "-> Verifying the token works (GET /user)..."
 LOGIN=$(api GET /user | sed -n 's/.*"login": *"\([^"]*\)".*/\1/p' | head -1)
 [ "$LOGIN" = "$GH_USER" ] || { echo "ERROR: token belongs to '$LOGIN', not '$GH_USER'"; exit 1; }
@@ -44,7 +66,7 @@ git config user.name "guide-overlay"
 git config user.email "guide-overlay@users.noreply.github.com"
 
 echo "-> Pinning the NPC location dataset to a commit hash (reproducible builds)..."
-DATA_SHA=$(git ls-remote https://github.com/mejrs/data_osrs master | cut -f1)
+DATA_SHA=$(git ls-remote https://github.com/mejrs/data_osrs refs/heads/master | cut -f1)
 [ -n "$DATA_SHA" ] || { echo "ERROR: could not resolve mejrs/data_osrs"; exit 1; }
 DL=src/main/java/com/hcimguide/LocationDbDownloader.java
 if grep -q "data_osrs/master/" "$DL"; then
@@ -57,7 +79,7 @@ else
 fi
 
 echo "-> Pinning the BRUHsailer guide source to a commit hash (reproducible builds)..."
-BRUH_SHA=$(git ls-remote https://github.com/umkyzn/BRUHsailer HEAD | cut -f1)
+BRUH_SHA=$(git ls-remote https://github.com/umkyzn/BRUHsailer refs/heads/main | cut -f1)
 [ -n "$BRUH_SHA" ] || { echo "ERROR: could not resolve umkyzn/BRUHsailer"; exit 1; }
 GR=src/main/java/com/hcimguide/GuideRegistry.java
 if grep -q "BRUHsailer/main/" "$GR"; then
@@ -75,9 +97,8 @@ api POST /user/repos '{"name":"guide-overlay","description":"RuneLite plugin: wi
 echo "-> Pushing the code..."
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 git remote remove origin 2>/dev/null || true
-git remote add origin "https://$GH_USER:$TOKEN@github.com/$GH_USER/guide-overlay.git"
-git push -u origin "$BRANCH"
-git remote set-url origin "https://github.com/$GH_USER/guide-overlay.git"  # token removed from git config
+git remote add origin "https://github.com/$GH_USER/guide-overlay.git"
+GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git push -u origin "$BRANCH"
 PLUGIN_SHA=$(git rev-parse HEAD)
 echo "   pushed commit $PLUGIN_SHA"
 

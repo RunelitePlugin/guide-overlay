@@ -4,6 +4,7 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Cursor;
+import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -50,7 +51,8 @@ public class HcimGuidePanel extends PluginPanel
 	private final JProgressBar overallProgress = new JProgressBar();
 	private final JTextField searchField = new JTextField();
 	private final JComboBox<GuideRegistry.Entry> guideBox = new JComboBox<>();
-	private final JComboBox<GuideEpisode> episodeBox = new JComboBox<>();
+	/** Jump-to-bank dropdown: every bank in the guide, flat - no episode grouping. */
+	private final JComboBox<GuideBank> sectionBox = new JComboBox<>();
 	private final JPanel banksContainer = new JPanel(new GridBagLayout());
 
 	private Guide guide;
@@ -120,7 +122,7 @@ public class HcimGuidePanel extends PluginPanel
 
 		header.add(Box.createVerticalStrut(4));
 
-		searchField.setToolTipText("Search steps in the selected episode");
+		searchField.setToolTipText("Search steps");
 		searchField.getDocument().addDocumentListener(new DocumentListener()
 		{
 			@Override
@@ -145,15 +147,20 @@ public class HcimGuidePanel extends PluginPanel
 
 		header.add(Box.createVerticalStrut(4));
 
-		episodeBox.setRenderer(new EpisodeRenderer());
-		episodeBox.addActionListener(e ->
+		sectionBox.setRenderer(new SectionRenderer());
+		sectionBox.setToolTipText("Jump to a bank section");
+		sectionBox.addActionListener(e ->
 		{
 			if (!rebuilding)
 			{
-				rebuildBanks();
+				GuideBank bank = (GuideBank) sectionBox.getSelectedItem();
+				if (bank != null)
+				{
+					scrollToBank(bank.getId());
+				}
 			}
 		});
-		header.add(episodeBox);
+		header.add(sectionBox);
 
 		header.add(Box.createVerticalStrut(4));
 
@@ -392,7 +399,7 @@ public class HcimGuidePanel extends PluginPanel
 	{
 		guide = null;
 		rebuilding = true;
-		episodeBox.removeAllItems();
+		sectionBox.removeAllItems();
 		rebuilding = false;
 		banksContainer.removeAll();
 		bankSections.clear();
@@ -523,25 +530,41 @@ public class HcimGuidePanel extends PluginPanel
 		setStatus(status);
 
 		rebuilding = true;
-		GuideEpisode selected = (GuideEpisode) episodeBox.getSelectedItem();
-		int selectedNumber = selected != null ? selected.getNumber() : -1;
-		episodeBox.removeAllItems();
-		GuideEpisode toSelect = null;
+		GuideBank selected = (GuideBank) sectionBox.getSelectedItem();
+		String selectedId = selected != null ? selected.getId() : null;
+		sectionBox.removeAllItems();
+		GuideBank toSelect = null;
 		for (GuideEpisode ep : guide.getEpisodes())
 		{
-			episodeBox.addItem(ep);
-			if (ep.getNumber() == selectedNumber)
+			for (GuideBank bank : ep.getBanks())
 			{
-				toSelect = ep;
+				sectionBox.addItem(bank);
+				if (bank.getId().equals(selectedId))
+				{
+					toSelect = bank;
+				}
+			}
+		}
+		if (toSelect == null)
+		{
+			// default the dropdown to the bank you're actually working on,
+			// matching the auto-expanded section below
+			String activeId = plugin.getActiveBankId();
+			for (int i = 0; i < sectionBox.getItemCount() && toSelect == null; i++)
+			{
+				if (sectionBox.getItemAt(i).getId().equals(activeId))
+				{
+					toSelect = sectionBox.getItemAt(i);
+				}
 			}
 		}
 		if (toSelect != null)
 		{
-			episodeBox.setSelectedItem(toSelect);
+			sectionBox.setSelectedItem(toSelect);
 		}
-		else if (episodeBox.getItemCount() > 0)
+		else if (sectionBox.getItemCount() > 0)
 		{
-			episodeBox.setSelectedIndex(0);
+			sectionBox.setSelectedIndex(0);
 		}
 		rebuilding = false;
 
@@ -549,11 +572,6 @@ public class HcimGuidePanel extends PluginPanel
 	}
 
 	// ---------------------------------------------------------------- internals
-
-	private GuideEpisode currentEpisode()
-	{
-		return (GuideEpisode) episodeBox.getSelectedItem();
-	}
 
 	private void rebuildBanks()
 	{
@@ -572,8 +590,9 @@ public class HcimGuidePanel extends PluginPanel
 		banksContainer.removeAll();
 		bankSections.clear();
 
-		GuideEpisode ep = currentEpisode();
-		if (ep != null)
+		// every bank in the whole guide, flat - collapsed section headers are
+		// cheap, rows only build on first expand
+		if (guide != null)
 		{
 			GridBagConstraints gbc = new GridBagConstraints();
 			gbc.gridx = 0;
@@ -583,16 +602,19 @@ public class HcimGuidePanel extends PluginPanel
 			gbc.insets = new Insets(0, 0, 6, 0);
 
 			String activeId = plugin.getActiveBankId();
-			for (GuideBank bank : ep.getBanks())
+			for (GuideEpisode ep : guide.getEpisodes())
 			{
-				BankSection section = new BankSection(bank);
-				bankSections.add(section);
-				banksContainer.add(section, gbc);
-				gbc.gridy++;
-				// only the bank you're actually working on opens (and builds) by default
-				if (bank.getId().equals(activeId))
+				for (GuideBank bank : ep.getBanks())
 				{
-					section.setExpanded(true);
+					BankSection section = new BankSection(bank);
+					bankSections.add(section);
+					banksContainer.add(section, gbc);
+					gbc.gridy++;
+					// only the bank you're actually working on opens (and builds) by default
+					if (bank.getId().equals(activeId))
+					{
+						section.setExpanded(true);
+					}
 				}
 			}
 		}
@@ -603,9 +625,31 @@ public class HcimGuidePanel extends PluginPanel
 		banksContainer.repaint();
 	}
 
+	/** Expand and scroll to one bank section; collapses the others. */
+	private void scrollToBank(String bankId)
+	{
+		for (BankSection section : bankSections)
+		{
+			boolean isTarget = section.bank.getId().equals(bankId);
+			section.setExpanded(isTarget);
+			if (isTarget)
+			{
+				// scroll after the collapse/expand relayout settles
+				SwingUtilities.invokeLater(() -> section.scrollRectToVisible(
+					new Rectangle(0, 0, section.getWidth(), section.getHeight())));
+			}
+		}
+	}
+
 	private void applyFilter()
 	{
 		String q = searchField.getText().trim().toLowerCase(Locale.ROOT);
+		// with the whole guide flat in one list, a 1-char query would match
+		// (and force-build) nearly every section at once - require 2+ chars
+		if (q.length() == 1)
+		{
+			q = "";
+		}
 		for (BankSection section : bankSections)
 		{
 			section.filter(q);
@@ -637,7 +681,7 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			section.updateHeader();
 		}
-		episodeBox.repaint();
+		sectionBox.repaint();
 	}
 
 	private void jumpToNextUnchecked()
@@ -655,21 +699,11 @@ public class HcimGuidePanel extends PluginPanel
 					if (!plugin.isCompleted(step.getKey()))
 					{
 						searchField.setText("");
-						episodeBox.setSelectedItem(ep);
-						SwingUtilities.invokeLater(() ->
-						{
-							for (BankSection section : bankSections)
-							{
-								boolean isTarget = section.bank.getId().equals(bank.getId());
-								section.setExpanded(isTarget);
-								if (isTarget)
-								{
-									// scroll after the collapse/expand relayout settles
-									SwingUtilities.invokeLater(() -> section.scrollRectToVisible(
-										new Rectangle(0, 0, section.getWidth(), section.getHeight())));
-								}
-							}
-						});
+						// keep the dropdown in sync without re-triggering a jump
+						rebuilding = true;
+						sectionBox.setSelectedItem(bank);
+						rebuilding = false;
+						SwingUtilities.invokeLater(() -> scrollToBank(bank.getId()));
 						return;
 					}
 				}
@@ -678,26 +712,18 @@ public class HcimGuidePanel extends PluginPanel
 		setStatus("Everything is checked off. Gz!");
 	}
 
-	private class EpisodeRenderer extends DefaultListCellRenderer
+	private class SectionRenderer extends DefaultListCellRenderer
 	{
 		@Override
 		public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus)
 		{
 			Component c = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
-			if (value instanceof GuideEpisode)
+			if (value instanceof GuideBank)
 			{
-				GuideEpisode ep = (GuideEpisode) value;
-				int total = ep.totalSteps();
-				int done = 0;
-				for (GuideBank b : ep.getBanks())
-				{
-					done += plugin.countCompleted(b.getSteps());
-				}
-				// generic (non-Episode) guides keep their own chapter titles
-				String label = ep.getTitle().regionMatches(true, 0, "Episode", 0, 7)
-					? "Episode " + ep.getNumber()
-					: shortTitle(ep.getTitle());
-				setText(label + "  (" + done + "/" + total + ")");
+				GuideBank bank = (GuideBank) value;
+				int total = bank.getSteps().size();
+				int done = plugin.countCompleted(bank.getSteps());
+				setText(shortTitle(bank.getTitle()) + "  (" + done + "/" + total + ")");
 			}
 			return c;
 		}
@@ -714,7 +740,7 @@ public class HcimGuidePanel extends PluginPanel
 		private final JLabel headerCount = new JLabel();
 		private final List<StepRow> rows = new ArrayList<>();
 		private boolean expanded;
-		/** Rows and item grids are created on FIRST expand, so an episode with
+		/** Rows and item grids are created on FIRST expand, so a guide with
 		 * hundreds of steps loads instantly - only the ~50 headers are built. */
 		private boolean built;
 		private final JPanel headerPanel;
@@ -930,7 +956,9 @@ public class HcimGuidePanel extends PluginPanel
 
 			setLayout(new BorderLayout());
 			setBackground(ColorScheme.DARKER_GRAY_COLOR.darker());
-			setBorder(BorderFactory.createEmptyBorder(2, 6 + step.getDepth() * 12, 2, 2));
+			// indentation capped so deeply nested steps (and their item grids)
+			// can never overflow the fixed side-panel width
+			setBorder(BorderFactory.createEmptyBorder(2, 6 + Math.min(step.getDepth(), 2) * 8, 2, 2));
 
 			checkBox.setSelected(plugin.isCompleted(step.getKey()));
 			checkBox.setBackground(getBackground());
@@ -1008,12 +1036,17 @@ public class HcimGuidePanel extends PluginPanel
 				add(east, BorderLayout.EAST);
 			}
 
-			// item icon grid for withdraw/collect steps
+			// item icon grid for withdraw/collect steps - wrapped in a
+			// left-aligned flow so BorderLayout can't stretch the grid to the
+			// full row width (which would inflate the slots)
 			if (cond != null && cond.getType() == StepCondition.Type.ITEMS_IN_INVENTORY
 				&& config.showItemGrids())
 			{
 				grid = new ItemGridPanel(cond.getItems());
-				add(grid, BorderLayout.SOUTH);
+				JPanel gridWrap = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+				gridWrap.setOpaque(false);
+				gridWrap.add(grid);
+				add(gridWrap, BorderLayout.SOUTH);
 				grid.updatePresence(plugin.getInventorySnapshot());
 				plugin.resolveItemIcons(grid);
 			}

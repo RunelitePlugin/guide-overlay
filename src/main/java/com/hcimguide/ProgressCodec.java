@@ -25,9 +25,14 @@ public final class ProgressCodec
 
 	/** Decoded payloads larger than this are rejected (a valid one is ~100KB max). */
 	private static final int MAX_DECODED_BYTES = 4 * 1024 * 1024;
+	/** Bound memory before Base64 decoding; normal progress codes are far smaller. */
+	private static final int MAX_ENCODED_CHARS = 8 * 1024 * 1024;
 
 	/** Key-count cap so a hostile shared code can't bloat RuneLite's config store. */
 	private static final int MAX_KEYS = 50_000;
+	/** Parsed step keys are compact hashes; this leaves ample forward-compatible room. */
+	private static final int MAX_KEY_CHARS = 512;
+	private static final String GUIDE_ID_PATTERN = "[a-z0-9-]{1,64}";
 
 	private ProgressCodec()
 	{
@@ -48,17 +53,40 @@ public final class ProgressCodec
 
 	public static String encode(Set<String> completedKeys, String guideId) throws IOException
 	{
+		if (completedKeys == null)
+		{
+			throw new IllegalArgumentException("Progress set is missing");
+		}
+		if (completedKeys.size() > MAX_KEYS)
+		{
+			throw new IllegalArgumentException("Progress has too many entries");
+		}
+		if (guideId != null && !guideId.isEmpty() && !guideId.matches(GUIDE_ID_PATTERN))
+		{
+			throw new IllegalArgumentException("Guide id is invalid");
+		}
 		StringBuilder sb = new StringBuilder();
 		if (guideId != null && !guideId.isEmpty())
 		{
 			sb.append("#guide:").append(guideId).append('\n');
 		}
 		// sorted so identical progress always yields an identical code
-		sb.append(String.join("\n", new TreeSet<>(completedKeys)));
+		TreeSet<String> sorted = new TreeSet<>();
+		for (String key : completedKeys)
+		{
+			validateKey(key);
+			sorted.add(key);
+		}
+		sb.append(String.join("\n", sorted));
+		byte[] payload = sb.toString().getBytes(StandardCharsets.UTF_8);
+		if (payload.length > MAX_DECODED_BYTES)
+		{
+			throw new IllegalArgumentException("Progress is implausibly large");
+		}
 		ByteArrayOutputStream bos = new ByteArrayOutputStream();
 		try (GZIPOutputStream gz = new GZIPOutputStream(bos))
 		{
-			gz.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+			gz.write(payload);
 		}
 		return PREFIX + Base64.getEncoder().encodeToString(bos.toByteArray());
 	}
@@ -71,6 +99,10 @@ public final class ProgressCodec
 		if (text == null)
 		{
 			throw new IllegalArgumentException("Clipboard is empty");
+		}
+		if (text.length() > MAX_ENCODED_CHARS)
+		{
+			throw new IllegalArgumentException("Progress code is implausibly large");
 		}
 		String trimmed = text.trim();
 		if (!trimmed.startsWith(PREFIX))
@@ -107,10 +139,16 @@ public final class ProgressCodec
 					// metadata lines; unknown ones are ignored for forward compatibility
 					if (line.startsWith("#guide:"))
 					{
-						guideId = line.substring("#guide:".length()).trim();
+						String candidate = line.substring("#guide:".length()).trim();
+						if (!candidate.matches(GUIDE_ID_PATTERN))
+						{
+							throw new IllegalArgumentException("Progress code contains an invalid guide id");
+						}
+						guideId = candidate;
 					}
 					continue;
 				}
+				validateKey(line);
 				keys.add(line);
 				if (keys.size() > MAX_KEYS)
 				{
@@ -126,6 +164,21 @@ public final class ProgressCodec
 		catch (Exception e)
 		{
 			throw new IllegalArgumentException("Progress code is corrupted: " + e.getMessage(), e);
+		}
+	}
+
+	private static void validateKey(String key)
+	{
+		if (key == null || key.isEmpty() || key.length() > MAX_KEY_CHARS || key.charAt(0) == '#')
+		{
+			throw new IllegalArgumentException("Progress contains an invalid step key");
+		}
+		for (int i = 0; i < key.length(); i++)
+		{
+			if (Character.isISOControl(key.charAt(i)))
+			{
+				throw new IllegalArgumentException("Progress contains an invalid step key");
+			}
 		}
 	}
 }

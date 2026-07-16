@@ -88,6 +88,9 @@ public class BankTagIntegration
 			return;
 		}
 		// name -> id resolution can run here on the executor...
+		// Capped: a bank trip is 28 slots, so a tag beyond ~2 trips of
+		// DISTINCT items means the section parsed wrong - don't flood the tab.
+		final int maxTagItems = 56;
 		final Set<Integer> distinct = new LinkedHashSet<>();
 		if (bankId != null && !items.isEmpty())
 		{
@@ -97,6 +100,10 @@ public class BankTagIntegration
 				if (id > 0)
 				{
 					distinct.add(id);
+					if (distinct.size() >= maxTagItems)
+					{
+						break;
+					}
 				}
 			}
 		}

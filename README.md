@@ -68,6 +68,14 @@ off in the settings.
 - Nothing about you or your account is ever sent anywhere
 - The plugin only displays and tracks. It never clicks, moves, or acts for you
 
+## Development checks
+
+- Run `./gradlew clean test` before release.
+- Run `./tools/audit.sh` for dependency-free safety checks.
+- Pin both raw GitHub data URLs to reviewed commit SHAs before Plugin Hub
+  submission; `tools/submit.sh` performs that pinning automatically.
+- See `SECURITY_REVIEW.md` for the review scope, changes, and limitations.
+
 ## License
 
 BSD 2-Clause. Guide content belongs to its original authors.

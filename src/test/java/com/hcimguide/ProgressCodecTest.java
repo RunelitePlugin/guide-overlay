@@ -61,4 +61,32 @@ public class ProgressCodecTest
 	{
 		ProgressCodec.decode(null);
 	}
+
+	@Test(expected = IllegalArgumentException.class)
+	public void rejectsOversizedEncodedInput()
+	{
+		ProgressCodec.decode("HCIMGUIDE1:" + new String(new char[8 * 1024 * 1024 + 1]).replace('\0', 'A'));
+	}
+
+	@Test(expected = IllegalArgumentException.class)
+	public void rejectsNewlinesInKeys() throws Exception
+	{
+		Set<String> keys = new HashSet<>();
+		keys.add("valid\nforged");
+		ProgressCodec.encode(keys, "guide");
+	}
+
+	@Test(expected = IllegalArgumentException.class)
+	public void rejectsMetadataLookingKeys() throws Exception
+	{
+		Set<String> keys = new HashSet<>();
+		keys.add("#guide:forged");
+		ProgressCodec.encode(keys, "guide");
+	}
+
+	@Test(expected = IllegalArgumentException.class)
+	public void rejectsInvalidGuideId() throws Exception
+	{
+		ProgressCodec.encode(new HashSet<>(), "../../outside");
+	}
 }
