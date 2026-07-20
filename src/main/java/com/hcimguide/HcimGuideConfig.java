@@ -453,6 +453,18 @@ public interface HcimGuideConfig extends Config
 		return 1;
 	}
 
+	@ConfigItem(
+		keyName = "itemPresenceBorders",
+		name = "Have-it borders on items",
+		description = "Outline item icons green when you have the item, red when missing. Turn off for a clean, wiki-style inventory picture.",
+		position = 6,
+		section = uiSection
+	)
+	default boolean itemPresenceBorders()
+	{
+		return true;
+	}
+
 	// ------------------------------------------------------------------ routing & teleports
 
 	@ConfigItem(

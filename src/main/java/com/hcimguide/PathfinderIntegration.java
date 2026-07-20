@@ -37,6 +37,7 @@ public class PathfinderIntegration
 	private final EventBus eventBus;
 
 	private WorldPoint lastSent; // client thread only
+	private long lastSentAtNanos;
 
 	@Inject
 	public PathfinderIntegration(EventBus eventBus)
@@ -50,28 +51,52 @@ public class PathfinderIntegration
 	 * the drawn path still tracks a moving target near-realtime.
 	 */
 	private static final int RESEND_DEADBAND_TILES = 2;
+	/**
+	 * PluginMessage is a one-way broadcast with no acknowledgement. Re-send a
+	 * stable target occasionally so the integration recovers when Shortest Path
+	 * starts after this plugin, reloads, or clears its path internally.
+	 */
+	private static final long KEEPALIVE_NANOS = 15_000_000_000L;
 
 	/** Send a path target (client thread). Null clears. */
 	public void setTarget(WorldPoint target)
+	{
+		setTarget(target, false);
+	}
+
+	/**
+	 * @param movingTarget true only for a live NPC whose patrol movement should
+	 *                     not trigger a full path recalculation every tick
+	 */
+	public void setTarget(WorldPoint target, boolean movingTarget)
 	{
 		if (target == null)
 		{
 			clear();
 			return;
 		}
-		if (lastSent != null
-			&& target.getPlane() == lastSent.getPlane()
-			&& Math.max(Math.abs(target.getX() - lastSent.getX()),
-				Math.abs(target.getY() - lastSent.getY())) <= RESEND_DEADBAND_TILES)
+		long now = System.nanoTime();
+		boolean keepaliveDue = lastSent == null || now - lastSentAtNanos >= KEEPALIVE_NANOS;
+		if (!keepaliveDue && lastSent != null && target.getPlane() == lastSent.getPlane())
 		{
-			return;
+			int drift = Math.max(Math.abs(target.getX() - lastSent.getX()),
+				Math.abs(target.getY() - lastSent.getY()));
+			// Static objectives update on ANY tile change. Only a live NPC gets
+			// the patrol deadband; otherwise two adjacent guide objectives could
+			// incorrectly share a stale path forever.
+			if (target.equals(lastSent) || (movingTarget && drift <= RESEND_DEADBAND_TILES))
+			{
+				return;
+			}
 		}
-		lastSent = target;
 		try
 		{
 			Map<String, Object> data = new HashMap<>();
 			data.put("target", target);
 			eventBus.post(new PluginMessage(NAMESPACE, "path", data));
+			// Commit dedup state only after the message was posted successfully.
+			lastSent = target;
+			lastSentAtNanos = now;
 		}
 		catch (Exception e)
 		{
@@ -87,10 +112,11 @@ public class PathfinderIntegration
 		{
 			return;
 		}
-		lastSent = null;
 		try
 		{
 			eventBus.post(new PluginMessage(NAMESPACE, "clear"));
+			lastSent = null;
+			lastSentAtNanos = 0L;
 		}
 		catch (Exception e)
 		{

@@ -132,6 +132,9 @@ public class HcimGuidePlugin extends Plugin
 	private BankTagIntegration bankTagIntegration;
 
 	@Inject
+	private net.runelite.client.game.SpriteManager spriteManager;
+
+	@Inject
 	private BankStockTracker stockTracker;
 
 	@Inject
@@ -240,6 +243,21 @@ public class HcimGuidePlugin extends Plugin
 		{
 			bankTagIntegration.cleanup();
 		}
+
+		// the REAL inventory stone background for item grids, from the
+		// player's own game files (async; painted fallback shows until then)
+		spriteManager.getSpriteAsync(net.runelite.api.SpriteID.FIXED_MODE_SIDE_PANEL_BACKGROUND, 0,
+			img ->
+			{
+				ItemGridPanel.setInventoryBackground(img);
+				SwingUtilities.invokeLater(() ->
+				{
+					if (panel != null)
+					{
+						panel.repaint();
+					}
+				});
+			});
 
 		// load the locally stored snapshot only - the plugin NEVER fetches on its own
 		executor.execute(() ->
@@ -919,11 +937,55 @@ public class HcimGuidePlugin extends Plugin
 		stepTargets = targets;
 		targetNamesNorm = namesNorm;
 		currentGuide = guide;
+		boolean restoredNotesProgress = migrateLegacyNotesProgress(guide);
 		activeBankDirty = true;
 		stepHighlightsDirty = true;
 		routeDirty = true;      // new model -> new objective/candidates
 		lastPrefetchKey = null; // re-warm icons for the new active bank
-		SwingUtilities.invokeLater(() -> panel.setGuide(guide, status));
+		int banks = guide.numberedBanks();
+		String structure = banks > 0
+			? banks + " banks, " + guide.totalSteps() + " steps"
+			: guide.totalSections() + " sections, " + guide.totalSteps() + " steps";
+		String finalStatus = status + " — " + structure;
+		// warn ONLY when the wikitext fallback dumped steps into "Notes"
+		// sections - JSON/generic guides legitimately have no numbered banks
+		// and must not see a scary warning
+		boolean notesFallback = false;
+		for (GuideEpisode ep : guide.getEpisodes())
+		{
+			for (GuideBank b : ep.getBanks())
+			{
+				if (b.getId().endsWith("-notes"))
+				{
+					notesFallback = true;
+					break;
+				}
+			}
+		}
+		if (banks == 0 && notesFallback && guide.getEpisodes().size() > 1)
+		{
+			finalStatus += " (warning: no numbered bank markers were recognized)";
+		}
+		else if (restoredNotesProgress)
+		{
+			finalStatus += " (previous Notes progress restored)";
+		}
+		String displayStatus = finalStatus;
+		SwingUtilities.invokeLater(() -> panel.setGuide(guide, displayStatus));
+	}
+
+	private boolean migrateLegacyNotesProgress(Guide guide)
+	{
+		boolean migrated;
+		synchronized (completedSteps)
+		{
+			migrated = ProgressKeyMigration.migrateLegacyNotes(guide, completedSteps);
+		}
+		if (migrated)
+		{
+			persistCompletedSteps();
+		}
+		return migrated;
 	}
 
 	StepCondition getCondition(String stepKey)
@@ -949,6 +1011,14 @@ public class HcimGuidePlugin extends Plugin
 		{
 			int[] ids = iconResolver.resolve(grid.getItems());
 			grid.applyIcons(itemManager, ids);
+			// names the price search can't see (untradeables like talismans
+			// and quest amulets) get one chunked full-database scan; when it
+			// finds anything, every visible grid re-resolves
+			if (iconResolver.hasPendingScan())
+			{
+				iconResolver.scanFullDatabase(() ->
+					SwingUtilities.invokeLater(() -> panel.reresolveIcons()));
+			}
 		});
 	}
 
@@ -1116,12 +1186,15 @@ public class HcimGuidePlugin extends Plugin
 
 	private void persistCompletedSteps()
 	{
-		String json;
+		// snapshot AND write under the lock: three threads persist (EDT
+		// checkbox, client-thread auto-completion, executor migration), and
+		// writing outside the lock could land an older snapshot after a newer
+		// one. The config write is quick and nothing else nests locks with
+		// completedSteps, so holding it here is safe.
 		synchronized (completedSteps)
 		{
-			json = gson.toJson(completedSteps);
+			writeProgressJson(gson.toJson(completedSteps));
 		}
-		writeProgressJson(json);
 	}
 
 	/**
@@ -1340,7 +1413,8 @@ public class HcimGuidePlugin extends Plugin
 
 		// rebuild rows so UI-affecting toggles apply without a guide refresh
 		if ("showItemGrids".equals(key) || "dimCompletedSteps".equals(key)
-			|| "autoCollapseCompleted".equals(key) || "panelTextSize".equals(key))
+			|| "autoCollapseCompleted".equals(key) || "panelTextSize".equals(key)
+			|| "itemPresenceBorders".equals(key))
 		{
 			SwingUtilities.invokeLater(() -> panel.onConfigChanged());
 		}
@@ -1440,7 +1514,7 @@ public class HcimGuidePlugin extends Plugin
 			pathfinder.clear();
 			return;
 		}
-		pathfinder.setTarget(objective);
+		pathfinder.setTarget(objective, targetNpc != null);
 	}
 
 	// ------------------------------------------------------------------ routing & teleports

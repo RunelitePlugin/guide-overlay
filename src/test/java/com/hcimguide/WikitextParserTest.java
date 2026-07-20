@@ -115,6 +115,94 @@ public class WikitextParserTest
 	}
 
 	@Test
+	public void parsesChecklistTemplateFormatWithBankComments()
+	{
+		// the LIVE B0aty guide's real structure (verified against the actual
+		// stored snapshot): banks are {{Checklist}} templates whose numbers are
+		// computed by wiki parser functions; the only literal number is an HTML
+		// comment before each block. Empty/computed titles without a comment
+		// continue the current section; literal titles become named sections.
+		String wiki = "===Episode 1 - Banks 1 through 2:===\n"
+			+ "{{Youtube|abc123}}\n"
+			+ "<!-- Bank 1 -->\n"
+			+ "{{Checklist|title=Bank {{#expr:{{#var:bankNumber}}+1}}|\n"
+			+ "* Withdraw: Coins, Spade (2 Inventory slots)\n"
+			+ "* Talk to the [[Lumbridge Guide]]\n"
+			+ "}}\n"
+			+ "{{Var|bankNumber|{{#expr:{{#var:bankNumber}}+1}}}}\n"
+			+ "{{Extimage|https://example.invalid/image.png|right|400|}}\n"
+			+ "<!-- Bank 2A -->\n"
+			+ "{{Checklist|title=Bank {{#expr:{{#var:bankNumber}}+1}}|\n"
+			+ "* Second bank step\n"
+			+ "}}\n"
+			+ "{{Checklist|title=|* Inline continuation step\n"
+			+ "* Another continuation step\n"
+			+ "}}\n"
+			+ "{{Checklist|title=Herblore|\n"
+			+ "* Make potions\n"
+			+ "}}\n";
+
+		Guide g = new WikitextParser().parse(wiki);
+		GuideEpisode ep = g.getEpisodes().get(0);
+		assertEquals(3, ep.getBanks().size());
+		assertEquals("E1.B1", ep.getBanks().get(0).getId());
+		assertEquals("Bank 1", ep.getBanks().get(0).getTitle());
+		assertEquals(2, ep.getBanks().get(0).getSteps().size());
+		assertEquals("E1.B2A", ep.getBanks().get(1).getId());
+		// the empty-title checklist continued Bank 2A (inline first item included)
+		assertEquals(3, ep.getBanks().get(1).getSteps().size());
+		assertEquals("Herblore", ep.getBanks().get(2).getTitle());
+		assertEquals(2, g.numberedBanks());
+	}
+
+	@Test
+	public void recognizesBankMarkersWrappedByWikiLayout()
+	{
+		String wiki = "== Episode 1 - x ==\n"
+			+ "| style=\"text-align:center\" | '''Bank 1'''[[File:Bank.png|thumb|[[Varrock]] {{plink|Coins}}]]\n"
+			+ "* step one\n"
+			+ "* '''Bank 2'''\n"
+			+ "* step two\n"
+			+ "<div class=\"bank\">Bank 3 - Falador</div>\n"
+			+ "* step three\n"
+			+ "; Bank 4\n"
+			+ "* step four\n";
+
+		Guide g = new WikitextParser().parse(wiki);
+		assertEquals(4, g.getEpisodes().get(0).getBanks().size());
+		assertEquals("E1.B1", g.getEpisodes().get(0).getBanks().get(0).getId());
+		assertEquals("E1.B2", g.getEpisodes().get(0).getBanks().get(1).getId());
+		assertEquals("E1.B3", g.getEpisodes().get(0).getBanks().get(2).getId());
+		assertEquals("E1.B4", g.getEpisodes().get(0).getBanks().get(3).getId());
+		assertEquals("Bank 3 - Falador", g.getEpisodes().get(0).getBanks().get(2).getTitle());
+	}
+
+	@Test
+	public void repeatedBankMarkerContinuesSameBankWithoutDuplicateKeys()
+	{
+		String wiki = "== Episode 1 - x ==\n"
+			+ "'''Bank 1'''\n* same step\n"
+			+ "'''Bank 1'''[[File:continued.png|thumb|continued screenshot]]\n* same step\n";
+		Guide g = new WikitextParser().parse(wiki);
+		GuideBank bank = g.getEpisodes().get(0).getBanks().get(0);
+		assertEquals(1, g.getEpisodes().get(0).getBanks().size());
+		assertEquals(2, bank.getSteps().size());
+		assertNotEquals(bank.getSteps().get(0).getKey(), bank.getSteps().get(1).getKey());
+	}
+
+	@Test
+	public void bankExtractorRejectsProseButAcceptsStandaloneVariants()
+	{
+		assertNull(WikitextParser.extractBankLabel("Bank 9 duplicates Bank 8 if skipped"));
+		assertNull(WikitextParser.extractBankLabel("Go to '''Bank 9''' after the quest"));
+		assertEquals("Bank 9", WikitextParser.extractBankLabel("* '''Bank 9'''"));
+		assertEquals("Bank 39A", WikitextParser.extractBankLabel("| [[File:x.png|[[Nested link]]]] '''Bank 39A'''"));
+		assertEquals("Bank 12", WikitextParser.extractBankLabel("File:bank12.png|'''Bank 12'''"));
+		assertEquals("Bank 13", WikitextParser.extractBankLabel("[[File:bank13.png|thumb|'''Bank 13''']]"));
+		assertEquals("Bank 14", WikitextParser.extractBankLabel("[[File:bank14.png|thumb|Bank 14]]"));
+	}
+
+	@Test
 	public void neutralizesEntityEscapedMarkup()
 	{
 		// entity-escaped HTML must never survive into display strings: Swing

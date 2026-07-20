@@ -46,15 +46,41 @@ public final class ItemListParser
 			return null;
 		}
 		String list = m.group(1)
-			// drop trailing "(8 Inventory slots)" style notes
-			.replaceAll("\\s*\\([^)]*\\)\\s*$", "")
+			// drop "(8 Inventory slots)" style notes ANYWHERE in the list -
+			// the live guide often continues after them ("... (14 Inventory
+			// Slots) + Food"), so trailing-only stripping isn't enough
+			.replaceAll("(?i)\\s*\\([^)]*slots?[^)]*\\)", "")
+			.replaceAll("(?i)\\s*\\[[^\\]]*slots?[^\\]]*]", "")
+			// same, when the writer forgot the closing parenthesis
+			.replaceAll("(?i)\\s*\\([^)]*slots?.*$", "")
+			// drop trailing parenthetical advice (never short dose suffixes -
+			// "Prayer potion(4)" as the last item must keep its "(4)")
+			.replaceAll("\\s*\\((?:[^)]*\\s[^)]*|[^)]{8,})\\)\\s*$", "")
 			.replaceAll("[.\\s]+$", "");
 
 		List<ItemReq> out = new ArrayList<>();
-		for (String part : list.split(",|&"))
+		// the guide separates items with commas, ampersands, and plus signs
+		for (String part : list.split(",|&|\\+"))
 		{
 			String p = part.trim();
+			// per-item cleanup: trailing "(Optional)"/"(buy new ones ...)"
+			// advice - but NEVER dose/charge suffixes like "Prayer potion(4)",
+			// "Ring of dueling(8)" or "(t)", whose parenthetical is part of the
+			// real item name. Advice has spaces or is long; suffixes are short.
+			p = p.replaceAll("\\s*\\((?:[^)]*\\s[^)]*|[^)]{8,})\\)\\s*$", "");
+			// trailing sentences ("Ball of Wool. If 85 Crafting...")
+			int sentence = p.indexOf(". ");
+			if (sentence > 0)
+			{
+				p = p.substring(0, sentence);
+			}
+			p = p.trim();
 			if (p.isEmpty())
+			{
+				continue;
+			}
+			// instruction fragments after '&' splits ("wear them", "equip it")
+			if (p.matches("(?i)^(?:wear|wield|equip|use|then|and|if)\\b.*"))
 			{
 				continue;
 			}
@@ -113,9 +139,10 @@ public final class ItemListParser
 			rest = q.group(2).trim();
 		}
 
-		// cut at sentence/bracket/parenthesis boundaries, then at location phrasing.
-		// note: split() can return an empty array when rest is only delimiters
-		String[] parts = rest.split("[.\\[(,]");
+		// cut at sentence/bracket/parenthesis/conjunction boundaries, then at
+		// location phrasing. split() can return an empty array when rest is
+		// only delimiters
+		String[] parts = rest.split("[.\\[(,&+]");
 		rest = parts.length > 0 ? parts[0].trim() : "";
 		rest = GATHER_CUTOFF.matcher(rest).replaceAll("").trim();
 		rest = rest.replaceAll("^(?:the|a|an)\\s+", "");

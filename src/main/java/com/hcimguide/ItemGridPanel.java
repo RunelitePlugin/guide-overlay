@@ -2,7 +2,13 @@ package com.hcimguide;
 
 import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.GradientPaint;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.GridLayout;
+import java.awt.TexturePaint;
+import java.awt.geom.Rectangle2D;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import javax.swing.BorderFactory;
@@ -12,27 +18,48 @@ import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import net.runelite.client.game.ItemManager;
-import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.util.AsyncBufferedImage;
 
 /**
- * Inventory-style grid of item icons for a step's item requirements.
- * Slots get a green border when the item is currently in the inventory,
- * red when missing.
+ * Item icons for a step's requirements, drawn on an OSRS-inventory-style
+ * panel: the classic stone-brown background with a beveled edge, four
+ * columns wide like the real inventory. The background is PAINTED (plain
+ * gradients and lines in the game's palette), not a bundled game texture,
+ * so no copyrighted asset ships with the plugin. Slots get a green border
+ * when the item is currently carried, red when missing.
  */
 public class ItemGridPanel extends JPanel
 {
 	/**
-	 * Sized to FIT the RuneLite side panel: usable row width is roughly
-	 * 200px (225px panel minus borders, scrollbar, and step indentation),
-	 * so 5 columns x 32px slots + gaps + border = ~172px always fits.
-	 * Icons wider than a slot are scaled down on load.
+	 * Four columns, like the in-game inventory. 4 x 36px slots + gaps +
+	 * border = ~158px, well inside the side panel's ~200px usable row width
+	 * even on indented steps. Item sprites are 36x32 natively, so they fit
+	 * without scaling; anything wider is scaled down on load.
 	 */
-	private static final int COLUMNS = 5;
-	private static final int SLOT = 32;
-	private static final Color PRESENT = new Color(0, 200, 120);
-	private static final Color MISSING = new Color(190, 60, 60);
+	private static final int COLUMNS = 4;
+	private static final int SLOT = 36;
+	private static final int SLOT_H = 32;
+	private static final Color PRESENT = new Color(0, 200, 120, 170);
+	private static final Color MISSING = new Color(190, 60, 60, 170);
+
+	// fallback palette while the real sprite loads (painted, not a game asset)
+	private static final Color INV_BG = new Color(62, 53, 41);
+	private static final Color INV_BG_LIGHT = new Color(73, 64, 52);
+	private static final Color INV_EDGE_DARK = new Color(43, 36, 27);
+	private static final Color INV_EDGE_LIGHT = new Color(94, 84, 66);
+
+	/**
+	 * The ACTUAL in-game inventory stone background, pulled from the player's
+	 * own game files via SpriteManager at runtime (never bundled). While it
+	 * loads - or if the cache read ever fails - the painted fallback shows.
+	 */
+	private static volatile BufferedImage inventoryBackground;
+
+	static void setInventoryBackground(BufferedImage img)
+	{
+		inventoryBackground = img;
+	}
 
 	private final List<Slot> slots = new ArrayList<>();
 
@@ -55,12 +82,16 @@ public class ItemGridPanel extends JPanel
 		}
 	}
 
-	ItemGridPanel(List<ItemReq> items)
+	/** When false, no colored have-it borders - a clean wiki-style inventory. */
+	private final boolean presenceBorders;
+
+	ItemGridPanel(List<ItemReq> items, boolean presenceBorders)
 	{
+		this.presenceBorders = presenceBorders;
 		int rows = (items.size() + COLUMNS - 1) / COLUMNS;
-		setLayout(new GridLayout(rows, COLUMNS, 1, 1));
-		setBackground(ColorScheme.DARKER_GRAY_COLOR.darker());
-		setBorder(BorderFactory.createEmptyBorder(2, 1, 4, 1));
+		setLayout(new GridLayout(rows, COLUMNS, 2, 2));
+		setOpaque(false); // background painted in paintComponent
+		setBorder(BorderFactory.createEmptyBorder(4, 4, 5, 4));
 		// the step row wraps this panel in a left-aligned FlowLayout, which
 		// respects preferred size - so the grid keeps its natural width
 
@@ -69,14 +100,13 @@ public class ItemGridPanel extends JPanel
 			JLabel label = new JLabel();
 			label.setHorizontalAlignment(SwingConstants.CENTER);
 			label.setVerticalAlignment(SwingConstants.CENTER);
-			label.setPreferredSize(new Dimension(SLOT, SLOT));
-			label.setOpaque(true);
-			label.setBackground(new Color(48, 44, 38));
+			label.setPreferredSize(new Dimension(SLOT, SLOT_H));
+			label.setOpaque(false); // items sit directly on the inventory brown
 			label.setToolTipText(req.toString());
 			label.setFont(FontManager.getRunescapeSmallFont());
 			// text fallback until (or unless) an icon resolves
 			label.setText(abbreviate(req.getName()));
-			label.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+			label.setForeground(new Color(214, 195, 152)); // parchment on brown
 
 			Slot slot = new Slot(req, label);
 			slots.add(slot);
@@ -89,7 +119,7 @@ public class ItemGridPanel extends JPanel
 		for (int i = 0; i < pad; i++)
 		{
 			JLabel filler = new JLabel();
-			filler.setPreferredSize(new Dimension(SLOT, SLOT));
+			filler.setPreferredSize(new Dimension(SLOT, SLOT_H));
 			add(filler);
 		}
 	}
@@ -118,12 +148,12 @@ public class ItemGridPanel extends JPanel
 					return;
 				}
 				slot.label.setText(null);
-				// item sprites are 36x32; scale down so nothing clips in a
-				// narrower slot (aspect ratio preserved)
-				if (img.getWidth() > SLOT - 2)
+				// item sprites are 36x32 natively - exactly the slot size, so
+				// they render crisp and unscaled; only oversized images shrink
+				if (img.getWidth() > SLOT)
 				{
 					slot.label.setIcon(new ImageIcon(img.getScaledInstance(
-						SLOT - 2, -1, java.awt.Image.SCALE_SMOOTH)));
+						SLOT, -1, java.awt.Image.SCALE_SMOOTH)));
 				}
 				else
 				{
@@ -151,14 +181,59 @@ public class ItemGridPanel extends JPanel
 		}
 	}
 
+	/**
+	 * Background: the REAL inventory stone texture from the game's own files
+	 * (tiled at native pixel density, like the wiki's inventory images).
+	 * Falls back to a painted approximation until the sprite loads.
+	 */
+	@Override
+	protected void paintComponent(Graphics g)
+	{
+		Graphics2D g2 = (Graphics2D) g.create();
+		try
+		{
+			int w = getWidth();
+			int h = getHeight();
+			BufferedImage bg = inventoryBackground;
+			if (bg != null && bg.getWidth() > 0 && bg.getHeight() > 0)
+			{
+				g2.setPaint(new TexturePaint(bg,
+					new Rectangle2D.Float(0, 0, bg.getWidth(), bg.getHeight())));
+				g2.fillRect(0, 0, w, h);
+				g2.setColor(INV_EDGE_DARK);
+				g2.drawRect(0, 0, w - 1, h - 1);
+			}
+			else
+			{
+				g2.setPaint(new GradientPaint(0, 0, INV_BG_LIGHT, 0, h, INV_BG));
+				g2.fillRect(0, 0, w, h);
+				g2.setColor(INV_EDGE_DARK);
+				g2.drawRect(0, 0, w - 1, h - 1);
+				g2.setColor(INV_EDGE_LIGHT);
+				g2.drawLine(1, 1, w - 2, 1);
+				g2.drawLine(1, 1, 1, h - 2);
+			}
+		}
+		finally
+		{
+			g2.dispose();
+		}
+		super.paintComponent(g);
+	}
+
 	/** Detach this grid from future async icon callbacks. */
 	void dispose()
 	{
 		disposed = true;
 	}
 
-	private static void setSlotBorder(Slot slot, boolean present)
+	private void setSlotBorder(Slot slot, boolean present)
 	{
+		if (!presenceBorders)
+		{
+			slot.label.setBorder(BorderFactory.createEmptyBorder(1, 1, 1, 1));
+			return;
+		}
 		slot.label.setBorder(BorderFactory.createLineBorder(present ? PRESENT : MISSING, 1));
 	}
 

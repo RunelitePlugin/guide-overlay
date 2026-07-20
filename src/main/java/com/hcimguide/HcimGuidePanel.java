@@ -505,6 +505,24 @@ public class HcimGuidePanel extends PluginPanel
 		}
 	}
 
+	/**
+	 * Re-run icon resolution for every built grid (EDT only) - called after
+	 * the full item-database scan finds icons the price search couldn't.
+	 */
+	void reresolveIcons()
+	{
+		for (BankSection section : bankSections)
+		{
+			for (StepRow row : section.rows)
+			{
+				if (row.grid != null)
+				{
+					plugin.resolveItemIcons(row.grid);
+				}
+			}
+		}
+	}
+
 	void setTargetStatus(String name, boolean nearby)
 	{
 		if (name == null)
@@ -1042,7 +1060,7 @@ public class HcimGuidePanel extends PluginPanel
 			if (cond != null && cond.getType() == StepCondition.Type.ITEMS_IN_INVENTORY
 				&& config.showItemGrids())
 			{
-				grid = new ItemGridPanel(cond.getItems());
+				grid = new ItemGridPanel(cond.getItems(), config.itemPresenceBorders());
 				JPanel gridWrap = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
 				gridWrap.setOpaque(false);
 				gridWrap.add(grid);
