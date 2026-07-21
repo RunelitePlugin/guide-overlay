@@ -18,7 +18,10 @@ off in the settings.
 - Checkboxes for every step, with progress bars per section and overall
 - Progress saves automatically and keeps across sessions
 - Search your guide, or jump straight to your next unchecked step
-- Starting mid-guide? Right-click any step to mark everything before it complete
+- When a finished bank auto-collapses, the next one opens and scrolls into
+  view by itself
+- Starting mid-guide? Right-click any step to mark everything before it
+  complete — or clear everything after it to rewind
 - Separate progress per character — if your hardcore dies, the new one starts fresh
 - Back up your progress to the clipboard and restore it anywhere
 
@@ -28,10 +31,21 @@ off in the settings.
   started/finished, skill levels reached, items collected
 - Unticking a step manually always wins — it stays unticked
 
+## Step navigation
+
+- Small ◀ ▶ arrow buttons check off your current step or un-check the last
+  one — attached under the on-screen box, free-floating anywhere (Alt+drag),
+  or hidden, your choice
+- Optional keybinds for next/previous step, unbound by default and fully
+  configurable
+
 ## Finding your way
 
 - Pin a step and its NPC gets the in-game hint arrow and a glowing outline
-- Too far away? A compass arrow points toward them with the tile distance
+- Too far away? A compass arrow points toward them with the tile distance —
+  and with nothing pinned it points at your next step's target automatically
+- Compass looks are configurable: full dial or bare arrow, solid triangle
+  or an arrow with a tail
 - The world map marks where your next step wants you to go
 - NPCs and ground items your current section needs are highlighted automatically
 
@@ -53,6 +67,8 @@ off in the settings.
 ## On-screen overlay
 
 - A small movable box shows your current section, next steps, and route tip
+- The current step's item pictures can show right in the box (toggleable),
+  so you see what to grab without opening the sidebar
 - Everything repositions with Alt+drag and has size/font/color settings
 
 ## Getting started
@@ -74,7 +90,6 @@ off in the settings.
 - Run `./tools/audit.sh` for dependency-free safety checks.
 - Pin both raw GitHub data URLs to reviewed commit SHAs before Plugin Hub
   submission; `tools/submit.sh` performs that pinning automatically.
-- See `SECURITY_REVIEW.md` for the review scope, changes, and limitations.
 
 ## License
 

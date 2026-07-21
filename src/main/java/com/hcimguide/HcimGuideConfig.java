@@ -5,6 +5,7 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
+import net.runelite.client.config.Keybind;
 import net.runelite.client.config.Range;
 
 @ConfigGroup(HcimGuideConfig.GROUP)
@@ -23,6 +24,21 @@ public interface HcimGuideConfig extends Config
 		SMALL,
 		REGULAR,
 		BOLD
+	}
+
+	/** Where the clickable next/previous step arrows live. */
+	enum ArrowMode
+	{
+		ATTACHED,
+		FLOATING,
+		HIDDEN
+	}
+
+	/** Compass needle style. */
+	enum CompassArrowStyle
+	{
+		TRIANGLE,
+		TAILED
 	}
 
 	/** Text size for step text in the side panel. */
@@ -110,6 +126,13 @@ public interface HcimGuideConfig extends Config
 	)
 	String routeSection = "route";
 
+	@ConfigSection(
+		name = "Step navigation",
+		description = "Clickable next/previous step arrows and optional keybinds. Next checks off your current step; Previous un-checks the last one.",
+		position = 9
+	)
+	String navSection = "nav";
+
 	// ------------------------------------------------------------------ target tracking
 
 	@ConfigItem(
@@ -139,7 +162,7 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "showDirectionArrow",
 		name = "Compass to far targets",
-		description = "When the pinned target is too far away to be nearby, show a compass arrow toward its last known location. Movable with Alt+drag.",
+		description = "When your target is too far away to be nearby, show a compass arrow toward its last known location. Movable with Alt+drag.",
 		position = 3,
 		section = targetSection
 	)
@@ -148,12 +171,48 @@ public interface HcimGuideConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "compassNextStep",
+		name = "Compass without pinning",
+		description = "With nothing pinned, point the compass at the NEXT unchecked step's known target, so it's there whenever there's somewhere to go. Turn off to only show the compass for steps you pin with ⌖.",
+		position = 4,
+		section = targetSection
+	)
+	default boolean compassNextStep()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "compassShowRing",
+		name = "Compass outer circle",
+		description = "Draw the round dial behind the compass needle. Turn off for just the floating arrow.",
+		position = 5,
+		section = targetSection
+	)
+	default boolean compassShowRing()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "compassArrowStyle",
+		name = "Arrow style",
+		description = "Triangle: a solid pointer. Tailed: an arrow with a shaft, like a drawn arrow.",
+		position = 6,
+		section = targetSection
+	)
+	default CompassArrowStyle compassArrowStyle()
+	{
+		return CompassArrowStyle.TRIANGLE;
+	}
+
 	@Range(min = 32, max = 96)
 	@ConfigItem(
 		keyName = "compassSize",
 		name = "Compass size",
 		description = "Diameter of the far-target compass, in pixels",
-		position = 4,
+		position = 7,
 		section = targetSection
 	)
 	default int compassSize()
@@ -166,7 +225,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "compassOpacity",
 		name = "Compass opacity",
 		description = "Opacity of the far-target compass (percent)",
-		position = 5,
+		position = 8,
 		section = targetSection
 	)
 	default int compassOpacity()
@@ -178,7 +237,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "compassShowDistance",
 		name = "Show tile distance",
 		description = "Show the tile distance under the far-target compass",
-		position = 6,
+		position = 9,
 		section = targetSection
 	)
 	default boolean compassShowDistance()
@@ -390,6 +449,18 @@ public interface HcimGuideConfig extends Config
 		return FontStyle.CLIENT_DEFAULT;
 	}
 
+	@ConfigItem(
+		keyName = "hudShowStepItems",
+		name = "Item pictures on HUD",
+		description = "Show the current step's item pictures inside the on-screen box. The side panel's own item grids have a separate toggle under Side panel, so you can show items in either place, both, or neither.",
+		position = 5,
+		section = hudSection
+	)
+	default boolean hudShowStepItems()
+	{
+		return true;
+	}
+
 	// ------------------------------------------------------------------ side panel
 
 	@ConfigItem(
@@ -561,6 +632,56 @@ public interface HcimGuideConfig extends Config
 	default String routeExcluded()
 	{
 		return "";
+	}
+
+	// ------------------------------------------------------------------ step navigation
+
+	@ConfigItem(
+		keyName = "navArrows",
+		name = "Arrow buttons",
+		description = "Where the clickable ◀ ▶ step arrows appear: Attached sits under the on-screen HUD box (needs the HUD overlay on), Floating is its own small overlay you can Alt+drag anywhere, Hidden removes them. Clicking ▶ checks off your current step; ◀ un-checks the last one.",
+		position = 1,
+		section = navSection
+	)
+	default ArrowMode navArrows()
+	{
+		return ArrowMode.ATTACHED;
+	}
+
+	@ConfigItem(
+		keyName = "navKeybindsEnabled",
+		name = "Enable keybinds",
+		description = "Master switch for the next/previous step keybinds below",
+		position = 2,
+		section = navSection
+	)
+	default boolean navKeybindsEnabled()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "nextStepKeybind",
+		name = "Next step key",
+		description = "Marks your current step complete and advances to the next. Unbound by default - click and press any key combo. Prefer combos or F-keys over plain letters if you type in chat.",
+		position = 3,
+		section = navSection
+	)
+	default Keybind nextStepKeybind()
+	{
+		return Keybind.NOT_SET;
+	}
+
+	@ConfigItem(
+		keyName = "prevStepKeybind",
+		name = "Previous step key",
+		description = "Un-checks your most recently completed step and moves back to it. Unbound by default - click and press any key combo.",
+		position = 4,
+		section = navSection
+	)
+	default Keybind prevStepKeybind()
+	{
+		return Keybind.NOT_SET;
 	}
 
 	// ------------------------------------------------------------------ progress

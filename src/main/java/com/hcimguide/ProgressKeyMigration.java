@@ -56,4 +56,55 @@ final class ProgressKeyMigration
 		}
 		return migrated;
 	}
+
+	/**
+	 * Replays progress recorded under keys a parser used to produce (the guide
+	 * carries an explicit old-key -&gt; new-key map, e.g. after the JSON parser's
+	 * run-joining fix changed step texts). Old keys are consumed so the store
+	 * stays clean.
+	 *
+	 * Two safety properties: (1) a legacy key that COLLIDES with some real
+	 * step's current key is never touched - genuine new-format progress always
+	 * wins over a migration guess; (2) the replay is two-phase against a
+	 * snapshot, so chained same-hash mappings (#2-&gt;#1, #1-&gt;#0) can't consume
+	 * each other's freshly-migrated keys regardless of map iteration order.
+	 *
+	 * @return true when the supplied set was changed
+	 */
+	static boolean migrateLegacyKeys(Guide guide, Set<String> completedSteps)
+	{
+		if (guide == null || completedSteps == null || guide.getLegacyStepKeys().isEmpty())
+		{
+			return false;
+		}
+		Set<String> currentKeys = new java.util.HashSet<>();
+		for (GuideEpisode ep : guide.getEpisodes())
+		{
+			for (GuideBank bank : ep.getBanks())
+			{
+				for (GuideStep step : bank.getSteps())
+				{
+					currentKeys.add(step.getKey());
+				}
+			}
+		}
+		Set<String> snapshot = new java.util.HashSet<>(completedSteps);
+		Set<String> toRemove = new java.util.HashSet<>();
+		Set<String> toAdd = new java.util.HashSet<>();
+		for (Map.Entry<String, String> e : guide.getLegacyStepKeys().entrySet())
+		{
+			if (currentKeys.contains(e.getKey()))
+			{
+				continue; // a real step owns this key - never steal it
+			}
+			if (snapshot.contains(e.getKey()))
+			{
+				toRemove.add(e.getKey());
+				toAdd.add(e.getValue());
+			}
+		}
+		boolean changed = completedSteps.removeAll(toRemove);
+		changed |= completedSteps.addAll(toAdd);
+		return changed;
+	}
 }

@@ -58,6 +58,58 @@ public final class ItemListParser
 			.replaceAll("\\s*\\((?:[^)]*\\s[^)]*|[^)]{8,})\\)\\s*$", "")
 			.replaceAll("[.\\s]+$", "");
 
+		return parseList(list);
+	}
+
+	/**
+	 * Items list from a JSON guide's " (Items: 100 gp, knife, logs)" step
+	 * suffix (appended from its items_needed metadata), or null when the step
+	 * has none. Display/bank-tag/icon use ONLY - unlike a Withdraw step this
+	 * never becomes an auto-completion condition, because holding the items is
+	 * not what completes such a step.
+	 */
+	public static List<ItemReq> parseItemsSuffix(String text)
+	{
+		if (text == null)
+		{
+			return null;
+		}
+		int idx = text.lastIndexOf("(Items: ");
+		if (idx < 0)
+		{
+			return null;
+		}
+		String inner = text.substring(idx + "(Items: ".length()).trim();
+		// the step may have been length-capped mid-suffix ("...…"): parse the
+		// items that survived instead of dropping the whole list
+		boolean truncated = false;
+		if (inner.endsWith("…"))
+		{
+			inner = inner.substring(0, inner.length() - 1);
+			truncated = true;
+		}
+		if (inner.endsWith(")"))
+		{
+			inner = inner.substring(0, inner.length() - 1);
+			truncated = false; // the list closed before the cap hit
+		}
+		List<ItemReq> out = parseList(inner);
+		if (truncated && out != null && !out.isEmpty())
+		{
+			// the cap cut mid-list: the final fragment ("kni…") is not a real
+			// item name - drop it rather than show a bogus grid entry
+			out.remove(out.size() - 1);
+			if (out.isEmpty())
+			{
+				return null;
+			}
+		}
+		return out;
+	}
+
+	/** Split a comma/&amp;/+-separated item list into requirements. */
+	private static List<ItemReq> parseList(String list)
+	{
 		List<ItemReq> out = new ArrayList<>();
 		// the guide separates items with commas, ampersands, and plus signs
 		for (String part : list.split(",|&|\\+"))

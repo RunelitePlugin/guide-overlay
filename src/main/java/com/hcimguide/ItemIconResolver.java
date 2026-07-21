@@ -146,14 +146,29 @@ public class ItemIconResolver
 			return cached;
 		}
 
-		int id = byKnownId(name);
+		// colloquial guide names ("Ardy Cloak", "Wine") hop to the exact
+		// in-game name first, then resolve through the normal pipeline
+		String canonical = ItemAliases.canonical(key);
+		String lookupName = canonical != null ? canonical : name;
+		String lookupKey = canonical != null ? ItemReq.normalize(canonical) : key;
+		if (canonical != null)
+		{
+			Integer viaCanonical = cache.get(lookupKey);
+			if (viaCanonical != null)
+			{
+				cache.put(key, viaCanonical);
+				return viaCanonical;
+			}
+		}
+
+		int id = byKnownId(lookupName);
 		if (id <= 0)
 		{
-			id = bySearch(name);
+			id = bySearch(lookupName);
 		}
-		if (id <= 0 && name.toLowerCase(Locale.ROOT).endsWith("s"))
+		if (id <= 0 && lookupName.toLowerCase(Locale.ROOT).endsWith("s"))
 		{
-			id = bySearch(name.substring(0, name.length() - 1));
+			id = bySearch(lookupName.substring(0, lookupName.length() - 1));
 		}
 
 		// only cache successes: a failure may just mean the price list hasn't
@@ -161,11 +176,12 @@ public class ItemIconResolver
 		if (id > 0)
 		{
 			cache.put(key, id);
+			cache.put(lookupKey, id);
 		}
-		else if (!unresolvable.contains(key))
+		else if (!unresolvable.contains(lookupKey))
 		{
 			// remember for the full-database scan (untradeables etc.)
-			pendingScan.add(key);
+			pendingScan.add(lookupKey);
 		}
 		return id;
 	}
@@ -247,6 +263,17 @@ public class ItemIconResolver
 					cache.putIfAbsent(norm + "s", id);
 					pendingScan.remove(norm + "s");
 					found = true;
+				}
+				// guide says "Maple Log", definition says "Maple logs"
+				if (norm.endsWith("s"))
+				{
+					String singular = norm.substring(0, norm.length() - 1);
+					if (targets.remove(singular))
+					{
+						cache.putIfAbsent(singular, id);
+						pendingScan.remove(singular);
+						found = true;
+					}
 				}
 			}
 			catch (Exception ignored)

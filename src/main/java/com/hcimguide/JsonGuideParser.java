@@ -104,7 +104,7 @@ public class JsonGuideParser
 				{
 					GuideBank bank = new GuideBank("C" + chapterNo + ".S0", "Steps", chapterNo);
 					episode.getBanks().add(bank);
-					stepCount = addSteps(bank, directSteps, stepCount);
+					stepCount = addSteps(guide, bank, directSteps, stepCount);
 				}
 				continue;
 			}
@@ -121,13 +121,13 @@ public class JsonGuideParser
 				String title = WikitextParser.sanitizeDisplay(optString(section, "title", "Section " + sectionNo));
 				GuideBank bank = new GuideBank("C" + chapterNo + ".S" + sectionNo, title, chapterNo);
 				episode.getBanks().add(bank);
-				stepCount = addSteps(bank, optArray(section, "steps"), stepCount);
+				stepCount = addSteps(guide, bank, optArray(section, "steps"), stepCount);
 			}
 		}
 		return guide;
 	}
 
-	private int addSteps(GuideBank bank, JsonArray steps, int stepCount)
+	private int addSteps(Guide guide, GuideBank bank, JsonArray steps, int stepCount)
 	{
 		if (steps == null)
 		{
@@ -137,6 +137,9 @@ public class JsonGuideParser
 		// WikitextParser): keys stay stable when unrelated steps are inserted
 		// or removed upstream, so a re-import never resets unrelated progress
 		java.util.Map<String, Integer> occByText = new java.util.HashMap<>();
+		// same contract for the LEGACY (space-joined) texts, tracked separately
+		// so old keys are reproduced exactly as the previous parser built them
+		java.util.Map<String, Integer> occByLegacy = new java.util.HashMap<>();
 		for (JsonElement stepEl : steps)
 		{
 			if (stepCount >= MAX_STEPS || !stepEl.isJsonObject())
@@ -145,11 +148,17 @@ public class JsonGuideParser
 			}
 			JsonObject step = stepEl.getAsJsonObject();
 
-			String text = joinContent(optArray(step, "content"));
+			String text = joinContent(optArray(step, "content"), false);
+			String legacy = joinContent(optArray(step, "content"), true);
 			String itemsSuffix = itemsSuffix(step);
+			// KNOWN BOUNDED EDGE: a step is added (and both occurrence counters
+			// advanced) only when the NEW verbatim text is non-empty. If runs
+			// concatenate into a fully-strippable tag while the old space-joined
+			// form did not (pathological input), later duplicate-text legacy
+			// keys shift and miss migration - the user re-ticks those steps.
 			if (!text.isEmpty())
 			{
-				addStep(bank, text + itemsSuffix, 0, occByText);
+				addStep(guide, bank, text + itemsSuffix, legacy + itemsSuffix, 0, occByText, occByLegacy);
 				stepCount++;
 			}
 
@@ -163,11 +172,12 @@ public class JsonGuideParser
 						continue;
 					}
 					JsonObject n = nEl.getAsJsonObject();
-					String nText = joinContent(optArray(n, "content"));
+					String nText = joinContent(optArray(n, "content"), false);
+					String nLegacy = joinContent(optArray(n, "content"), true);
 					if (!nText.isEmpty())
 					{
 						int depth = Math.max(1, Math.min(4, optInt(n, "level", 1)));
-						addStep(bank, nText, depth, occByText);
+						addStep(guide, bank, nText, nLegacy, depth, occByText, occByLegacy);
 						stepCount++;
 					}
 				}
@@ -176,7 +186,8 @@ public class JsonGuideParser
 		return stepCount;
 	}
 
-	private static void addStep(GuideBank bank, String text, int depth, java.util.Map<String, Integer> occByText)
+	private static void addStep(Guide guide, GuideBank bank, String text, String legacyText, int depth,
+		java.util.Map<String, Integer> occByText, java.util.Map<String, Integer> occByLegacy)
 	{
 		// enforce the documented cap on the COMBINED text (items suffix included)
 		if (text.length() > MAX_TEXT)
@@ -186,10 +197,36 @@ public class JsonGuideParser
 		int occ = occByText.merge(text, 1, Integer::sum) - 1;
 		String key = bank.getId() + "#" + Integer.toHexString(text.hashCode()) + "#" + occ;
 		bank.getSteps().add(new GuideStep(key, text, depth, bank.getId()));
+
+		// an earlier parser version joined formatting runs with spaces,
+		// producing different text (and therefore a different key) for any
+		// multi-run step. Record old-key -> new-key so existing progress
+		// migrates instead of resetting. The legacy occurrence counter runs
+		// over ALL steps (mirroring the old parser exactly), not just changed
+		// ones, so occurrence indexes line up.
+		if (legacyText.length() > MAX_TEXT)
+		{
+			legacyText = legacyText.substring(0, MAX_TEXT - 1) + "…";
+		}
+		int legacyOcc = occByLegacy.merge(legacyText, 1, Integer::sum) - 1;
+		if (!legacyText.equals(text) || legacyOcc != occ)
+		{
+			String legacyKey = bank.getId() + "#" + Integer.toHexString(legacyText.hashCode()) + "#" + legacyOcc;
+			if (!legacyKey.equals(key))
+			{
+				guide.getLegacyStepKeys().put(legacyKey, key);
+			}
+		}
 	}
 
-	/** Concatenate a content array's text fields into one clean, sanitized step line. */
-	private static String joinContent(JsonArray content)
+	/**
+	 * Concatenate a content array's text fields into one clean, sanitized step
+	 * line. Runs are FORMATTING runs and are frequently split mid-word
+	 * ("Gr" + "ab coins"), so they concatenate verbatim - each run carries its
+	 * own spacing. legacySpacing reproduces the old space-inserting behavior
+	 * solely so progress keys recorded under it can be migrated.
+	 */
+	private static String joinContent(JsonArray content, boolean legacySpacing)
 	{
 		if (content == null)
 		{
@@ -203,7 +240,7 @@ public class JsonGuideParser
 				String t = optString(el.getAsJsonObject(), "text", "");
 				if (!t.isEmpty())
 				{
-					if (sb.length() > 0)
+					if (legacySpacing && sb.length() > 0)
 					{
 						sb.append(' ');
 					}

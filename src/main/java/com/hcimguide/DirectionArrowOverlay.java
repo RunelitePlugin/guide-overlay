@@ -15,9 +15,13 @@ import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
 
 /**
- * Compass widget shown when the pinned target is known but too far away to
+ * Compass widget shown when the tracked target is known but too far away to
  * be in the loaded scene: an arrow pointing toward the target (relative to
  * the current camera rotation) with an optional tile distance underneath.
+ * Points at the pinned step's target; with nothing pinned it falls back to
+ * the next unchecked step's known location (config-gated), so the compass
+ * is there whenever the guide knows where you're headed. Dial and needle
+ * style are configurable (full dial or bare arrow; triangle or tailed).
  *
  * Deliberately unobtrusive: small by default, semi-transparent (opacity
  * configurable), only visible while a far-away target is active, and movable
@@ -27,6 +31,13 @@ import net.runelite.client.ui.overlay.OverlayPosition;
 public class DirectionArrowOverlay extends Overlay
 {
 	private static final int TEXT_HEIGHT = 14;
+
+	/**
+	 * The next-step fallback only engages beyond this 2D tile distance:
+	 * within it, an out-of-scene result usually means a plane mismatch
+	 * (target upstairs), where a compass would just point at the floor.
+	 */
+	private static final int MIN_FALLBACK_DISTANCE = 40;
 
 	private final Client client;
 	private final HcimGuidePlugin plugin;
@@ -49,9 +60,29 @@ public class DirectionArrowOverlay extends Overlay
 		{
 			return null;
 		}
-		WorldPoint target = plugin.getFarTarget();
 		Player player = client.getLocalPlayer();
-		if (target == null || player == null)
+		if (player == null)
+		{
+			return null; // checked FIRST: the fallback below must not run without a player
+		}
+		WorldPoint target = plugin.getFarTarget();
+		// nothing pinned: fall back to the NEXT unchecked step's known target
+		// (config-gated), but only when it's genuinely far - nearby targets are
+		// already handled by highlights and the hint arrow, and fromWorld also
+		// returns null for a mere PLANE mismatch (target upstairs), where a
+		// "2 tiles north" compass would mislead. Never while something IS
+		// pinned: the next-step point isn't refreshed then.
+		if (target == null && config.compassNextStep() && !plugin.hasPinnedTarget())
+		{
+			WorldPoint next = plugin.getNextStepPoint();
+			if (next != null
+				&& next.distanceTo2D(player.getWorldLocation()) > MIN_FALLBACK_DISTANCE
+				&& net.runelite.api.coords.LocalPoint.fromWorld(client.getTopLevelWorldView(), next) == null)
+			{
+				target = next;
+			}
+		}
+		if (target == null)
 		{
 			return null;
 		}
@@ -80,23 +111,34 @@ public class DirectionArrowOverlay extends Overlay
 		int r = size / 2 - 3;
 		Color accent = withOpacity(config.highlightColor(), opacity);
 
-		g.setColor(withOpacity(new Color(0, 0, 0, 140), opacity));
-		g.fillOval(cx - r, cy - r, r * 2, r * 2);
-		g.setColor(accent);
-		g.setStroke(new BasicStroke(1.5f));
-		g.drawOval(cx - r, cy - r, r * 2, r * 2);
+		if (config.compassShowRing())
+		{
+			g.setColor(withOpacity(new Color(0, 0, 0, 140), opacity));
+			g.fillOval(cx - r, cy - r, r * 2, r * 2);
+			g.setColor(accent);
+			g.setStroke(new BasicStroke(1.5f));
+			g.drawOval(cx - r, cy - r, r * 2, r * 2);
+		}
 
-		// triangle arrow: tip at the circle edge, base corners rotated +-150 degrees
+		g.setColor(accent);
 		int tipX = cx + (int) Math.round(Math.sin(screenAngle) * (r - 4));
 		int tipY = cy - (int) Math.round(Math.cos(screenAngle) * (r - 4));
-		double left = screenAngle + Math.toRadians(150);
-		double right = screenAngle - Math.toRadians(150);
-		int arm = Math.max(8, size / 4);
-		Polygon tri = new Polygon();
-		tri.addPoint(tipX, tipY);
-		tri.addPoint(tipX + (int) Math.round(Math.sin(left) * arm), tipY - (int) Math.round(Math.cos(left) * arm));
-		tri.addPoint(tipX + (int) Math.round(Math.sin(right) * arm), tipY - (int) Math.round(Math.cos(right) * arm));
-		g.fillPolygon(tri);
+		if (config.compassArrowStyle() == HcimGuideConfig.CompassArrowStyle.TAILED)
+		{
+			// arrow with a tail: shaft from the back of the dial to the tip,
+			// capped by a smaller head so it reads as a drawn arrow
+			int tailX = cx - (int) Math.round(Math.sin(screenAngle) * (r - 5));
+			int tailY = cy + (int) Math.round(Math.cos(screenAngle) * (r - 5));
+			g.setStroke(new BasicStroke(Math.max(2f, size / 22f),
+				BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+			g.drawLine(tailX, tailY, tipX, tipY);
+			drawHead(g, tipX, tipY, screenAngle, Math.max(6, size / 5));
+		}
+		else
+		{
+			// solid triangle: tip at the dial edge, base corners rotated +-150 degrees
+			drawHead(g, tipX, tipY, screenAngle, Math.max(8, size / 4));
+		}
 
 		if (showDistance)
 		{
@@ -110,6 +152,18 @@ public class DirectionArrowOverlay extends Overlay
 		}
 
 		return new Dimension(size, size + (showDistance ? TEXT_HEIGHT : 0));
+	}
+
+	/** Filled triangular arrowhead with its tip at (tipX, tipY). */
+	private static void drawHead(Graphics2D g, int tipX, int tipY, double angle, int arm)
+	{
+		double left = angle + Math.toRadians(150);
+		double right = angle - Math.toRadians(150);
+		Polygon tri = new Polygon();
+		tri.addPoint(tipX, tipY);
+		tri.addPoint(tipX + (int) Math.round(Math.sin(left) * arm), tipY - (int) Math.round(Math.cos(left) * arm));
+		tri.addPoint(tipX + (int) Math.round(Math.sin(right) * arm), tipY - (int) Math.round(Math.cos(right) * arm));
+		g.fillPolygon(tri);
 	}
 
 	private static Color withOpacity(Color c, double opacity)

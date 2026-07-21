@@ -74,6 +74,8 @@ public class ItemGridPanel extends JPanel
 		final ItemReq req;
 		final JLabel label;
 		boolean present;
+		/** Last resolved item id for this slot (-1 = no matching item). */
+		int itemId = -1;
 
 		Slot(ItemReq req, JLabel label)
 		{
@@ -126,41 +128,121 @@ public class ItemGridPanel extends JPanel
 
 	/**
 	 * Resolve icons via the item manager. Call from any thread; icon updates
-	 * hop to the EDT when each image loads.
+	 * hop to the EDT when each image loads. Slots are also REORDERED so real,
+	 * recognized items come first and anything without an item behind it
+	 * ("2 Food", "Combat Gear") sinks to the end of the grid - stable order
+	 * within each group, idempotent across re-resolution passes.
 	 *
 	 * @param ids one resolved item id per slot, -1 for unresolved
 	 */
-	void applyIcons(ItemManager itemManager, int[] ids)
+	void applyIcons(ItemManager itemManager, List<ItemReq> reqs, int[] ids)
 	{
-		for (int i = 0; i < slots.size() && i < ids.length; i++)
+		// pair ids to slots by REQUIREMENT IDENTITY, not position: a reorder
+		// scheduled by an earlier pass may land between the caller's resolve()
+		// and this call, and positional pairing would then swap icons. The
+		// same ItemReq objects live in both the slots and the caller's list,
+		// so identity mapping is exact.
+		final java.util.IdentityHashMap<ItemReq, Integer> byReq = new java.util.IdentityHashMap<>();
+		for (int i = 0; i < reqs.size() && i < ids.length; i++)
 		{
-			if (ids[i] <= 0)
+			byReq.put(reqs.get(i), ids[i]);
+		}
+		final List<Slot> snapshot;
+		List<Slot> reordered = null;
+		synchronized (slots)
+		{
+			snapshot = new ArrayList<>(slots);
+			for (Slot s : snapshot)
+			{
+				Integer id = byReq.get(s.req);
+				if (id != null)
+				{
+					s.itemId = id;
+				}
+			}
+			List<Slot> resolved = new ArrayList<>();
+			List<Slot> unresolved = new ArrayList<>();
+			for (Slot s : snapshot)
+			{
+				(s.itemId > 0 ? resolved : unresolved).add(s);
+			}
+			if (!resolved.isEmpty() && !unresolved.isEmpty())
+			{
+				List<Slot> candidate = new ArrayList<>(resolved);
+				candidate.addAll(unresolved);
+				// skip the EDT rebuild when already partitioned (idempotent)
+				if (!candidate.equals(snapshot))
+				{
+					reordered = candidate;
+				}
+			}
+		}
+		if (reordered != null)
+		{
+			final List<Slot> ordered = reordered;
+			SwingUtilities.invokeLater(() ->
+			{
+				if (disposed)
+				{
+					return;
+				}
+				synchronized (slots)
+				{
+					if (ordered.size() != slots.size())
+					{
+						return; // a newer generation replaced the slots
+					}
+					slots.clear();
+					slots.addAll(ordered);
+				}
+				removeAll();
+				for (Slot s : ordered)
+				{
+					add(s.label);
+				}
+				// pad the last row so slots keep their size
+				int rows = (ordered.size() + COLUMNS - 1) / COLUMNS;
+				int pad = rows * COLUMNS - ordered.size();
+				for (int i = 0; i < pad; i++)
+				{
+					JLabel filler = new JLabel();
+					filler.setPreferredSize(new Dimension(SLOT, SLOT_H));
+					add(filler);
+				}
+				revalidate();
+				repaint();
+			});
+		}
+
+		for (Slot slot : snapshot)
+		{
+			if (slot.itemId <= 0)
 			{
 				continue;
 			}
-			Slot slot = slots.get(i);
 			int qty = slot.req.getQuantity();
-			AsyncBufferedImage img = itemManager.getImage(ids[i], qty, qty > 1);
+			AsyncBufferedImage img = itemManager.getImage(slot.itemId, qty, qty > 1);
+			final Slot finalSlot = slot;
 			Runnable apply = () ->
 			{
 				if (disposed)
 				{
 					return;
 				}
-				slot.label.setText(null);
+				finalSlot.label.setText(null);
 				// item sprites are 36x32 natively - exactly the slot size, so
 				// they render crisp and unscaled; only oversized images shrink
 				if (img.getWidth() > SLOT)
 				{
-					slot.label.setIcon(new ImageIcon(img.getScaledInstance(
+					finalSlot.label.setIcon(new ImageIcon(img.getScaledInstance(
 						SLOT, -1, java.awt.Image.SCALE_SMOOTH)));
 				}
 				else
 				{
-					slot.label.setIcon(new ImageIcon(img));
+					finalSlot.label.setIcon(new ImageIcon(img));
 				}
-				slot.label.revalidate();
-				slot.label.repaint();
+				finalSlot.label.revalidate();
+				finalSlot.label.repaint();
 			};
 			img.onLoaded(() -> SwingUtilities.invokeLater(apply));
 			SwingUtilities.invokeLater(apply);
@@ -170,7 +252,12 @@ public class ItemGridPanel extends JPanel
 	/** Update presence borders from the current inventory snapshot (O(1) per slot). */
 	void updatePresence(InventorySnapshot snapshot)
 	{
-		for (Slot slot : slots)
+		final List<Slot> copy;
+		synchronized (slots)
+		{
+			copy = new ArrayList<>(slots);
+		}
+		for (Slot slot : copy)
 		{
 			boolean present = snapshot.countOf(slot.req) >= slot.req.getQuantity();
 			if (present != slot.present)
@@ -245,11 +332,14 @@ public class ItemGridPanel extends JPanel
 
 	List<ItemReq> getItems()
 	{
-		List<ItemReq> out = new ArrayList<>();
-		for (Slot s : slots)
+		synchronized (slots)
 		{
-			out.add(s.req);
+			List<ItemReq> out = new ArrayList<>();
+			for (Slot s : slots)
+			{
+				out.add(s.req);
+			}
+			return out;
 		}
-		return out;
 	}
 }

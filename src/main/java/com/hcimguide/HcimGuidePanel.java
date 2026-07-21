@@ -471,6 +471,7 @@ public class HcimGuidePanel extends PluginPanel
 				&& !section.bank.getSteps().isEmpty())
 			{
 				section.setExpanded(false);
+				expandNextAfterAutoCollapse(section);
 			}
 		}
 		updateProgress();
@@ -641,6 +642,44 @@ public class HcimGuidePanel extends PluginPanel
 		updateProgress();
 		banksContainer.revalidate();
 		banksContainer.repaint();
+	}
+
+	/**
+	 * After a section auto-collapses on completion, open the next section
+	 * that still has work and scroll to it - the checklist flows straight
+	 * into the next bank with no extra clicks. Called only at the moment an
+	 * AUTO-collapse happens, so sections the player collapsed by hand are
+	 * never reopened.
+	 */
+	private void expandNextAfterAutoCollapse(BankSection collapsed)
+	{
+		// while a search filter is active, sections are hidden/shown by match:
+		// expanding (and scrolling to) a filtered-out section would fight the
+		// filter and scroll against stale layout - skip until the search clears
+		if (!searchField.getText().trim().isEmpty())
+		{
+			return;
+		}
+		int from = bankSections.indexOf(collapsed);
+		if (from < 0)
+		{
+			return;
+		}
+		for (int i = from + 1; i < bankSections.size(); i++)
+		{
+			BankSection next = bankSections.get(i);
+			if (!next.isComplete())
+			{
+				if (!next.expanded)
+				{
+					next.setExpanded(true);
+				}
+				// scroll after the collapse/expand relayout settles
+				SwingUtilities.invokeLater(() -> next.scrollRectToVisible(
+					new Rectangle(0, 0, next.getWidth(), next.getHeight())));
+				return;
+			}
+		}
 	}
 
 	/** Expand and scroll to one bank section; collapses the others. */
@@ -919,6 +958,7 @@ public class HcimGuidePanel extends PluginPanel
 			if (completed && config.autoCollapseCompleted())
 			{
 				setExpanded(false);
+				expandNextAfterAutoCollapse(this);
 			}
 		}
 
@@ -992,6 +1032,7 @@ public class HcimGuidePanel extends PluginPanel
 				if (checkBox.isSelected() && config.autoCollapseCompleted() && section.isComplete())
 				{
 					section.setExpanded(false);
+					expandNextAfterAutoCollapse(section);
 				}
 			});
 			add(checkBox, BorderLayout.CENTER);
@@ -1013,6 +1054,24 @@ public class HcimGuidePanel extends PluginPanel
 				}
 			});
 			rowMenu.add(upToHere);
+			// ...and the mirror: rewind everything past this point (e.g. after
+			// an over-eager bulk complete or to redo a stretch of the guide)
+			JMenuItem clearAfter = new JMenuItem("Clear every step after this");
+			clearAfter.addActionListener(e ->
+			{
+				int choice = JOptionPane.showConfirmDialog(HcimGuidePanel.this,
+					"Un-check every step AFTER this one, across all chapters\n"
+						+ "and banks? (This step itself keeps its state. Cleared\n"
+						+ "steps won't auto-complete again this session unless\n"
+						+ "you re-tick them.)",
+					"Clear later steps", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+				if (choice == JOptionPane.OK_OPTION)
+				{
+					plugin.clearAllStepsAfter(step.getKey());
+					rebuildBanks();
+				}
+			});
+			rowMenu.add(clearAfter);
 			checkBox.setComponentPopupMenu(rowMenu);
 
 			StepCondition cond = plugin.getCondition(step.getKey());
@@ -1054,13 +1113,14 @@ public class HcimGuidePanel extends PluginPanel
 				add(east, BorderLayout.EAST);
 			}
 
-			// item icon grid for withdraw/collect steps - wrapped in a
-			// left-aligned flow so BorderLayout can't stretch the grid to the
-			// full row width (which would inflate the slots)
-			if (cond != null && cond.getType() == StepCondition.Type.ITEMS_IN_INVENTORY
-				&& config.showItemGrids())
+			// item icon grid for steps with item lists (withdraw/collect
+			// conditions AND JSON guides' display-only "(Items: ...)" lists) -
+			// wrapped in a left-aligned flow so BorderLayout can't stretch the
+			// grid to the full row width (which would inflate the slots)
+			java.util.List<ItemReq> gridItems = plugin.getStepItems(step.getKey());
+			if (gridItems != null && !gridItems.isEmpty() && config.showItemGrids())
 			{
-				grid = new ItemGridPanel(cond.getItems(), config.itemPresenceBorders());
+				grid = new ItemGridPanel(gridItems, config.itemPresenceBorders());
 				JPanel gridWrap = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
 				gridWrap.setOpaque(false);
 				gridWrap.add(grid);

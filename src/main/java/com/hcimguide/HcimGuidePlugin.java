@@ -140,6 +140,15 @@ public class HcimGuidePlugin extends Plugin
 	@Inject
 	private PathfinderIntegration pathfinder;
 
+	@Inject
+	private StepNavOverlay stepNavOverlay;
+
+	@Inject
+	private net.runelite.client.input.KeyManager keyManager;
+
+	@Inject
+	private net.runelite.client.input.MouseManager mouseManager;
+
 	/** Bank interface group id - the symbolic gameval constant, not a magic 12. */
 	private static final int BANK_GROUP_ID = InterfaceID.BANKMAIN;
 
@@ -157,6 +166,13 @@ public class HcimGuidePlugin extends Plugin
 	private volatile Guide currentGuide;
 	private volatile String currentGuideId = GuideRegistry.BUILTIN_ID;
 	private volatile Map<String, StepCondition> conditions = Collections.emptyMap();
+	/**
+	 * Step key -&gt; item requirements to DISPLAY for that step (item grids, HUD
+	 * pictures, bank tag). Superset of the ITEMS_IN_INVENTORY conditions: JSON
+	 * guides' "(Items: ...)" lists appear here too, without ever becoming an
+	 * auto-completion condition (holding the items isn't what completes them).
+	 */
+	private volatile Map<String, List<ItemReq>> stepItems = Collections.emptyMap();
 	/** Step key -&gt; extracted NPC target name; precomputed at import (never re-extracted per tick). */
 	private volatile Map<String, String> stepTargets = Collections.emptyMap();
 	/** Normalized target names of the current guide - bounds what the location store learns. */
@@ -213,6 +229,102 @@ public class HcimGuidePlugin extends Plugin
 	// icon prefetch (small buffer of upcoming banks; executor-side warm-up)
 	private volatile String lastPrefetchKey;
 
+	// ------- current-step item pictures for the HUD (see updateHudItems)
+
+	/** Immutable items+ids pair so the HUD never reads a mismatched snapshot. */
+	static final class HudItems
+	{
+		final List<ItemReq> items;
+		final int[] ids;
+
+		HudItems(List<ItemReq> items, int[] ids)
+		{
+			this.items = items;
+			this.ids = ids;
+		}
+	}
+
+	private volatile HudItems hudItems;
+	private volatile String hudItemsKey;
+	/** Bumps on every current-step change; stale resolutions are dropped. */
+	private final java.util.concurrent.atomic.AtomicInteger hudItemsGen =
+		new java.util.concurrent.atomic.AtomicInteger();
+
+	// ------- step navigation (clickable arrows + keybinds)
+
+	private final net.runelite.client.util.HotkeyListener nextStepHotkey =
+		new net.runelite.client.util.HotkeyListener(() -> config.nextStepKeybind())
+	{
+		@Override
+		public void hotkeyPressed()
+		{
+			if (config.navKeybindsEnabled())
+			{
+				navigateStep(true);
+			}
+		}
+	};
+
+	private final net.runelite.client.util.HotkeyListener prevStepHotkey =
+		new net.runelite.client.util.HotkeyListener(() -> config.prevStepKeybind())
+	{
+		@Override
+		public void hotkeyPressed()
+		{
+			if (config.navKeybindsEnabled())
+			{
+				navigateStep(false);
+			}
+		}
+	};
+
+	/** True between a consumed arrow press and its release, so both are eaten. */
+	private boolean navPressConsumed;
+
+	private final net.runelite.client.input.MouseAdapter navMouse =
+		new net.runelite.client.input.MouseAdapter()
+	{
+		@Override
+		public java.awt.event.MouseEvent mousePressed(java.awt.event.MouseEvent e)
+		{
+			// Alt+drag is overlay repositioning - never intercept it
+			if (e.getButton() != java.awt.event.MouseEvent.BUTTON1 || e.isAltDown())
+			{
+				return e;
+			}
+			int dir = hitNavArrow(e.getPoint());
+			if (dir != 0)
+			{
+				navPressConsumed = true;
+				e.consume();
+				navigateStep(dir > 0);
+			}
+			return e;
+		}
+
+		@Override
+		public java.awt.event.MouseEvent mouseReleased(java.awt.event.MouseEvent e)
+		{
+			if (navPressConsumed)
+			{
+				navPressConsumed = false;
+				e.consume();
+			}
+			return e;
+		}
+
+		@Override
+		public java.awt.event.MouseEvent mouseClicked(java.awt.event.MouseEvent e)
+		{
+			if (e.getButton() == java.awt.event.MouseEvent.BUTTON1 && !e.isAltDown()
+				&& hitNavArrow(e.getPoint()) != 0)
+			{
+				e.consume();
+			}
+			return e;
+		}
+	};
+
 	@Provides
 	HcimGuideConfig provideConfig(ConfigManager configManager)
 	{
@@ -236,6 +348,10 @@ public class HcimGuidePlugin extends Plugin
 		overlayManager.add(targetOverlay);
 		overlayManager.add(hudOverlay);
 		overlayManager.add(directionArrowOverlay);
+		overlayManager.add(stepNavOverlay);
+		keyManager.registerKeyListener(nextStepHotkey);
+		keyManager.registerKeyListener(prevStepHotkey);
+		mouseManager.registerMouseListener(navMouse);
 
 		// scrub a bank tag left behind by a crashed session if the feature is off
 		// (when it's on, the first sync cycle rebuilds the tag anyway)
@@ -296,6 +412,11 @@ public class HcimGuidePlugin extends Plugin
 		overlayManager.remove(targetOverlay);
 		overlayManager.remove(hudOverlay);
 		overlayManager.remove(directionArrowOverlay);
+		overlayManager.remove(stepNavOverlay);
+		keyManager.unregisterKeyListener(nextStepHotkey);
+		keyManager.unregisterKeyListener(prevStepHotkey);
+		mouseManager.unregisterMouseListener(navMouse);
+		navPressConsumed = false;
 		clientToolbar.removeNavigation(navButton);
 		executor.execute(locationStore::saveIfDirty);
 		bankTagIntegration.cleanup();
@@ -309,6 +430,8 @@ public class HcimGuidePlugin extends Plugin
 		inventory = InventorySnapshot.EMPTY;
 		currentGuide = null;
 		conditions = Collections.emptyMap();
+		stepItems = Collections.emptyMap();
+		clearHudItems();
 		stepTargets = Collections.emptyMap();
 		targetNamesNorm = Collections.emptySet();
 		activeBankCache = null;
@@ -384,6 +507,8 @@ public class HcimGuidePlugin extends Plugin
 		// everything atomically at the end.
 		currentGuide = null;
 		conditions = Collections.emptyMap();
+		stepItems = Collections.emptyMap();
+		clearHudItems();
 		stepTargets = Collections.emptyMap();
 		targetNamesNorm = Collections.emptySet();
 		activeBankCache = null;
@@ -581,6 +706,54 @@ public class HcimGuidePlugin extends Plugin
 			return;
 		}
 		setCompletedBulk(before, true);
+	}
+
+	/**
+	 * Mirror of {@link #completeAllStepsBefore}: un-checks every step AFTER
+	 * the given step in guide order, across banks and chapters, in one bulk
+	 * persist. The step itself keeps its state. Un-checking marks each step
+	 * manually-unticked (auto-suppressed), so auto-completion won't instantly
+	 * re-tick them - exactly like unticking each checkbox by hand.
+	 */
+	void clearAllStepsAfter(String stepKey)
+	{
+		Guide guide = currentGuide;
+		if (guide == null)
+		{
+			return;
+		}
+		List<GuideStep> after = new ArrayList<>();
+		boolean found = false;
+		for (GuideEpisode ep : guide.getEpisodes())
+		{
+			for (GuideBank bank : ep.getBanks())
+			{
+				for (GuideStep step : bank.getSteps())
+				{
+					// only steps that are ACTUALLY completed: bulk-unticking
+					// marks each one auto-suppressed, and suppressing thousands
+					// of never-completed steps would silently turn off
+					// auto-completion for the rest of the guide this session
+					if (found && isCompleted(step.getKey()))
+					{
+						after.add(step);
+					}
+					else if (!found && step.getKey().equals(stepKey))
+					{
+						found = true;
+					}
+				}
+			}
+		}
+		// anchor not in the CURRENT guide (re-import or switch mid-dialog):
+		// do nothing rather than wipe the wrong guide's progress
+		if (!found)
+		{
+			SwingUtilities.invokeLater(() ->
+				panel.setStatus("Guide changed while confirming - nothing was cleared"));
+			return;
+		}
+		setCompletedBulk(after, false);
 	}
 
 	/** Explicit import from a local wikitext file chosen by the user, into the selected guide. */
@@ -900,6 +1073,7 @@ public class HcimGuidePlugin extends Plugin
 	private void applyGuide(Guide guide, String status)
 	{
 		Map<String, StepCondition> cond = new HashMap<>();
+		Map<String, List<ItemReq>> items = new HashMap<>();
 		Map<String, String> targets = new HashMap<>();
 		Set<String> namesNorm = new HashSet<>();
 		for (GuideEpisode ep : guide.getEpisodes())
@@ -912,6 +1086,21 @@ public class HcimGuidePlugin extends Plugin
 					if (c != null)
 					{
 						cond.put(step.getKey(), c);
+					}
+					// items to DISPLAY for this step: withdraw/gather condition
+					// items, or a JSON guide's "(Items: ...)" list (display-only,
+					// never an auto-completion condition)
+					if (c != null && c.getType() == StepCondition.Type.ITEMS_IN_INVENTORY)
+					{
+						items.put(step.getKey(), c.getItems());
+					}
+					else
+					{
+						List<ItemReq> suffix = ItemListParser.parseItemsSuffix(step.getText());
+						if (suffix != null)
+						{
+							items.put(step.getKey(), suffix);
+						}
 					}
 					String target = TargetExtractor.extract(step.getText());
 					if (target == null)
@@ -934,9 +1123,11 @@ public class HcimGuidePlugin extends Plugin
 			}
 		}
 		conditions = cond;
+		stepItems = items;
 		stepTargets = targets;
 		targetNamesNorm = namesNorm;
 		currentGuide = guide;
+		hudItemsKey = null; // re-derive the HUD's current-step items
 		boolean restoredNotesProgress = migrateLegacyNotesProgress(guide);
 		activeBankDirty = true;
 		stepHighlightsDirty = true;
@@ -980,6 +1171,9 @@ public class HcimGuidePlugin extends Plugin
 		synchronized (completedSteps)
 		{
 			migrated = ProgressKeyMigration.migrateLegacyNotes(guide, completedSteps);
+			// keys whose step TEXT a parser fix changed (e.g. the JSON parser's
+			// run-joining fix) replay through the guide's explicit key map
+			migrated |= ProgressKeyMigration.migrateLegacyKeys(guide, completedSteps);
 		}
 		if (migrated)
 		{
@@ -991,6 +1185,193 @@ public class HcimGuidePlugin extends Plugin
 	StepCondition getCondition(String stepKey)
 	{
 		return conditions.get(stepKey);
+	}
+
+	/** Items to display for a step (grids, HUD, bank tag), or null. */
+	List<ItemReq> getStepItems(String stepKey)
+	{
+		return stepItems.get(stepKey);
+	}
+
+	/** True when a guide model is loaded (overlay gate; volatile read). */
+	boolean hasGuideLoaded()
+	{
+		return currentGuide != null;
+	}
+
+	/** The HUD's current-step items+ids snapshot, or null. */
+	HudItems getHudStepItems()
+	{
+		return hudItems;
+	}
+
+	/**
+	 * Step navigation (arrow buttons and keybinds). Forward marks the current
+	 * step - the first unchecked step in guide order - complete and thereby
+	 * advances; backward un-checks the most recently completed step before
+	 * that cursor and moves back to it. Un-checking suppresses re-auto-
+	 * completion (manual control always wins), exactly like unticking the
+	 * checkbox. Pure checklist bookkeeping: no game input is ever synthesized.
+	 * Called from the AWT input thread; all state it touches is thread-safe.
+	 */
+	void navigateStep(boolean forward)
+	{
+		Guide guide = currentGuide;
+		if (guide == null)
+		{
+			return;
+		}
+		GuideStep target = null;
+		if (forward)
+		{
+			outer:
+			for (GuideEpisode ep : guide.getEpisodes())
+			{
+				for (GuideBank bank : ep.getBanks())
+				{
+					for (GuideStep step : bank.getSteps())
+					{
+						if (!isCompleted(step.getKey()))
+						{
+							target = step;
+							break outer;
+						}
+					}
+				}
+			}
+			if (target == null)
+			{
+				return; // whole guide complete - nothing to advance to
+			}
+			setCompleted(target.getKey(), true);
+		}
+		else
+		{
+			// the completed step nearest BEFORE the cursor, in guide order
+			// (out-of-order completions after the cursor are left alone)
+			GuideStep lastDone = null;
+			outer:
+			for (GuideEpisode ep : guide.getEpisodes())
+			{
+				for (GuideBank bank : ep.getBanks())
+				{
+					for (GuideStep step : bank.getSteps())
+					{
+						if (!isCompleted(step.getKey()))
+						{
+							break outer;
+						}
+						lastDone = step;
+					}
+				}
+			}
+			if (lastDone == null)
+			{
+				return; // nothing completed yet - nowhere to go back to
+			}
+			setCompleted(lastDone.getKey(), false);
+		}
+		SwingUtilities.invokeLater(() ->
+		{
+			if (active && panel != null)
+			{
+				panel.refreshFromModel();
+			}
+		});
+	}
+
+	/**
+	 * Hit test for the nav arrow buttons, whichever host is active. Called on
+	 * the AWT input thread; overlays publish their rects volatilely and clear
+	 * them whenever they aren't rendering, so a stale frame can't eat clicks.
+	 */
+	private int hitNavArrow(java.awt.Point p)
+	{
+		if (!active || currentGuide == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return 0;
+		}
+		HcimGuideConfig.ArrowMode mode = config.navArrows();
+		if (mode == HcimGuideConfig.ArrowMode.ATTACHED)
+		{
+			return hudOverlay.hitArrow(p);
+		}
+		if (mode == HcimGuideConfig.ArrowMode.FLOATING)
+		{
+			return stepNavOverlay.hitArrow(p);
+		}
+		return 0;
+	}
+
+	/**
+	 * Keep the HUD's current-step item pictures in sync: when the first
+	 * unchecked step of the active bank changes, resolve its items' ids on the
+	 * executor (never on the client thread) and publish an immutable snapshot
+	 * for the overlay. Runs every game tick; the common case is one cached
+	 * bank lookup and a key comparison.
+	 */
+	private void updateHudItems()
+	{
+		if (!config.showHudOverlay() || !config.hudShowStepItems())
+		{
+			clearHudItems();
+			return;
+		}
+		Guide guide = currentGuide;
+		GuideBank bank = guide == null ? null : findActiveBank(guide);
+		GuideStep first = null;
+		if (bank != null)
+		{
+			for (GuideStep step : bank.getSteps())
+			{
+				if (!isCompleted(step.getKey()))
+				{
+					first = step;
+					break;
+				}
+			}
+		}
+		if (first == null)
+		{
+			clearHudItems();
+			return;
+		}
+		if (first.getKey().equals(hudItemsKey))
+		{
+			return;
+		}
+		hudItemsKey = first.getKey();
+		final List<ItemReq> reqs = stepItems.get(first.getKey());
+		if (reqs == null || reqs.isEmpty())
+		{
+			// bump the generation too: an in-flight resolve for the PREVIOUS
+			// step must not republish its icons onto this item-less step
+			hudItemsGen.incrementAndGet();
+			hudItems = null;
+			return;
+		}
+		final int gen = hudItemsGen.incrementAndGet();
+		hudItems = null; // no stale icons while the new step resolves
+		executor.execute(() ->
+		{
+			if (!active)
+			{
+				return;
+			}
+			int[] ids = iconResolver.resolve(reqs);
+			if (hudItemsGen.get() == gen)
+			{
+				hudItems = new HudItems(reqs, ids);
+			}
+		});
+	}
+
+	/** Clear the HUD item snapshot AND invalidate any in-flight resolve. */
+	private void clearHudItems()
+	{
+		hudItemsGen.incrementAndGet();
+		hudItems = null;
+		hudItemsKey = null;
 	}
 
 	/** Precomputed NPC target for a step, or null when the step has none. */
@@ -1009,8 +1390,9 @@ public class HcimGuidePlugin extends Plugin
 	{
 		executor.execute(() ->
 		{
-			int[] ids = iconResolver.resolve(grid.getItems());
-			grid.applyIcons(itemManager, ids);
+			List<ItemReq> reqs = grid.getItems();
+			int[] ids = iconResolver.resolve(reqs);
+			grid.applyIcons(itemManager, reqs, ids);
 			// names the price search can't see (untradeables like talismans
 			// and quest amulets) get one chunked full-database scan; when it
 			// finds anything, every visible grid re-resolves
@@ -1379,6 +1761,7 @@ public class HcimGuidePlugin extends Plugin
 		if (event.getGameState() == GameState.LOGIN_SCREEN)
 		{
 			clearFarTarget();
+			nextStepPoint = null; // no stale compass fallback across sessions
 			executor.execute(locationStore::saveIfDirty);
 		}
 	}
@@ -1484,6 +1867,8 @@ public class HcimGuidePlugin extends Plugin
 		// every tick so the drawn path reacts to a completed step within one
 		// game tick - it's a few cached-field reads and a deduped message
 		updatePathHandoff();
+		// cheap (cached bank + key compare); resolves off-thread on step change
+		updateHudItems();
 
 		if (tickCounter % EVAL_INTERVAL_TICKS == 0)
 		{
@@ -1725,10 +2110,10 @@ public class HcimGuidePlugin extends Plugin
 				}
 				for (GuideStep step : bank.getSteps())
 				{
-					StepCondition c = conditions.get(step.getKey());
-					if (c != null && c.getType() == StepCondition.Type.ITEMS_IN_INVENTORY)
+					List<ItemReq> stepReqs = stepItems.get(step.getKey());
+					if (stepReqs != null)
 					{
-						reqs.addAll(c.getItems());
+						reqs.addAll(stepReqs);
 					}
 				}
 				if (--remaining <= 0 || reqs.size() > 200)
@@ -1784,10 +2169,10 @@ public class HcimGuidePlugin extends Plugin
 			{
 				continue;
 			}
-			StepCondition c = conditions.get(step.getKey());
-			if (c != null && c.getType() == StepCondition.Type.ITEMS_IN_INVENTORY)
+			List<ItemReq> stepReqs = stepItems.get(step.getKey());
+			if (stepReqs != null && !stepReqs.isEmpty())
 			{
-				items.addAll(c.getItems());
+				items.addAll(stepReqs);
 				signature.append('|').append(step.getKey());
 				if (++itemSteps >= maxItemSteps)
 				{
@@ -2238,6 +2623,22 @@ public class HcimGuidePlugin extends Plugin
 		return farTarget;
 	}
 
+	/** The next unchecked step's known target location (or null). Client thread. */
+	WorldPoint getNextStepPoint()
+	{
+		return nextStepPoint;
+	}
+
+	/**
+	 * True while a pinned step is being tracked. The compass only falls back
+	 * to the next-step point when NOTHING is pinned: while pinned,
+	 * nextStepPoint is not refreshed and must not be pointed at.
+	 */
+	boolean hasPinnedTarget()
+	{
+		return targetName != null;
+	}
+
 	private void clearFarTarget()
 	{
 		farTarget = null;
@@ -2251,10 +2652,11 @@ public class HcimGuidePlugin extends Plugin
 	 */
 	private void updateNextStepMarker()
 	{
-		// the next step's location feeds BOTH the world map marker and the
-		// routing objective, so it's computed whenever either feature wants it
+		// the next step's location feeds the world map marker, the routing
+		// objective, AND the unpinned compass - computed whenever any wants it
 		boolean routingWanted = config.routeSuggestions() || config.routeUseShortestPath();
-		if ((!config.showNextStepOnMap() && !routingWanted) || currentGuide == null)
+		boolean compassWanted = config.showDirectionArrow() && config.compassNextStep();
+		if ((!config.showNextStepOnMap() && !routingWanted && !compassWanted) || currentGuide == null)
 		{
 			nextStepPoint = null;
 			removeMapMarker();
