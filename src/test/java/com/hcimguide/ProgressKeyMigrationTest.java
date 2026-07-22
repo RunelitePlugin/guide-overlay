@@ -39,6 +39,39 @@ public class ProgressKeyMigrationTest
 		assertTrue(completed.contains("unrelated"));
 	}
 
+	@Test
+	public void completedParagraphMarksEverySplitChildComplete()
+	{
+		Guide g = new JsonGuideParser().parse("{\"chapters\":[{\"sections\":[{\"steps\":["
+			+ "{\"content\":[{\"text\":\"First action here. Second action here.\"}]}"
+			+ "]}]}]}");
+		String oldText = "First action here. Second action here.";
+		String oldKey = "C1.S1#" + Integer.toHexString(oldText.hashCode()) + "#0";
+		Set<String> completed = new HashSet<>();
+		completed.add(oldKey);
+
+		assertTrue(ProgressKeyMigration.migrateSplitKeys(g, completed));
+		GuideBank sec = g.getEpisodes().get(0).getBanks().get(0);
+		assertTrue(completed.contains(sec.getSteps().get(0).getKey()));
+		assertTrue(completed.contains(sec.getSteps().get(1).getKey()));
+		assertFalse(completed.contains(oldKey));
+	}
+
+	@Test
+	public void splitMigrationNeverStealsALiveKey()
+	{
+		Guide g = new JsonGuideParser().parse("{\"chapters\":[{\"sections\":[{\"steps\":["
+			+ "{\"content\":[{\"text\":\"Just one action, nothing to split.\"}]}"
+			+ "]}]}]}");
+		String live = g.getEpisodes().get(0).getBanks().get(0).getSteps().get(0).getKey();
+		g.getLegacySplitKeys().put(live, java.util.Arrays.asList("C1.S1#dead#0"));
+		Set<String> completed = new HashSet<>();
+		completed.add(live);
+
+		assertFalse(ProgressKeyMigration.migrateSplitKeys(g, completed));
+		assertTrue(completed.contains(live));
+	}
+
 	private static String legacy(String notesId, String text, int occurrence)
 	{
 		return notesId + "#" + Integer.toHexString(text.hashCode()) + "#" + occurrence;

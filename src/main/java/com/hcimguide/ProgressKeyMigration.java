@@ -107,4 +107,54 @@ final class ProgressKeyMigration
 		changed |= completedSteps.addAll(toAdd);
 		return changed;
 	}
+
+	/**
+	 * Replays progress recorded under keys of steps a parser now SPLITS into
+	 * several smaller steps (the guide carries an explicit
+	 * old-key -&gt; all-child-keys map): a completed paragraph marks every
+	 * split child complete. Old keys are consumed so the store stays clean.
+	 *
+	 * Same safety properties as {@link #migrateLegacyKeys}: an old key that
+	 * collides with a real step's current key is never touched, and the replay
+	 * runs two-phase against a snapshot. Run migrateLegacyKeys FIRST - oldest
+	 * generation keys chain through the split map's parent keys.
+	 *
+	 * @return true when the supplied set was changed
+	 */
+	static boolean migrateSplitKeys(Guide guide, Set<String> progress)
+	{
+		if (guide == null || progress == null || guide.getLegacySplitKeys().isEmpty())
+		{
+			return false;
+		}
+		Set<String> currentKeys = new java.util.HashSet<>();
+		for (GuideEpisode ep : guide.getEpisodes())
+		{
+			for (GuideBank bank : ep.getBanks())
+			{
+				for (GuideStep step : bank.getSteps())
+				{
+					currentKeys.add(step.getKey());
+				}
+			}
+		}
+		Set<String> snapshot = new java.util.HashSet<>(progress);
+		Set<String> toRemove = new java.util.HashSet<>();
+		Set<String> toAdd = new java.util.HashSet<>();
+		for (Map.Entry<String, java.util.List<String>> e : guide.getLegacySplitKeys().entrySet())
+		{
+			if (currentKeys.contains(e.getKey()))
+			{
+				continue; // a real step owns this key - never steal it
+			}
+			if (snapshot.contains(e.getKey()))
+			{
+				toRemove.add(e.getKey());
+				toAdd.addAll(e.getValue());
+			}
+		}
+		boolean changed = progress.removeAll(toRemove);
+		changed |= progress.addAll(toAdd);
+		return changed;
+	}
 }

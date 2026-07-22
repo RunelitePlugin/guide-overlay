@@ -61,4 +61,42 @@ public class JsonGuideParserTest
 		String k2 = new JsonGuideParser().parse(SAMPLE).getEpisodes().get(0).getBanks().get(0).getSteps().get(0).getKey();
 		assertEquals(k1, k2);
 	}
+
+	@Test
+	public void splitsParagraphStepsIntoOneStepPerSentence()
+	{
+		Guide g = new JsonGuideParser().parse("{\"chapters\":[{\"sections\":[{\"steps\":["
+			+ "{\"content\":[{\"text\":\"First action here. Second action here.\"}],"
+			+ "\"metadata\":{\"items_needed\":\"knife, logs\"}}"
+			+ "]}]}]}");
+		GuideBank sec = g.getEpisodes().get(0).getBanks().get(0);
+		assertEquals(2, sec.getSteps().size());
+		// the items suffix rides the FIRST fragment only
+		assertEquals("First action here. (Items: knife, logs)", sec.getSteps().get(0).getText());
+		assertEquals("Second action here.", sec.getSteps().get(1).getText());
+	}
+
+	@Test
+	public void neverSplitsInsideParenthesesOrAfterAbbreviations()
+	{
+		assertEquals(2, JsonGuideParser.splitDigestible(
+			"Pickpocket men (hop worlds. Really). Fletch the logs afterwards.").size());
+		assertEquals(2, JsonGuideParser.splitDigestible(
+			"Use 2t oaks, see e.g. Getting Rats for the method. Continue to 35.").size());
+	}
+
+	@Test
+	public void oldParagraphKeyMapsToAllSplitChildren()
+	{
+		Guide g = new JsonGuideParser().parse("{\"chapters\":[{\"sections\":[{\"steps\":["
+			+ "{\"content\":[{\"text\":\"First action here. Second action here.\"}]}"
+			+ "]}]}]}");
+		String oldText = "First action here. Second action here.";
+		String oldKey = "C1.S1#" + Integer.toHexString(oldText.hashCode()) + "#0";
+		GuideBank sec = g.getEpisodes().get(0).getBanks().get(0);
+		java.util.List<String> children = g.getLegacySplitKeys().get(oldKey);
+		assertEquals(2, children.size());
+		assertEquals(sec.getSteps().get(0).getKey(), children.get(0));
+		assertEquals(sec.getSteps().get(1).getKey(), children.get(1));
+	}
 }

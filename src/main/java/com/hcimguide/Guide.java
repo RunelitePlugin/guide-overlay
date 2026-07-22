@@ -16,6 +16,16 @@ public class Guide
 	 */
 	private final java.util.Map<String, String> legacyStepKeys = new java.util.HashMap<>();
 
+	/**
+	 * Old step key -&gt; ALL current step keys it was split into, for steps a
+	 * parser now divides into several smaller steps (e.g. the JSON parser
+	 * splitting paragraph steps into one step per sentence). Progress recorded
+	 * under the old key replays onto every child, so a paragraph the user had
+	 * completed stays fully completed after the split. Empty for parsers that
+	 * never split a step.
+	 */
+	private final java.util.Map<String, java.util.List<String>> legacySplitKeys = new java.util.HashMap<>();
+
 	public List<GuideEpisode> getEpisodes()
 	{
 		return episodes;
@@ -24,6 +34,11 @@ public class Guide
 	public java.util.Map<String, String> getLegacyStepKeys()
 	{
 		return legacyStepKeys;
+	}
+
+	public java.util.Map<String, java.util.List<String>> getLegacySplitKeys()
+	{
+		return legacySplitKeys;
 	}
 
 	public int totalSteps()

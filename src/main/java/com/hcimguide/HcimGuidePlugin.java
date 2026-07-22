@@ -1379,10 +1379,23 @@ public class HcimGuidePlugin extends Plugin
 			// keys whose step TEXT a parser fix changed (e.g. the JSON parser's
 			// run-joining fix) replay through the guide's explicit key map
 			migrated |= ProgressKeyMigration.migrateLegacyKeys(guide, completedSteps);
+			// paragraphs the parser now splits into several steps: a completed
+			// paragraph key marks every split child complete (AFTER the 1:1
+			// replay - oldest keys chain through the split map's parents)
+			migrated |= ProgressKeyMigration.migrateSplitKeys(guide, completedSteps);
 		}
 		if (migrated)
 		{
 			persistCompletedSteps();
+		}
+		boolean skippedMigrated;
+		synchronized (skippedSteps)
+		{
+			skippedMigrated = ProgressKeyMigration.migrateSplitKeys(guide, skippedSteps);
+		}
+		if (skippedMigrated)
+		{
+			persistSkippedSteps();
 		}
 		return migrated;
 	}
