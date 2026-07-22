@@ -72,6 +72,37 @@ public class ProgressKeyMigrationTest
 		assertTrue(completed.contains(live));
 	}
 
+	@Test
+	public void duplicateSentenceCollisionResolvesWhenParentParagraphIsInStore()
+	{
+		// paragraph B equals paragraph A's leading sentence: B's old key is
+		// owned by A's first split child. With both old paragraph keys saved,
+		// B's child must still be ticked; a lone new-format tick on the live
+		// child must never be reinterpreted.
+		String json = "{\"chapters\":[{\"sections\":[{\"steps\":["
+			+ "{\"content\":[{\"text\":\"Alpha beta gamma delta. Second sentence here.\"}]},"
+			+ "{\"content\":[{\"text\":\"Alpha beta gamma delta.\"}]}"
+			+ "]}]}]}";
+		Guide g = new JsonGuideParser().parse(json);
+		String oldA = "C1.S1#" + Integer.toHexString("Alpha beta gamma delta. Second sentence here.".hashCode()) + "#0";
+		String oldB = "C1.S1#" + Integer.toHexString("Alpha beta gamma delta.".hashCode()) + "#0";
+		Set<String> completed = new HashSet<>();
+		completed.add(oldA);
+		completed.add(oldB);
+
+		assertTrue(ProgressKeyMigration.migrateSplitKeys(g, completed));
+		for (GuideStep s : g.getEpisodes().get(0).getBanks().get(0).getSteps())
+		{
+			assertTrue(completed.contains(s.getKey()));
+		}
+
+		Guide g2 = new JsonGuideParser().parse(json);
+		Set<String> newTick = new HashSet<>();
+		newTick.add(g2.getEpisodes().get(0).getBanks().get(0).getSteps().get(0).getKey());
+		assertFalse(ProgressKeyMigration.migrateSplitKeys(g2, newTick));
+		assertTrue(newTick.size() == 1);
+	}
+
 	private static String legacy(String notesId, String text, int occurrence)
 	{
 		return notesId + "#" + Integer.toHexString(text.hashCode()) + "#" + occurrence;

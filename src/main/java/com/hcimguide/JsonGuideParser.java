@@ -36,6 +36,15 @@ public class JsonGuideParser
 	private static final int CHUNK_TARGET = 150;
 	/** A parenthetical protects against splitting only if it closes within this many chars. */
 	private static final int PAREN_WINDOW = 160;
+	/**
+	 * Hard cap on the paragraph length fed to the splitter, against quadratic
+	 * CPU on hostile imports (the short-fragment merge fold and the chunk
+	 * fallback both re-copy within one paragraph; unbounded input made them
+	 * O(n^2) - same class of guard as WikitextParser's MAX_LABEL caps, keep
+	 * it). Real paragraphs top out ~2,200 chars; old-generation keys only
+	 * ever read the first MAX_TEXT chars, so migration is unaffected.
+	 */
+	private static final int MAX_PARAGRAPH = 10_000;
 	/** Dot-terminated tokens that do NOT end a sentence ("see e.g. Getting Rats"). */
 	private static final java.util.Set<String> ABBREVIATIONS = new java.util.HashSet<>(java.util.Arrays.asList(
 		"e.g", "i.e", "vs", "approx", "etc", "mr", "mrs", "st", "no"));
@@ -218,6 +227,10 @@ public class JsonGuideParser
 		String itemsSuffix, int depth, java.util.Map<String, Integer> occByText,
 		java.util.Map<String, Integer> occByOld, java.util.Map<String, Integer> occByLegacy, int stepCount)
 	{
+		if (raw.length() > MAX_PARAGRAPH)
+		{
+			raw = raw.substring(0, MAX_PARAGRAPH - 1) + "…";
+		}
 		java.util.List<String> newKeys = new java.util.ArrayList<>();
 		boolean first = true;
 		for (String fragment : splitDigestible(raw))
@@ -243,6 +256,14 @@ public class JsonGuideParser
 
 		// the key the PREVIOUS parser gave this paragraph (verbatim join,
 		// suffix appended, both capped exactly as it did)
+		//
+		// KNOWN BOUNDED EDGE: a paragraph whose whole text equals another
+		// paragraph's leading sentence gets an old key that a real split
+		// child now owns. migrateSplitKeys resolves it when the store also
+		// holds the other paragraph's old key; an old store holding ONLY the
+		// duplicate is indistinguishable from new-format progress on the
+		// child, so the identical-text child shows ticked in its place - the
+		// user re-ticks at most one step per duplicated sentence.
 		String oldText = cap(cap(raw) + itemsSuffix);
 		int oldOcc = occByOld.merge(oldText, 1, Integer::sum) - 1;
 		String oldKey = bank.getId() + "#" + Integer.toHexString(oldText.hashCode()) + "#" + oldOcc;
@@ -377,10 +398,11 @@ public class JsonGuideParser
 	 * Secondary split for a sentence still longer than LONG_FRAGMENT: cut at
 	 * the first unprotected ", " once CHUNK_TARGET is reached, greedily. A
 	 * chunk that STILL exceeds LONG_FRAGMENT (commas all inside parens, or no
-	 * commas at all) falls back to cutting at any ", ", then at a plain space
-	 * - guaranteeing nothing survives long enough for the MAX_TEXT cap to
-	 * truncate visible text. A trailing chunk too short to stand alone folds
-	 * into the previous one.
+	 * commas at all) falls back to cutting at any ", ", then at a plain space,
+	 * so ordinary prose never survives long enough for the MAX_TEXT cap to
+	 * truncate visible text. (A single space-less token longer than the cap
+	 * has no cut point at all and still gets truncated - hostile input only.)
+	 * A trailing chunk too short to stand alone folds into the previous one.
 	 */
 	static java.util.List<String> chunkAtCommas(String fragment)
 	{

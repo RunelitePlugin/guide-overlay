@@ -153,6 +153,30 @@ final class ProgressKeyMigration
 				toAdd.addAll(e.getValue());
 			}
 		}
+		// COLLISION PASS: a paragraph whose whole text equals another
+		// paragraph's leading sentence has an old key that a real split child
+		// now owns (the real BRUHsailer guide contains one such duplicate).
+		// The live key is never consumed, but when the snapshot ALSO holds a
+		// parent paragraph key whose children include the collided key, the
+		// tick is provably old-format progress, so the colliding entry's
+		// children are added too (the live key stays ticked - it is the other
+		// paragraph's first child, which that parent's entry also marks).
+		for (Map.Entry<String, java.util.List<String>> e : guide.getLegacySplitKeys().entrySet())
+		{
+			if (!currentKeys.contains(e.getKey()) || !snapshot.contains(e.getKey()))
+			{
+				continue;
+			}
+			for (Map.Entry<String, java.util.List<String>> p : guide.getLegacySplitKeys().entrySet())
+			{
+				if (!p.getKey().equals(e.getKey()) && !currentKeys.contains(p.getKey())
+					&& snapshot.contains(p.getKey()) && p.getValue().contains(e.getKey()))
+				{
+					toAdd.addAll(e.getValue());
+					break;
+				}
+			}
+		}
 		boolean changed = progress.removeAll(toRemove);
 		changed |= progress.addAll(toAdd);
 		return changed;
