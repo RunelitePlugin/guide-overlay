@@ -12,7 +12,6 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
-import net.runelite.client.ui.overlay.components.ComponentConstants;
 import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
 
@@ -29,10 +28,12 @@ import net.runelite.client.ui.overlay.components.TitleComponent;
  */
 public class HudOverlay extends OverlayPanel
 {
-	private static final int MAX_LINE_CHARS = 38;
 	private static final Color NEXT_STEP_COLOR = Color.WHITE;
-	private static final Color LATER_STEP_COLOR = new Color(180, 180, 180);
-	private static final Color ROUTE_COLOR = new Color(120, 220, 160);
+	private static final Color LATER_STEP_COLOR = new Color(205, 205, 205);
+	private static final Color ROUTE_COLOR = new Color(130, 230, 170);
+	private static final Color TRIP_READY_COLOR = new Color(90, 240, 130);
+	/** Near-black base for the box background; alpha comes from config. */
+	private static final Color BG_BASE = new Color(16, 16, 16);
 	private static final Color PRESENT = new Color(0, 200, 120, 200);
 	private static final Color MISSING = new Color(190, 60, 60, 200);
 
@@ -61,6 +62,14 @@ public class HudOverlay extends OverlayPanel
 		// under an open interface (bank, map) while its arrow rects still eat
 		// clicks - above-widgets keeps clickable == visible
 		setLayer(OverlayLayer.ABOVE_WIDGETS);
+		// standard overlay right-click actions (callbacks run on the client
+		// thread); all three only move checklist state - no game input
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Next step",
+			"Guide Overlay", e -> plugin.navigateStep(true));
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Previous step",
+			"Guide Overlay", e -> plugin.navigateStep(false));
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Pin next target",
+			"Guide Overlay", e -> plugin.pinNextTrackableStep());
 	}
 
 	@Override
@@ -81,23 +90,25 @@ public class HudOverlay extends OverlayPanel
 		OverlayFonts.apply(graphics, config.overlayFontStyle());
 		panelComponent.getChildren().clear();
 		panelComponent.setPreferredSize(new Dimension(config.hudWidth(), 0));
+		panelComponent.setBackgroundColor(backgroundColor());
 
-		int total = bank.getSteps().size();
-		int done = plugin.countCompleted(bank.getSteps());
+		int[] progress = plugin.progressOf(bank.getSteps());
 		panelComponent.getChildren().add(TitleComponent.builder()
-			.text(bank.getTitle() + "  (" + done + "/" + total + ")")
+			.text(bank.getTitle() + "  (" + progress[0] + "/" + progress[1] + ")")
 			.build());
 
 		int shown = 0;
 		int max = config.hudMaxSteps();
 		for (GuideStep step : bank.getSteps())
 		{
-			if (plugin.isCompleted(step.getKey()))
+			if (plugin.isStepDone(step.getKey()))
 			{
 				continue;
 			}
+			// FULL text, never truncated: LineComponent word-wraps to the
+			// panel width, so long steps grow the box instead of losing words
 			panelComponent.getChildren().add(LineComponent.builder()
-				.left((shown == 0 ? "> " : "- ") + truncate(step.getText()))
+				.left((shown == 0 ? "> " : "- ") + step.getText())
 				.leftColor(shown == 0 ? NEXT_STEP_COLOR : LATER_STEP_COLOR)
 				.build());
 			if (++shown >= max)
@@ -106,12 +117,21 @@ public class HudOverlay extends OverlayPanel
 			}
 		}
 
+		// all of the section's items are in the inventory - good to go
+		if (config.tripReadyIndicator() && plugin.isTripReady())
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("✓ Trip ready")
+				.leftColor(TRIP_READY_COLOR)
+				.build());
+		}
+
 		// fastest-route hint (config-gated in the plugin; null = walk/nothing)
 		String route = plugin.getRouteSuggestion();
 		if (route != null && config.routeSuggestions())
 		{
 			panelComponent.getChildren().add(LineComponent.builder()
-				.left("★ " + truncate(route))
+				.left("★ " + route)
 				.leftColor(ROUTE_COLOR)
 				.build());
 		}
@@ -174,7 +194,7 @@ public class HudOverlay extends OverlayPanel
 		int stripH = rows * (ICON_H + ICON_PAD) + ICON_PAD;
 
 		y += STRIP_GAP;
-		g.setColor(ComponentConstants.STANDARD_BACKGROUND_COLOR);
+		g.setColor(backgroundColor());
 		g.fillRect(0, y, width, stripH);
 
 		boolean borders = config.itemPresenceBorders();
@@ -236,8 +256,10 @@ public class HudOverlay extends OverlayPanel
 		return StepNavOverlay.hitArrow(screen, getBounds(), prevRect, nextRect);
 	}
 
-	private static String truncate(String s)
+	/** The box background: near-black at the configured opacity. */
+	private Color backgroundColor()
 	{
-		return s.length() <= MAX_LINE_CHARS ? s : s.substring(0, MAX_LINE_CHARS - 1) + "…";
+		int alpha = Math.max(0, Math.min(255, Math.round(255 * config.hudBackgroundOpacity() / 100f)));
+		return new Color(BG_BASE.getRed(), BG_BASE.getGreen(), BG_BASE.getBlue(), alpha);
 	}
 }

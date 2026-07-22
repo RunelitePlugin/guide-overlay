@@ -62,6 +62,32 @@ public class TargetOverlay extends Overlay
 			}
 		}
 
+		// scene objects the section's steps mention (ladders, altars, doors...)
+		if (config.highlightStepObjects())
+		{
+			Color color = config.stepObjectColor();
+			Color fill = new Color(color.getRed(), color.getGreen(), color.getBlue(), 28);
+			int plane = client.getTopLevelWorldView().getPlane();
+			for (net.runelite.api.TileObject obj : plugin.getObjectHighlights())
+			{
+				// spawn events fire for ALL planes at scene load - never draw
+				// a floating outline for a ladder on another floor
+				if (obj == null || obj.getPlane() != plane)
+				{
+					continue;
+				}
+				java.awt.Shape box = obj.getClickbox();
+				if (box == null)
+				{
+					continue;
+				}
+				graphics.setColor(fill);
+				graphics.fill(box);
+				graphics.setColor(color);
+				graphics.draw(box);
+			}
+		}
+
 		// needed ground items
 		if (config.highlightGroundItems())
 		{

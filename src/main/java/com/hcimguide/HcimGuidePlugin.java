@@ -24,6 +24,8 @@ import net.runelite.api.ItemContainer;
 import net.runelite.api.NPC;
 import net.runelite.api.QuestState;
 import net.runelite.api.TileItem;
+import net.runelite.api.events.GameObjectDespawned;
+import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ItemContainerChanged;
@@ -33,6 +35,9 @@ import net.runelite.api.events.ItemDespawned;
 import net.runelite.api.events.ItemSpawned;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.api.events.NpcSpawned;
+import net.runelite.api.events.WallObjectDespawned;
+import net.runelite.api.events.WallObjectSpawned;
+import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
@@ -144,6 +149,9 @@ public class HcimGuidePlugin extends Plugin
 	private StepNavOverlay stepNavOverlay;
 
 	@Inject
+	private DialogOptionOverlay dialogOptionOverlay;
+
+	@Inject
 	private net.runelite.client.input.KeyManager keyManager;
 
 	@Inject
@@ -156,6 +164,14 @@ public class HcimGuidePlugin extends Plugin
 	private HcimGuidePanel panel;
 
 	private final Set<String> completedSteps = new HashSet<>();
+
+	/**
+	 * Steps the player marked as skipped (optional detours they chose not to
+	 * do): excluded from progress counts, never block the active-bank cursor,
+	 * never auto-complete, and contribute nothing to bank tags/highlights.
+	 * Guarded by synchronized (skippedSteps); persisted like completedSteps.
+	 */
+	private final Set<String> skippedSteps = new HashSet<>();
 
 	/**
 	 * False after shutDown: executor tasks and fetch callbacks queued before a
@@ -173,6 +189,8 @@ public class HcimGuidePlugin extends Plugin
 	 * auto-completion condition (holding the items isn't what completes them).
 	 */
 	private volatile Map<String, List<ItemReq>> stepItems = Collections.emptyMap();
+	/** Step key -&gt; dialogue-choice sequence parsed from "(2,1)" notation. */
+	private volatile Map<String, int[]> dialogSequences = Collections.emptyMap();
 	/** Step key -&gt; extracted NPC target name; precomputed at import (never re-extracted per tick). */
 	private volatile Map<String, String> stepTargets = Collections.emptyMap();
 	/** Normalized target names of the current guide - bounds what the location store learns. */
@@ -281,6 +299,67 @@ public class HcimGuidePlugin extends Plugin
 	/** True between a consumed arrow press and its release, so both are eaten. */
 	private boolean navPressConsumed;
 
+	/**
+	 * One-shot guard for centering the floating arrows (reset when the arrow
+	 * mode config changes, so re-selecting Floating re-checks). Volatile:
+	 * written from the config-change dispatch thread, read on the client thread.
+	 */
+	private volatile boolean navCenterChecked;
+
+	// ------- trip-ready + section-complete confirmations (client thread)
+
+	/** A pleasant "success" chime from the game's own sound effects. */
+	private static final int SUCCESS_SOUND = net.runelite.api.SoundEffectID.GE_ADD_OFFER_DINGALING;
+
+	private boolean tripReady;
+	private String tripReadySoundedBank;
+	/** Bank evaluated last tick: the first look at a NEW bank never sounds. */
+	private String tripReadyEvalBank;
+	/** Read by the HUD on the same (client) thread, volatile for safety. */
+	private volatile boolean tripReadyVisible;
+
+	/** Active bank id last tick, for detecting section completion. */
+	private String prevActiveBankId;
+	private Guide prevActiveBankGuide;
+	/**
+	 * Set whenever the progress STORE is swapped wholesale under an unchanged
+	 * guide model (character switch, progress import, undo): the next tick
+	 * re-baselines section-complete tracking instead of "noticing" the jump.
+	 */
+	private volatile boolean sectionNoticeResetPending;
+
+	// ------- step-object highlighting (all client thread)
+
+	/**
+	 * Whitelisted interactable objects currently in the scene (ladders,
+	 * altars, doors, ...), by normalized name. Maintained from spawn events;
+	 * cleared on scene load. Only whitelist matches are stored, so this holds
+	 * dozens of entries, not the whole scene.
+	 */
+	private final Map<net.runelite.api.TileObject, String> sceneObjects = new HashMap<>();
+	private List<net.runelite.api.TileObject> objectHighlights = new ArrayList<>();
+	/** Object id -> normalized whitelisted name ("" = not whitelisted). */
+	private final Map<Integer, String> objectNameCache = new HashMap<>();
+
+	// ------- dialogue option guidance (client thread)
+
+	/** The step whose sequence is being followed (pinned wins, else current). */
+	private String dialogStepKey;
+	private int[] dialogSeq;
+	/** Position within dialogSeq: how many option menus were already answered. */
+	private int dialogPos;
+	/** Tick a dialogue widget was last seen open, for the conversation timeout. */
+	private int lastDialogActivityTick = -1;
+	/**
+	 * NO dialogue widget open for this many ticks = conversation over. Short
+	 * on purpose: while ANY dialogue widget (options menu, NPC/player/object
+	 * text) is showing, activity refreshes every tick, so reading slowly can
+	 * never reset the sequence - only actually leaving the conversation can.
+	 */
+	private static final int DIALOG_RESET_TICKS = 4;
+	/** 1-based option the overlay should outline right now; -1 = none. */
+	private volatile int dialogHighlightOption = -1;
+
 	private final net.runelite.client.input.MouseAdapter navMouse =
 		new net.runelite.client.input.MouseAdapter()
 	{
@@ -349,6 +428,7 @@ public class HcimGuidePlugin extends Plugin
 		overlayManager.add(hudOverlay);
 		overlayManager.add(directionArrowOverlay);
 		overlayManager.add(stepNavOverlay);
+		overlayManager.add(dialogOptionOverlay);
 		keyManager.registerKeyListener(nextStepHotkey);
 		keyManager.registerKeyListener(prevStepHotkey);
 		mouseManager.registerMouseListener(navMouse);
@@ -413,6 +493,7 @@ public class HcimGuidePlugin extends Plugin
 		overlayManager.remove(hudOverlay);
 		overlayManager.remove(directionArrowOverlay);
 		overlayManager.remove(stepNavOverlay);
+		overlayManager.remove(dialogOptionOverlay);
 		keyManager.unregisterKeyListener(nextStepHotkey);
 		keyManager.unregisterKeyListener(prevStepHotkey);
 		mouseManager.unregisterMouseListener(navMouse);
@@ -427,10 +508,24 @@ public class HcimGuidePlugin extends Plugin
 		pinnedStepKey = null;
 		targetName = null;
 		autoSuppressed.clear();
+		synchronized (skippedSteps)
+		{
+			skippedSteps.clear();
+		}
+		synchronized (undoLock)
+		{
+			undoCompleted = null;
+			undoSkipped = null;
+			undoGuideId = null;
+			undoLabel = null;
+		}
+		tripReadyVisible = false;
 		inventory = InventorySnapshot.EMPTY;
 		currentGuide = null;
 		conditions = Collections.emptyMap();
 		stepItems = Collections.emptyMap();
+		dialogSequences = Collections.emptyMap();
+		dialogHighlightOption = -1;
 		clearHudItems();
 		stepTargets = Collections.emptyMap();
 		targetNamesNorm = Collections.emptySet();
@@ -455,6 +550,18 @@ public class HcimGuidePlugin extends Plugin
 			groundItems.clear();
 			stepNpcs = new ArrayList<>();
 			groundHighlights = new ArrayList<>();
+			sceneObjects.clear();
+			objectHighlights = new ArrayList<>();
+			objectNameCache.clear();
+			tripReady = false;
+			tripReadySoundedBank = null;
+			tripReadyEvalBank = null;
+			dialogStepKey = null;
+			dialogSeq = null;
+			dialogPos = 0;
+			lastDialogActivityTick = -1;
+			prevActiveBankId = null;
+			prevActiveBankGuide = null;
 			nextStepPoint = null;
 			lastRoutePlayer = null;
 			lastRouteObjective = null;
@@ -508,6 +615,8 @@ public class HcimGuidePlugin extends Plugin
 		currentGuide = null;
 		conditions = Collections.emptyMap();
 		stepItems = Collections.emptyMap();
+		dialogSequences = Collections.emptyMap();
+		dialogHighlightOption = -1;
 		clearHudItems();
 		stepTargets = Collections.emptyMap();
 		targetNamesNorm = Collections.emptySet();
@@ -519,6 +628,7 @@ public class HcimGuidePlugin extends Plugin
 		currentGuideId = guideId;
 		configManager.setConfiguration(HcimGuideConfig.GROUP, "selectedGuide", guideId);
 		loadCompletedSteps();
+		loadSkippedSteps();
 		autoSuppressed.clear();
 		pinStep(null);
 
@@ -692,7 +802,12 @@ public class HcimGuidePlugin extends Plugin
 						found = true;
 						break outer;
 					}
-					before.add(step);
+					// skipped steps stay skipped - completing them would just
+					// resurface them in the counts
+					if (!isSkipped(step.getKey()))
+					{
+						before.add(step);
+					}
 				}
 			}
 		}
@@ -705,6 +820,7 @@ public class HcimGuidePlugin extends Plugin
 				panel.setStatus("Guide changed while confirming - nothing was marked"));
 			return;
 		}
+		snapshotBeforeBulk("complete every previous step");
 		setCompletedBulk(before, true);
 	}
 
@@ -753,7 +869,87 @@ public class HcimGuidePlugin extends Plugin
 				panel.setStatus("Guide changed while confirming - nothing was cleared"));
 			return;
 		}
+		snapshotBeforeBulk("clear every later step");
 		setCompletedBulk(after, false);
+	}
+
+	/**
+	 * One-click catch-up for the WHOLE guide: on the client thread, evaluate
+	 * every step's auto-completion condition against the account's actual
+	 * quest log and skill levels and complete the ones the game confirms.
+	 * Item conditions are deliberately excluded - inventories are transient,
+	 * so "holding the items right now" proves nothing guide-wide. Undoable
+	 * via the bulk-undo snapshot.
+	 */
+	void syncToAccount()
+	{
+		clientThread.invokeLater(() ->
+		{
+			if (!active)
+			{
+				return;
+			}
+			Guide guide = currentGuide;
+			if (guide == null)
+			{
+				return;
+			}
+			if (client.getGameState() != GameState.LOGGED_IN)
+			{
+				SwingUtilities.invokeLater(() ->
+					panel.setStatus("Log in first - syncing reads your live quest log and skills"));
+				return;
+			}
+			List<GuideStep> verified = new ArrayList<>();
+			for (GuideEpisode ep : guide.getEpisodes())
+			{
+				for (GuideBank bank : ep.getBanks())
+				{
+					for (GuideStep step : bank.getSteps())
+					{
+						String key = step.getKey();
+						if (isStepDone(key))
+						{
+							continue;
+						}
+						StepCondition cond = conditions.get(key);
+						if (cond == null || cond.getType() == StepCondition.Type.ITEMS_IN_INVENTORY)
+						{
+							continue;
+						}
+						try
+						{
+							if (conditionMet(cond))
+							{
+								verified.add(step);
+							}
+						}
+						catch (Exception ignored)
+						{
+							// one unreadable quest state must not abort the sync
+						}
+					}
+				}
+			}
+			if (verified.isEmpty())
+			{
+				SwingUtilities.invokeLater(() ->
+					panel.setStatus("Already in sync - no verifiable steps to add"));
+				return;
+			}
+			snapshotBeforeBulk("account sync");
+			setCompletedBulk(verified, true);
+			final int n = verified.size();
+			SwingUtilities.invokeLater(() ->
+			{
+				if (active && panel != null)
+				{
+					panel.refreshFromModel();
+					panel.setStatus("Synced " + n + " step" + (n == 1 ? "" : "s")
+						+ " from your quest log and skills");
+				}
+			});
+		});
 	}
 
 	/** Explicit import from a local wikitext file chosen by the user, into the selected guide. */
@@ -929,6 +1125,8 @@ public class HcimGuidePlugin extends Plugin
 						panel.setStatus("Guide changed during progress import - nothing changed"));
 					return;
 				}
+				snapshotBeforeBulk("progress import");
+				sectionNoticeResetPending = true; // store swap, not gameplay
 				synchronized (completedSteps)
 				{
 					completedSteps.clear();
@@ -1074,6 +1272,7 @@ public class HcimGuidePlugin extends Plugin
 	{
 		Map<String, StepCondition> cond = new HashMap<>();
 		Map<String, List<ItemReq>> items = new HashMap<>();
+		Map<String, int[]> dialogSeqs = new HashMap<>();
 		Map<String, String> targets = new HashMap<>();
 		Set<String> namesNorm = new HashSet<>();
 		for (GuideEpisode ep : guide.getEpisodes())
@@ -1102,6 +1301,11 @@ public class HcimGuidePlugin extends Plugin
 							items.put(step.getKey(), suffix);
 						}
 					}
+					int[] seq = DialogSequenceParser.extract(step.getText());
+					if (seq != null)
+					{
+						dialogSeqs.put(step.getKey(), seq);
+					}
 					String target = TargetExtractor.extract(step.getText());
 					if (target == null)
 					{
@@ -1124,6 +1328,7 @@ public class HcimGuidePlugin extends Plugin
 		}
 		conditions = cond;
 		stepItems = items;
+		dialogSequences = dialogSeqs;
 		stepTargets = targets;
 		targetNamesNorm = namesNorm;
 		currentGuide = guide;
@@ -1231,7 +1436,7 @@ public class HcimGuidePlugin extends Plugin
 				{
 					for (GuideStep step : bank.getSteps())
 					{
-						if (!isCompleted(step.getKey()))
+						if (!isStepDone(step.getKey()))
 						{
 							target = step;
 							break outer;
@@ -1257,11 +1462,14 @@ public class HcimGuidePlugin extends Plugin
 				{
 					for (GuideStep step : bank.getSteps())
 					{
-						if (!isCompleted(step.getKey()))
+						if (!isStepDone(step.getKey()))
 						{
 							break outer;
 						}
-						lastDone = step;
+						if (isCompleted(step.getKey()))
+						{
+							lastDone = step; // skipped steps are stepped OVER, not unticked
+						}
 					}
 				}
 			}
@@ -1276,6 +1484,30 @@ public class HcimGuidePlugin extends Plugin
 			if (active && panel != null)
 			{
 				panel.refreshFromModel();
+			}
+		});
+	}
+
+	/** Pin the next unchecked step that has a trackable NPC target. */
+	void pinNextTrackableStep()
+	{
+		Guide guide = currentGuide;
+		if (guide == null)
+		{
+			return;
+		}
+		GuideStep next = findNextTrackableStep(guide);
+		if (next == null)
+		{
+			return;
+		}
+		pinStep(next);
+		final String target = stepTargets.get(next.getKey());
+		SwingUtilities.invokeLater(() ->
+		{
+			if (active && panel != null)
+			{
+				panel.onPinChanged(target);
 			}
 		});
 	}
@@ -1324,7 +1556,7 @@ public class HcimGuidePlugin extends Plugin
 		{
 			for (GuideStep step : bank.getSteps())
 			{
-				if (!isCompleted(step.getKey()))
+				if (!isStepDone(step.getKey()))
 				{
 					first = step;
 					break;
@@ -1372,6 +1604,198 @@ public class HcimGuidePlugin extends Plugin
 		hudItemsGen.incrementAndGet();
 		hudItems = null;
 		hudItemsKey = null;
+	}
+
+	/** HUD accessor: true when the current section's items are all carried. */
+	boolean isTripReady()
+	{
+		return tripReadyVisible;
+	}
+
+	/**
+	 * "Trip ready": every item requirement of the current section's remaining
+	 * steps is in the inventory. Only requirements that resolve to a real item
+	 * are counted - free-text entries ("2 Food", "Combat Gear") can never be
+	 * verified and must not hold the indicator hostage. Sound fires once per
+	 * section, on the moment readiness is reached. Client thread, every tick;
+	 * the walk is over the CACHED active bank and bounded like the bank tag.
+	 */
+	private void updateTripReady()
+	{
+		boolean wantText = config.tripReadyIndicator();
+		boolean wantSound = config.tripReadySound();
+		Guide guide = currentGuide;
+		GuideBank bank = (wantText || wantSound) && guide != null ? findActiveBank(guide) : null;
+		if (bank == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			tripReady = false;
+			tripReadyVisible = false;
+			return;
+		}
+		boolean any = false;
+		boolean all = true;
+		int itemSteps = 0;
+		outer:
+		for (GuideStep step : bank.getSteps())
+		{
+			if (isStepDone(step.getKey()))
+			{
+				continue;
+			}
+			List<ItemReq> reqs = stepItems.get(step.getKey());
+			if (reqs == null || reqs.isEmpty())
+			{
+				continue;
+			}
+			for (ItemReq req : reqs)
+			{
+				if (!iconResolver.isKnownItem(req.getName()))
+				{
+					continue; // unverifiable free text - ignore
+				}
+				any = true;
+				if (inventory.countOf(req) < req.getQuantity())
+				{
+					all = false;
+					break outer;
+				}
+			}
+			if (++itemSteps >= 12)
+			{
+				break; // same bound as the bank tag: a trip is one inventory
+			}
+		}
+		boolean ready = any && all;
+		// baseline tick for a newly active bank: item-name resolution may
+		// still be in flight, so a same-tick "ready" verdict is not trusted
+		// with the sound - the TEXT self-corrects, the ding cannot
+		boolean baseline = !bank.getId().equals(tripReadyEvalBank);
+		tripReadyEvalBank = bank.getId();
+		if (ready && !tripReady && !baseline && wantSound
+			&& !bank.getId().equals(tripReadySoundedBank))
+		{
+			tripReadySoundedBank = bank.getId();
+			try
+			{
+				client.playSoundEffect(SUCCESS_SOUND);
+			}
+			catch (Exception ignored)
+			{
+				// sound is best-effort; never let it break the tick
+			}
+		}
+		tripReady = ready;
+		tripReadyVisible = ready && wantText;
+	}
+
+	/**
+	 * Chat message + optional sound the moment a bank section is finished:
+	 * fires when the active bank MOVES FORWARD past a section whose steps are
+	 * all done. Moving backward (untick, clear-after, undo) never notifies.
+	 * Client thread, every tick; normally a single string comparison.
+	 */
+	private void updateSectionCompleteNotice()
+	{
+		Guide guide = currentGuide;
+		GuideBank cur = guide == null ? null : findActiveBank(guide);
+		String curId = cur == null ? null : cur.getId();
+		if (guide != prevActiveBankGuide || sectionNoticeResetPending)
+		{
+			// new guide model or wholesale progress swap: re-baseline, never
+			// "notice" the jump itself
+			sectionNoticeResetPending = false;
+			prevActiveBankGuide = guide;
+			prevActiveBankId = curId;
+			tripReadySoundedBank = null;
+			return;
+		}
+		if (java.util.Objects.equals(curId, prevActiveBankId))
+		{
+			return;
+		}
+		String finishedId = prevActiveBankId;
+		prevActiveBankId = curId;
+		if (finishedId == null
+			|| (!config.bankCompleteMessage() && !config.bankCompleteSound())
+			|| client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		GuideBank finished = null;
+		outer:
+		for (GuideEpisode ep : guide.getEpisodes())
+		{
+			for (GuideBank bank : ep.getBanks())
+			{
+				if (bank.getId().equals(finishedId))
+				{
+					finished = bank;
+					break outer;
+				}
+			}
+		}
+		if (finished == null || finished.getSteps().isEmpty())
+		{
+			return;
+		}
+		for (GuideStep step : finished.getSteps())
+		{
+			if (!isStepDone(step.getKey()))
+			{
+				return; // moved backward or sideways - not a completion
+			}
+		}
+		if (config.bankCompleteMessage())
+		{
+			// removeTags: guide titles must never smuggle chat tags
+			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+				"Guide Overlay: " + Text.removeTags(finished.getTitle()) + " complete!", null);
+		}
+		if (config.bankCompleteSound())
+		{
+			try
+			{
+				client.playSoundEffect(SUCCESS_SOUND);
+			}
+			catch (Exception ignored)
+			{
+				// best-effort
+			}
+		}
+	}
+
+	/**
+	 * A tiny free-floating overlay with no position yet renders in a default
+	 * corner where it's easy to lose. The first time Floating mode is active
+	 * (per selection), place the arrows in the middle of the screen so
+	 * they're immediately visible and ready to Alt+drag wherever the player
+	 * wants. A position the player already chose is never overridden.
+	 * Client thread (game tick); cheap one-flag check after the first pass.
+	 */
+	private void ensureFloatingArrowsFindable()
+	{
+		if (navCenterChecked || config.navArrows() != HcimGuideConfig.ArrowMode.FLOATING)
+		{
+			return;
+		}
+		if (stepNavOverlay.getPreferredLocation() != null
+			|| stepNavOverlay.getPreferredPosition() != null)
+		{
+			navCenterChecked = true; // player has placed them - respect that
+			return;
+		}
+		int w = client.getCanvasWidth();
+		int h = client.getCanvasHeight();
+		if (w <= 0 || h <= 0)
+		{
+			return; // canvas not ready - retry next tick
+		}
+		navCenterChecked = true;
+		int arrowsW = StepNavOverlay.BUTTON_W * 2 + StepNavOverlay.BUTTON_GAP;
+		stepNavOverlay.setPreferredLocation(new java.awt.Point(
+			Math.max(0, (w - arrowsW) / 2),
+			Math.max(0, h / 2 - StepNavOverlay.BUTTON_H / 2)));
+		overlayManager.saveOverlay(stepNavOverlay);
 	}
 
 	/** Precomputed NPC target for a step, or null when the step has none. */
@@ -1476,6 +1900,225 @@ public class HcimGuidePlugin extends Plugin
 		return n;
 	}
 
+	// ------------------------------------------------------------------ skipped steps
+
+	boolean isSkipped(String stepKey)
+	{
+		synchronized (skippedSteps)
+		{
+			return skippedSteps.contains(stepKey);
+		}
+	}
+
+	/** Completed OR skipped: the step no longer needs doing. */
+	boolean isStepDone(String stepKey)
+	{
+		return isCompleted(stepKey) || isSkipped(stepKey);
+	}
+
+	void setSkipped(String stepKey, boolean skipped)
+	{
+		synchronized (skippedSteps)
+		{
+			if (skipped)
+			{
+				skippedSteps.add(stepKey);
+			}
+			else
+			{
+				skippedSteps.remove(stepKey);
+			}
+		}
+		if (skipped)
+		{
+			// a skipped step must never auto-complete out from under the player
+			autoSuppressed.add(stepKey);
+		}
+		activeBankDirty = true;
+		stepHighlightsDirty = true;
+		persistSkippedSteps();
+	}
+
+	/**
+	 * Header/HUD progress that treats skipped steps as not-required:
+	 * {completed-and-not-skipped, total-not-skipped}.
+	 */
+	int[] progressOf(Iterable<GuideStep> steps)
+	{
+		Set<String> skip;
+		synchronized (skippedSteps)
+		{
+			skip = skippedSteps.isEmpty() ? Collections.emptySet() : new HashSet<>(skippedSteps);
+		}
+		int done = 0;
+		int total = 0;
+		synchronized (completedSteps)
+		{
+			for (GuideStep s : steps)
+			{
+				if (skip.contains(s.getKey()))
+				{
+					continue;
+				}
+				total++;
+				if (completedSteps.contains(s.getKey()))
+				{
+					done++;
+				}
+			}
+		}
+		return new int[]{done, total};
+	}
+
+	private String skippedKey()
+	{
+		return "skippedSteps." + currentGuideId;
+	}
+
+	private void loadSkippedSteps()
+	{
+		String key = skippedKey();
+		String json = null;
+		if (config.perCharacterProgress())
+		{
+			json = configManager.getRSProfileConfiguration(HcimGuideConfig.GROUP, key);
+		}
+		if (json == null)
+		{
+			json = configManager.getConfiguration(HcimGuideConfig.GROUP, key);
+		}
+		synchronized (skippedSteps)
+		{
+			skippedSteps.clear();
+			if (json != null && !json.isEmpty())
+			{
+				try
+				{
+					Set<String> saved = gson.fromJson(json, STRING_SET);
+					if (saved != null)
+					{
+						skippedSteps.addAll(saved);
+					}
+				}
+				catch (Exception e)
+				{
+					log.warn("Could not parse saved skipped steps", e);
+				}
+			}
+		}
+		activeBankDirty = true;
+		stepHighlightsDirty = true;
+	}
+
+	private void persistSkippedSteps()
+	{
+		// snapshot and write under the lock, same reasoning as
+		// persistCompletedSteps; same per-character routing as progress
+		synchronized (skippedSteps)
+		{
+			String json = gson.toJson(skippedSteps);
+			if (config.perCharacterProgress() && configManager.getRSProfileKey() != null)
+			{
+				configManager.setRSProfileConfiguration(HcimGuideConfig.GROUP, skippedKey(), json);
+			}
+			else
+			{
+				configManager.setConfiguration(HcimGuideConfig.GROUP, skippedKey(), json);
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------ bulk undo
+
+	private final Object undoLock = new Object();
+	private Set<String> undoCompleted;
+	private Set<String> undoSkipped;
+	private String undoGuideId;
+	private String undoLabel;
+
+	/**
+	 * Remember the full progress state so the NEXT bulk action can be undone.
+	 * Called immediately before every bulk mutation (catch-up, clear-after,
+	 * bank bulk complete/incomplete, account sync, progress import).
+	 */
+	void snapshotBeforeBulk(String label)
+	{
+		Set<String> completed;
+		Set<String> skipped;
+		synchronized (completedSteps)
+		{
+			completed = new HashSet<>(completedSteps);
+		}
+		synchronized (skippedSteps)
+		{
+			skipped = new HashSet<>(skippedSteps);
+		}
+		synchronized (undoLock)
+		{
+			undoCompleted = completed;
+			undoSkipped = skipped;
+			undoGuideId = currentGuideId;
+			undoLabel = label;
+		}
+	}
+
+	/**
+	 * Restore the snapshot taken before the last bulk action (one level).
+	 *
+	 * @return true when a snapshot was restored
+	 */
+	boolean undoLastBulk()
+	{
+		Set<String> completed;
+		Set<String> skipped;
+		String label;
+		synchronized (undoLock)
+		{
+			if (undoCompleted == null || !currentGuideId.equals(undoGuideId))
+			{
+				SwingUtilities.invokeLater(() -> panel.setStatus("Nothing to undo"));
+				return false;
+			}
+			completed = undoCompleted;
+			skipped = undoSkipped;
+			label = undoLabel;
+			undoCompleted = null;
+			undoSkipped = null;
+			undoLabel = null;
+		}
+		Set<String> unticked;
+		synchronized (completedSteps)
+		{
+			// steps the undo is about to UNTICK must not instantly re-auto-
+			// complete - the undo is an explicit manual decision and wins
+			unticked = new HashSet<>(completedSteps);
+			unticked.removeAll(completed);
+			completedSteps.clear();
+			completedSteps.addAll(completed);
+		}
+		autoSuppressed.addAll(unticked);
+		synchronized (skippedSteps)
+		{
+			skippedSteps.clear();
+			skippedSteps.addAll(skipped);
+		}
+		persistCompletedSteps();
+		persistSkippedSteps();
+		activeBankDirty = true;
+		stepHighlightsDirty = true;
+		sectionNoticeResetPending = true;
+		final String doneLabel = label;
+		SwingUtilities.invokeLater(() ->
+		{
+			if (active && panel != null)
+			{
+				panel.refreshFromModel();
+				panel.setStatus("Undid: " + doneLabel);
+			}
+		});
+		return true;
+	}
+
 	/*
 	 * Progress storage routing: each guide has an isolated progress key.
 	 * With per-character progress enabled and a character profile active,
@@ -1542,6 +2185,7 @@ public class HcimGuidePlugin extends Plugin
 
 	private void loadCompletedSteps()
 	{
+		sectionNoticeResetPending = true; // store swap, not gameplay progress
 		synchronized (completedSteps)
 		{
 			completedSteps.clear();
@@ -1597,7 +2241,19 @@ public class HcimGuidePlugin extends Plugin
 				configManager.setRSProfileConfiguration(HcimGuideConfig.GROUP, key, shared);
 			}
 		}
+		// same one-time per-character seeding for skipped steps
+		String skey = skippedKey();
+		if (config.perCharacterProgress() && configManager.getRSProfileKey() != null
+			&& configManager.getRSProfileConfiguration(HcimGuideConfig.GROUP, skey) == null)
+		{
+			String sharedSkip = configManager.getConfiguration(HcimGuideConfig.GROUP, skey);
+			if (sharedSkip != null && !sharedSkip.isEmpty())
+			{
+				configManager.setRSProfileConfiguration(HcimGuideConfig.GROUP, skey, sharedSkip);
+			}
+		}
 		loadCompletedSteps();
+		loadSkippedSteps();
 		// only reset the manual-untick suppression when this is really a
 		// DIFFERENT character - relogging the same character must not let
 		// previously unticked steps re-auto-complete ("manual always wins")
@@ -1741,6 +2397,108 @@ public class HcimGuidePlugin extends Plugin
 		}
 	}
 
+	// ------------------------------------------------------------------ scene objects
+
+	@Subscribe
+	public void onGameObjectSpawned(GameObjectSpawned event)
+	{
+		trackObject(event.getGameObject());
+	}
+
+	@Subscribe
+	public void onGameObjectDespawned(GameObjectDespawned event)
+	{
+		if (sceneObjects.remove(event.getGameObject()) != null)
+		{
+			stepHighlightsDirty = true;
+		}
+	}
+
+	@Subscribe
+	public void onWallObjectSpawned(WallObjectSpawned event)
+	{
+		trackObject(event.getWallObject());
+	}
+
+	@Subscribe
+	public void onWallObjectDespawned(WallObjectDespawned event)
+	{
+		if (sceneObjects.remove(event.getWallObject()) != null)
+		{
+			stepHighlightsDirty = true;
+		}
+	}
+
+	/**
+	 * Remember whitelisted interactables (ladders, altars, doors, ...).
+	 * Client thread. Tracks UNCONDITIONALLY (not config-gated): spawn events
+	 * only fire on scene load, so gating here would leave the feature blank
+	 * until the next region change after the user toggles it on. The
+	 * whitelist keeps the map to a handful of objects either way.
+	 */
+	private void trackObject(net.runelite.api.TileObject obj)
+	{
+		if (obj == null)
+		{
+			return;
+		}
+		String norm = whitelistedObjectName(obj.getId());
+		if (norm != null)
+		{
+			sceneObjects.put(obj, norm);
+			stepHighlightsDirty = true;
+		}
+	}
+
+	/**
+	 * Normalized name when the object is on the whitelist, else null.
+	 * Plain objects cache their verdict by id; varbit multilocs (doors,
+	 * altars with states) resolve their CURRENT impostor at spawn time and
+	 * are never cached, since the name varies at runtime.
+	 */
+	private String whitelistedObjectName(int id)
+	{
+		String cached = objectNameCache.get(id);
+		if (cached != null)
+		{
+			return cached.isEmpty() ? null : cached;
+		}
+		String norm = "";
+		boolean cacheable = true;
+		try
+		{
+			net.runelite.api.ObjectComposition c = client.getObjectDefinition(id);
+			if (c != null && c.getImpostorIds() != null)
+			{
+				cacheable = false;
+				c = c.getImpostor();
+			}
+			String name = c == null ? null : c.getName();
+			if (name != null && !"null".equals(name))
+			{
+				String n = Names.normalize(Text.removeTags(name));
+				if (TargetExtractor.OBJECT_WORDS.contains(n))
+				{
+					norm = n;
+				}
+			}
+		}
+		catch (Exception ignored)
+		{
+			// unreadable definition/impostor -> treat as not whitelisted
+		}
+		if (cacheable)
+		{
+			objectNameCache.put(id, norm);
+		}
+		return norm.isEmpty() ? null : norm;
+	}
+
+	List<net.runelite.api.TileObject> getObjectHighlights()
+	{
+		return objectHighlights;
+	}
+
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
@@ -1749,6 +2507,8 @@ public class HcimGuidePlugin extends Plugin
 			groundItems.clear();
 			groundHighlights = new ArrayList<>();
 			stepNpcs = new ArrayList<>();
+			sceneObjects.clear();
+			objectHighlights = new ArrayList<>();
 			stepHighlightsDirty = true;
 			targetNpc = null;
 			clearArrowOnClientThread();
@@ -1773,6 +2533,7 @@ public class HcimGuidePlugin extends Plugin
 		if (!HcimGuideConfig.GROUP.equals(event.getGroup())
 			|| key == null
 			|| key.startsWith(HcimGuideConfig.COMPLETED_STEPS_KEY)
+			|| key.startsWith("skippedSteps")
 			|| "selectedGuide".equals(key)
 			|| "guides".equals(key)
 			|| "fullDbPrompted".equals(key))
@@ -1811,6 +2572,7 @@ public class HcimGuidePlugin extends Plugin
 		if ("perCharacterProgress".equals(key))
 		{
 			loadCompletedSteps();
+			loadSkippedSteps();
 			autoSuppressed.clear();
 			SwingUtilities.invokeLater(() -> panel.refreshFromModel());
 		}
@@ -1819,6 +2581,18 @@ public class HcimGuidePlugin extends Plugin
 		if ("showWorldMapMarker".equals(key) && !config.showWorldMapMarker())
 		{
 			clientThread.invokeLater(this::removeMapMarker);
+		}
+
+		// layout preferences changed -> rebuild the tag (and its layout) next cycle
+		if ("bankTagStepOrder".equals(key) || "bankTagUseLayout".equals(key))
+		{
+			bankTagIntegration.invalidate();
+			// turning the managed arrangement OFF hands the tab back to the
+			// user - remove the generated layout so stale entries don't linger
+			if ("bankTagStepOrder".equals(key) && !config.bankTagStepOrder())
+			{
+				bankTagIntegration.clearManagedLayout();
+			}
 		}
 
 		// bank tag feature: off -> full cleanup; on -> retag on the next cycle
@@ -1854,6 +2628,12 @@ public class HcimGuidePlugin extends Plugin
 		{
 			lastPrefetchKey = null;
 		}
+
+		// re-run the floating-arrows placement check when the mode changes
+		if ("navArrows".equals(key))
+		{
+			navCenterChecked = false;
+		}
 	}
 
 	// ------------------------------------------------------------------ auto-completion
@@ -1869,6 +2649,14 @@ public class HcimGuidePlugin extends Plugin
 		updatePathHandoff();
 		// cheap (cached bank + key compare); resolves off-thread on step change
 		updateHudItems();
+		// one-shot: floating arrows that were never positioned start mid-screen
+		ensureFloatingArrowsFindable();
+		// trip-ready state + section-complete confirmation (both cheap walks
+		// over the cached active bank; sounds/messages only on transitions)
+		updateTripReady();
+		updateSectionCompleteNotice();
+		// dialogue-choice guidance: which option to outline right now
+		updateDialogHighlight();
 
 		if (tickCounter % EVAL_INTERVAL_TICKS == 0)
 		{
@@ -2165,7 +2953,7 @@ public class HcimGuidePlugin extends Plugin
 		StringBuilder signature = new StringBuilder(active.getId());
 		for (GuideStep step : active.getSteps())
 		{
-			if (isCompleted(step.getKey()))
+			if (isStepDone(step.getKey()))
 			{
 				continue;
 			}
@@ -2190,6 +2978,112 @@ public class HcimGuidePlugin extends Plugin
 		{
 			bankTagIntegration.onBankOpened();
 		}
+		if (event.getGroupId() == InterfaceID.CHATMENU)
+		{
+			lastDialogActivityTick = tickCounter;
+		}
+	}
+
+	@Subscribe
+	public void onWidgetClosed(WidgetClosed event)
+	{
+		// an option menu closing means the player answered it: the NEXT menu
+		// of the conversation wants the NEXT number in the sequence
+		if (event.getGroupId() == InterfaceID.CHATMENU)
+		{
+			lastDialogActivityTick = tickCounter;
+			if (dialogSeq != null && dialogPos < dialogSeq.length)
+			{
+				dialogPos++;
+			}
+		}
+	}
+
+	/** Overlay accessor: 1-based option to outline now, or -1. */
+	int getDialogHighlightOption()
+	{
+		return dialogHighlightOption;
+	}
+
+	/**
+	 * Maintain the dialogue-guidance state. The guiding step is the pinned
+	 * step when set, else the current (first not-done) step of the active
+	 * bank. Position resets when the step changes or the conversation goes
+	 * quiet. Client thread, every tick; the common case is two comparisons.
+	 */
+	private void updateDialogHighlight()
+	{
+		if (!config.highlightDialogOptions() || currentGuide == null)
+		{
+			dialogHighlightOption = -1;
+			return;
+		}
+		// pinned step wins - that's the one being worked on
+		String key = pinnedStepKey;
+		if (key == null)
+		{
+			Guide guide = currentGuide;
+			GuideBank bank = guide == null ? null : findActiveBank(guide);
+			if (bank != null)
+			{
+				for (GuideStep step : bank.getSteps())
+				{
+					if (!isStepDone(step.getKey()))
+					{
+						key = step.getKey();
+						break;
+					}
+				}
+			}
+		}
+		if (key == null)
+		{
+			dialogStepKey = null;
+			dialogSeq = null;
+			dialogHighlightOption = -1;
+			return;
+		}
+		if (!key.equals(dialogStepKey))
+		{
+			dialogStepKey = key;
+			dialogSeq = dialogSequences.get(key);
+			dialogPos = 0;
+		}
+		if (dialogSeq == null)
+		{
+			dialogHighlightOption = -1;
+			return;
+		}
+		// while any dialogue widget is on screen the conversation is alive -
+		// a slow read must NEVER reset the sequence position (that would
+		// point the highlight at the wrong option). Only a few quiet ticks
+		// with no dialogue at all mean the conversation ended or was abandoned.
+		if (isDialogueOpen())
+		{
+			lastDialogActivityTick = tickCounter;
+		}
+		else if (dialogPos > 0 && lastDialogActivityTick >= 0
+			&& tickCounter - lastDialogActivityTick > DIALOG_RESET_TICKS)
+		{
+			dialogPos = 0;
+		}
+		dialogHighlightOption = dialogPos < dialogSeq.length ? dialogSeq[dialogPos] : -1;
+	}
+
+	/**
+	 * Any dialogue widget open: options menu, NPC/player text, object box,
+	 * double-item box, or plain message box - every widget a conversation can
+	 * show between option menus. Missing one here would let the quiet-timeout
+	 * reset the sequence MID-conversation and highlight the wrong option.
+	 */
+	private boolean isDialogueOpen()
+	{
+		return client.getWidget(InterfaceID.CHATMENU, 1) != null
+			|| client.getWidget(InterfaceID.CHAT_LEFT, 0) != null
+			|| client.getWidget(InterfaceID.CHAT_RIGHT, 0) != null
+			|| client.getWidget(InterfaceID.OBJECTBOX, 0) != null
+			|| client.getWidget(InterfaceID.OBJECTBOX_DOUBLE, 0) != null
+			|| client.getWidget(InterfaceID.MESSAGEBOX, 0) != null;
 	}
 
 	/**
@@ -2207,10 +3101,12 @@ public class HcimGuidePlugin extends Plugin
 		Guide guide = currentGuide;
 		boolean npcsWanted = config.highlightStepNpcs();
 		boolean itemsWanted = config.highlightGroundItems();
-		if (guide == null || (!npcsWanted && !itemsWanted))
+		boolean objectsWanted = config.highlightStepObjects();
+		if (guide == null || (!npcsWanted && !itemsWanted && !objectsWanted))
 		{
 			stepNpcs = new ArrayList<>();
 			groundHighlights = new ArrayList<>();
+			objectHighlights = new ArrayList<>();
 			return;
 		}
 
@@ -2223,13 +3119,14 @@ public class HcimGuidePlugin extends Plugin
 		final int maxScanSteps = 40;
 		int scanned = 0;
 		Set<String> wantedNorm = new HashSet<>();
+		Set<String> wantedObjects = new HashSet<>();
 		List<ItemReq> itemReqs = new ArrayList<>();
 		GuideBank active = findActiveBank(guide);
 		if (active != null)
 		{
 			for (GuideStep step : active.getSteps())
 			{
-				if (isCompleted(step.getKey()))
+				if (isStepDone(step.getKey()))
 				{
 					continue;
 				}
@@ -2252,6 +3149,10 @@ public class HcimGuidePlugin extends Plugin
 					{
 						itemReqs.addAll(c.getItems());
 					}
+				}
+				if (objectsWanted)
+				{
+					wantedObjects.addAll(TargetExtractor.objectWordsIn(step.getText()));
 				}
 			}
 		}
@@ -2295,6 +3196,26 @@ public class HcimGuidePlugin extends Plugin
 			}
 		}
 		groundHighlights = ground;
+
+		// whitelisted scene objects the remaining steps mention, capped so a
+		// door-heavy building can't turn the overlay into a light show
+		List<net.runelite.api.TileObject> objects = new ArrayList<>();
+		if (!wantedObjects.isEmpty())
+		{
+			final int maxObjects = 40;
+			for (Map.Entry<net.runelite.api.TileObject, String> e : sceneObjects.entrySet())
+			{
+				if (wantedObjects.contains(e.getValue()))
+				{
+					objects.add(e.getKey());
+					if (objects.size() >= maxObjects)
+					{
+						break;
+					}
+				}
+			}
+		}
+		objectHighlights = objects;
 	}
 
 	List<NPC> getStepNpcs()
@@ -2324,7 +3245,7 @@ public class HcimGuidePlugin extends Plugin
 		List<GuideStep> justCompleted = new ArrayList<>();
 		for (GuideStep step : activeBank.getSteps())
 		{
-			if (isCompleted(step.getKey()) || autoSuppressed.contains(step.getKey()))
+			if (isStepDone(step.getKey()) || autoSuppressed.contains(step.getKey()))
 			{
 				continue;
 			}
@@ -2415,7 +3336,7 @@ public class HcimGuidePlugin extends Plugin
 			{
 				for (GuideStep step : bank.getSteps())
 				{
-					if (!isCompleted(step.getKey()))
+					if (!isStepDone(step.getKey()))
 					{
 						found = bank;
 						break outer;
@@ -2447,7 +3368,7 @@ public class HcimGuidePlugin extends Plugin
 			{
 				for (GuideStep step : bank.getSteps())
 				{
-					if (!isCompleted(step.getKey()) && stepTargets.containsKey(step.getKey()))
+					if (!isStepDone(step.getKey()) && stepTargets.containsKey(step.getKey()))
 					{
 						return step;
 					}
@@ -2668,7 +3589,7 @@ public class HcimGuidePlugin extends Plugin
 		{
 			for (GuideStep step : active.getSteps())
 			{
-				if (isCompleted(step.getKey()))
+				if (isStepDone(step.getKey()))
 				{
 					continue;
 				}

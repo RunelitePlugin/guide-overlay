@@ -278,6 +278,32 @@ public class HcimGuidePanel extends PluginPanel
 
 		menu.addSeparator();
 
+		JMenuItem syncAccount = new JMenuItem("Sync checklist to my account...");
+		syncAccount.addActionListener(e ->
+		{
+			int choice = JOptionPane.showConfirmDialog(this,
+				"Check off every quest and skill step your account has already\n"
+					+ "completed - across the WHOLE guide? Item steps are left alone\n"
+					+ "(inventories change). Undo afterwards with 'Undo last bulk\n"
+					+ "change' if it marks more than you wanted.",
+				"Sync checklist to account", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+			if (choice == JOptionPane.OK_OPTION)
+			{
+				plugin.syncToAccount();
+			}
+		});
+		menu.add(syncAccount);
+
+		JMenuItem undoBulk = new JMenuItem("Undo last bulk change");
+		undoBulk.addActionListener(e ->
+		{
+			if (plugin.undoLastBulk())
+			{
+				rebuildBanks();
+			}
+		});
+		menu.add(undoBulk);
+
 		JMenuItem exportProgress = new JMenuItem("Export progress to clipboard");
 		exportProgress.addActionListener(e -> plugin.exportProgress());
 		menu.add(exportProgress);
@@ -721,13 +747,15 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			return;
 		}
-		int total = guide.totalSteps();
+		int total = 0;
 		int done = 0;
 		for (GuideEpisode ep : guide.getEpisodes())
 		{
 			for (GuideBank b : ep.getBanks())
 			{
-				done += plugin.countCompleted(b.getSteps());
+				int[] p = plugin.progressOf(b.getSteps());
+				done += p[0];
+				total += p[1];
 			}
 		}
 		overallProgress.setMaximum(Math.max(1, total));
@@ -753,7 +781,7 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				for (GuideStep step : bank.getSteps())
 				{
-					if (!plugin.isCompleted(step.getKey()))
+					if (!plugin.isStepDone(step.getKey()))
 					{
 						searchField.setText("");
 						// keep the dropdown in sync without re-triggering a jump
@@ -778,9 +806,8 @@ public class HcimGuidePanel extends PluginPanel
 			if (value instanceof GuideBank)
 			{
 				GuideBank bank = (GuideBank) value;
-				int total = bank.getSteps().size();
-				int done = plugin.countCompleted(bank.getSteps());
-				setText(shortTitle(bank.getTitle()) + "  (" + done + "/" + total + ")");
+				int[] prog = plugin.progressOf(bank.getSteps());
+				setText(shortTitle(bank.getTitle()) + "  (" + prog[0] + "/" + prog[1] + ")");
 			}
 			return c;
 		}
@@ -885,7 +912,9 @@ public class HcimGuidePanel extends PluginPanel
 
 		boolean isComplete()
 		{
-			return plugin.countCompleted(bank.getSteps()) == bank.getSteps().size();
+			// skipped steps count as "no longer needs doing"
+			int[] p = plugin.progressOf(bank.getSteps());
+			return p[0] == p[1];
 		}
 
 		void setExpanded(boolean value)
@@ -902,8 +931,9 @@ public class HcimGuidePanel extends PluginPanel
 
 		void updateHeader()
 		{
-			int done = plugin.countCompleted(bank.getSteps());
-			int total = bank.getSteps().size();
+			int[] p = plugin.progressOf(bank.getSteps());
+			int done = p[0];
+			int total = p[1];
 			headerCount.setText(done + "/" + total);
 			headerTitle.setForeground(done == total && total > 0 ? new Color(0, 200, 120) : Color.WHITE);
 
@@ -949,7 +979,17 @@ public class HcimGuidePanel extends PluginPanel
 
 		private void bulk(boolean completed)
 		{
-			plugin.setCompletedBulk(bank.getSteps(), completed);
+			plugin.snapshotBeforeBulk(completed ? "mark bank complete" : "mark bank incomplete");
+			List<GuideStep> targets = new ArrayList<>();
+			for (GuideStep step : bank.getSteps())
+			{
+				// skipped steps are excluded from progress - leave them alone
+				if (!plugin.isSkipped(step.getKey()))
+				{
+					targets.add(step);
+				}
+			}
+			plugin.setCompletedBulk(targets, completed);
 			for (StepRow row : rows)
 			{
 				row.syncFromModel();
@@ -980,7 +1020,14 @@ public class HcimGuidePanel extends PluginPanel
 						found = true;
 						break outer;
 					}
-					steps.addAll(b.getSteps());
+					for (GuideStep step : b.getSteps())
+					{
+						// skipped steps stay skipped
+						if (!plugin.isSkipped(step.getKey()))
+						{
+							steps.add(step);
+						}
+					}
 				}
 			}
 			if (!found)
@@ -990,6 +1037,7 @@ public class HcimGuidePanel extends PluginPanel
 				setStatus("Guide changed - nothing was marked");
 				return;
 			}
+			plugin.snapshotBeforeBulk("mark everything before this bank");
 			plugin.setCompletedBulk(steps, true);
 			rebuildBanks();
 		}
@@ -1004,8 +1052,8 @@ public class HcimGuidePanel extends PluginPanel
 		private final BankSection section;
 		private final JButton pinButton;
 		private final ItemGridPanel grid;
-		/** Last completion state rendered into the HTML label; null = never rendered. */
-		private Boolean lastRenderedDone;
+		/** Last rendered state: -1 never, 0 plain, 1 completed, 2 skipped. */
+		private int lastRenderedState = -1;
 
 		StepRow(BankSection section, GuideStep step)
 		{
@@ -1026,7 +1074,7 @@ public class HcimGuidePanel extends PluginPanel
 			checkBox.addActionListener(e ->
 			{
 				plugin.setCompleted(step.getKey(), checkBox.isSelected());
-				lastRenderedDone = null; // force re-render
+				lastRenderedState = -1; // force re-render
 				refreshText();
 				updateProgress(); // refreshes every bank header including ours
 				if (checkBox.isSelected() && config.autoCollapseCompleted() && section.isComplete())
@@ -1072,6 +1120,42 @@ public class HcimGuidePanel extends PluginPanel
 				}
 			});
 			rowMenu.add(clearAfter);
+			// optional detours: exclude a step from progress without lying
+			// about having done it. Label reflects current state on open.
+			JMenuItem skipItem = new JMenuItem("Skip step (exclude from progress)");
+			skipItem.addActionListener(e ->
+			{
+				boolean nowSkipped = !plugin.isSkipped(step.getKey());
+				plugin.setSkipped(step.getKey(), nowSkipped);
+				lastRenderedState = -1; // force re-render
+				syncFromModel();
+				updateProgress();
+				if (nowSkipped && config.autoCollapseCompleted() && section.isComplete())
+				{
+					section.setExpanded(false);
+					expandNextAfterAutoCollapse(section);
+				}
+			});
+			rowMenu.add(skipItem);
+			rowMenu.addPopupMenuListener(new javax.swing.event.PopupMenuListener()
+			{
+				@Override
+				public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e)
+				{
+					skipItem.setText(plugin.isSkipped(step.getKey())
+						? "Un-skip step" : "Skip step (exclude from progress)");
+				}
+
+				@Override
+				public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e)
+				{
+				}
+
+				@Override
+				public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e)
+				{
+				}
+			});
 			checkBox.setComponentPopupMenu(rowMenu);
 
 			StepCondition cond = plugin.getCondition(step.getKey());
@@ -1133,18 +1217,23 @@ public class HcimGuidePanel extends PluginPanel
 				grid = null;
 			}
 			syncPinVisual();
+			syncFromModel(); // skip state: disabled checkbox + struck text
 		}
 
 		void syncFromModel()
 		{
 			boolean done = plugin.isCompleted(step.getKey());
+			boolean skipped = plugin.isSkipped(step.getKey());
 			if (checkBox.isSelected() != done)
 			{
 				checkBox.setSelected(done);
 			}
+			// a skipped step's checkbox is disabled: un-skip first, then tick
+			checkBox.setEnabled(!skipped);
 			// setting HTML text forces Swing to rebuild the label's document
 			// tree (~0.5ms x hundreds of rows), so skip when nothing changed
-			if (lastRenderedDone == null || lastRenderedDone != done)
+			int state = skipped ? 2 : (done ? 1 : 0);
+			if (lastRenderedState != state)
 			{
 				refreshText();
 			}
@@ -1154,10 +1243,15 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			String escaped = escapeHtml(step.getText());
 			boolean done = checkBox.isSelected();
-			lastRenderedDone = done;
+			boolean skipped = plugin.isSkipped(step.getKey());
+			lastRenderedState = skipped ? 2 : (done ? 1 : 0);
 			String style = "width:140px;font-size:" + config.panelTextSize().getPx() + "px";
 			String body;
-			if (done && config.dimCompletedSteps())
+			if (skipped)
+			{
+				body = "<strike><span style='color:#6a6a72'><i>" + escaped + " (skipped)</i></span></strike>";
+			}
+			else if (done && config.dimCompletedSteps())
 			{
 				body = "<strike><span style='color:#8a8a8a'>" + escaped + "</span></strike>";
 			}

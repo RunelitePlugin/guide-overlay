@@ -66,72 +66,90 @@ public interface HcimGuideConfig extends Config
 	@ConfigSection(
 		name = "Target tracking",
 		description = "Pinned-step target: hint arrow, target highlight, far-target compass",
-		position = 0
+		position = 0,
+		closedByDefault = true
 	)
 	String targetSection = "target";
 
 	@ConfigSection(
 		name = "World map",
 		description = "World map markers for the pinned target and the next step",
-		position = 1
+		position = 1,
+		closedByDefault = true
 	)
 	String mapSection = "map";
 
 	@ConfigSection(
 		name = "Bank tags",
 		description = "Tag and open the current bank's items via the built-in Bank Tags plugin",
-		position = 2
+		position = 2,
+		closedByDefault = true
 	)
 	String bankSection = "bank";
 
 	@ConfigSection(
 		name = "On-screen HUD",
 		description = "The movable on-screen step overlay. Alt+drag to reposition; every option below adjusts it.",
-		position = 3
+		position = 3,
+		closedByDefault = true
 	)
 	String hudSection = "hud";
 
 	@ConfigSection(
 		name = "Step highlighting",
 		description = "Outlines and tile highlights for the active bank's NPCs and items",
-		position = 4
+		position = 4,
+		closedByDefault = true
 	)
 	String highlightSection = "highlight";
 
 	@ConfigSection(
 		name = "Auto-completion",
 		description = "Automatic check-off of verifiable steps",
-		position = 5
+		position = 5,
+		closedByDefault = true
 	)
 	String autoSection = "auto";
 
 	@ConfigSection(
 		name = "Side panel",
 		description = "Side-panel text and layout appearance",
-		position = 6
+		position = 6,
+		closedByDefault = true
 	)
 	String uiSection = "ui";
 
 	@ConfigSection(
 		name = "Progress",
 		description = "How checklist progress is stored",
-		position = 7
+		position = 7,
+		closedByDefault = true
 	)
 	String progressSection = "progress";
 
 	@ConfigSection(
 		name = "Routing & teleports",
 		description = "Fastest-way-there suggestions using teleports you own (bank checked), plus optional path drawing via the Shortest Path plugin",
-		position = 8
+		position = 8,
+		closedByDefault = true
 	)
 	String routeSection = "route";
 
 	@ConfigSection(
 		name = "Step navigation",
 		description = "Clickable next/previous step arrows and optional keybinds. Next checks off your current step; Previous un-checks the last one.",
-		position = 9
+		position = 9,
+		closedByDefault = true
 	)
 	String navSection = "nav";
+
+	@ConfigSection(
+		name = "Notifications & sounds",
+		description = "Trip-ready and section-complete confirmations: on-screen/chat text plus an optional success sound",
+		position = 10,
+		closedByDefault = true
+	)
+	String notifySection = "notify";
 
 	// ------------------------------------------------------------------ target tracking
 
@@ -298,6 +316,18 @@ public interface HcimGuideConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "bankTagStepOrder",
+		name = "Arrange tab in guide order",
+		description = "Automatically lay out the guide-overlay tab in the order the section needs the items (uses the built-in Bank Tag Layouts). Turn off to arrange the tab yourself.",
+		position = 4,
+		section = bankSection
+	)
+	default boolean bankTagStepOrder()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "bankTagAutoOpen",
 		name = "Open tab when bank opens",
 		description = "Automatically switch to the guide-overlay tag tab each time you open the bank. Turn off to keep the tag but not change your tab.",
@@ -357,6 +387,54 @@ public interface HcimGuideConfig extends Config
 	default Color groundItemColor()
 	{
 		return new Color(90, 220, 130);
+	}
+
+	@ConfigItem(
+		keyName = "highlightStepObjects",
+		name = "Highlight step objects",
+		description = "Outline scene objects the current section's steps mention - ladders, staircases, altars, doors, furnaces and the like - so the \"which ladder?\" moments answer themselves",
+		position = 5,
+		section = highlightSection
+	)
+	default boolean highlightStepObjects()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "stepObjectColor",
+		name = "Step object color",
+		description = "Outline color for objects referenced by current-section steps",
+		position = 6,
+		section = highlightSection
+	)
+	default Color stepObjectColor()
+	{
+		return new Color(210, 140, 255);
+	}
+
+	@ConfigItem(
+		keyName = "highlightDialogOptions",
+		name = "Highlight dialogue options",
+		description = "When your current step notes the chat choices to pick - \"(2,1)\" - outline the right option in the dialogue box as each menu appears. You still click it yourself.",
+		position = 7,
+		section = highlightSection
+	)
+	default boolean highlightDialogOptions()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "dialogOptionColor",
+		name = "Dialogue option color",
+		description = "Outline color for the suggested dialogue option",
+		position = 8,
+		section = highlightSection
+	)
+	default Color dialogOptionColor()
+	{
+		return new Color(255, 200, 60);
 	}
 
 	// ------------------------------------------------------------------ auto-completion
@@ -459,6 +537,19 @@ public interface HcimGuideConfig extends Config
 	default boolean hudShowStepItems()
 	{
 		return true;
+	}
+
+	@Range(min = 20, max = 100)
+	@ConfigItem(
+		keyName = "hudBackgroundOpacity",
+		name = "Background opacity",
+		description = "Opacity of the on-screen box's dark background (percent). Higher makes the text easier to read over busy scenes.",
+		position = 6,
+		section = hudSection
+	)
+	default int hudBackgroundOpacity()
+	{
+		return 85;
 	}
 
 	// ------------------------------------------------------------------ side panel
@@ -682,6 +773,56 @@ public interface HcimGuideConfig extends Config
 	default Keybind prevStepKeybind()
 	{
 		return Keybind.NOT_SET;
+	}
+
+	// ------------------------------------------------------------------ notifications & sounds
+
+	@ConfigItem(
+		keyName = "tripReadyIndicator",
+		name = "Trip-ready indicator",
+		description = "Show a green \"✓ Trip ready\" line on the on-screen box once every item the current section still needs is in your inventory",
+		position = 1,
+		section = notifySection
+	)
+	default boolean tripReadyIndicator()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "tripReadySound",
+		name = "Trip-ready sound",
+		description = "Play a short success sound the moment the trip becomes ready (once per section)",
+		position = 2,
+		section = notifySection
+	)
+	default boolean tripReadySound()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "bankCompleteMessage",
+		name = "Section complete message",
+		description = "Print a game chat message when you finish the last step of a bank section",
+		position = 3,
+		section = notifySection
+	)
+	default boolean bankCompleteMessage()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "bankCompleteSound",
+		name = "Section complete sound",
+		description = "Play a short success sound when a bank section completes",
+		position = 4,
+		section = notifySection
+	)
+	default boolean bankCompleteSound()
+	{
+		return true;
 	}
 
 	// ------------------------------------------------------------------ progress

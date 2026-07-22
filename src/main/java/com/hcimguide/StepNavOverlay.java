@@ -47,6 +47,11 @@ public class StepNavOverlay extends Overlay
 		// still eating clicks - render above widgets so what's clickable is
 		// always exactly what's visible
 		setLayer(OverlayLayer.ABOVE_WIDGETS);
+		// same right-click actions as the HUD box, for the floating mode
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Next step",
+			"Guide Overlay", e -> plugin.navigateStep(true));
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Previous step",
+			"Guide Overlay", e -> plugin.navigateStep(false));
 	}
 
 	@Override

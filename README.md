@@ -20,8 +20,13 @@ off in the settings.
 - Search your guide, or jump straight to your next unchecked step
 - When a finished bank auto-collapses, the next one opens and scrolls into
   view by itself
-- Starting mid-guide? Right-click any step to mark everything before it
-  complete — or clear everything after it to rewind
+- Starting mid-guide? One click syncs the checklist to your account's
+  actual quest log and skills — or right-click any step to mark everything
+  before it complete / clear everything after it to rewind
+- Every bulk change (sync, catch-up, rewind, bank-wide marks) can be
+  undone with one click
+- Optional steps you don't want? Right-click "skip" excludes a step from
+  progress without pretending you did it
 - Separate progress per character — if your hardcore dies, the new one starts fresh
 - Back up your progress to the clipboard and restore it anywhere
 
@@ -47,7 +52,10 @@ off in the settings.
 - Compass looks are configurable: full dial or bare arrow, solid triangle
   or an arrow with a tail
 - The world map marks where your next step wants you to go
-- NPCs and ground items your current section needs are highlighted automatically
+- NPCs, ground items, AND scene objects (ladders, altars, doors, furnaces...)
+  your current section needs are highlighted automatically
+- Steps that note chat choices — "(2,1)" — get the right dialogue option
+  outlined in the chat box as each menu appears (you still click it)
 
 ## Fastest route
 
@@ -60,15 +68,22 @@ off in the settings.
 
 ## Bank help
 
-- Opening your bank shows a tab with just the items your current section needs
+- Opening your bank shows a tab with just the items your current section needs,
+  arranged in the order the guide uses them (toggleable)
 - Finished steps drop off the tab automatically
 - Item pictures under each step turn green when you have the item, red when missing
+- A "✓ Trip ready" indicator (with an optional success sound) confirms the
+  moment everything the section needs is in your inventory
+- Finishing a section prints a chat message and can play a success sound —
+  all four confirmations have their own toggles
 
 ## On-screen overlay
 
 - A small movable box shows your current section, next steps, and route tip
 - The current step's item pictures can show right in the box (toggleable),
   so you see what to grab without opening the sidebar
+- Shift+right-click the box for quick actions: next step, previous step,
+  pin next target
 - Everything repositions with Alt+drag and has size/font/color settings
 
 ## Getting started

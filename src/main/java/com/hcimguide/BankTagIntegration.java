@@ -11,6 +11,8 @@ import javax.inject.Singleton;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.plugins.banktags.BankTagsService;
 import net.runelite.client.plugins.banktags.TagManager;
+import net.runelite.client.plugins.banktags.tabs.Layout;
+import net.runelite.client.plugins.banktags.tabs.LayoutManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,6 +40,7 @@ public class BankTagIntegration
 
 	private final TagManager tagManager;
 	private final BankTagsService bankTagsService;
+	private final LayoutManager layoutManager;
 	private final ItemIconResolver iconResolver;
 	private final ScheduledExecutorService executor;
 	private final ClientThread clientThread;
@@ -53,11 +56,13 @@ public class BankTagIntegration
 
 	@Inject
 	public BankTagIntegration(TagManager tagManager, BankTagsService bankTagsService,
-		ItemIconResolver iconResolver, ScheduledExecutorService executor, ClientThread clientThread,
+		LayoutManager layoutManager, ItemIconResolver iconResolver,
+		ScheduledExecutorService executor, ClientThread clientThread,
 		HcimGuideConfig config)
 	{
 		this.tagManager = tagManager;
 		this.bankTagsService = bankTagsService;
+		this.layoutManager = layoutManager;
 		this.iconResolver = iconResolver;
 		this.executor = executor;
 		this.clientThread = clientThread;
@@ -123,6 +128,33 @@ public class BankTagIntegration
 					tagManager.addTag(id, TAG, false);
 				}
 				tagHasItems = !distinct.isEmpty();
+				// arrange the tab in GUIDE ORDER: `distinct` is a LinkedHashSet
+				// filled in step order, so the layout mirrors the withdrawal
+				// sequence top-left to bottom-right. Only when the user wants
+				// the managed arrangement - otherwise their own layout stands.
+				if (config.bankTagUseLayout() && config.bankTagStepOrder())
+				{
+					if (distinct.isEmpty())
+					{
+						layoutManager.removeLayout(TAG);
+					}
+					else
+					{
+						Layout layout = new Layout(TAG);
+						for (int id : distinct)
+						{
+							layout.addItem(id);
+						}
+						layoutManager.saveLayout(layout);
+						// the applied layout is a snapshot from when the tab
+						// opened - if OUR tab is showing right now, re-open it
+						// so the new arrangement takes effect immediately
+						if (TAG.equals(bankTagsService.getActiveTag()))
+						{
+							bankTagsService.openBankTag(TAG, 0);
+						}
+					}
+				}
 			}
 			catch (Exception e)
 			{
@@ -182,6 +214,7 @@ public class BankTagIntegration
 			try
 			{
 				tagManager.removeTag(TAG);
+				layoutManager.removeLayout(TAG);
 				if (TAG.equals(bankTagsService.getActiveTag()))
 				{
 					bankTagsService.closeBankTag();
@@ -198,5 +231,21 @@ public class BankTagIntegration
 	public void invalidate()
 	{
 		syncedBankId = "!invalidated!"; // can never equal a real signature
+	}
+
+	/** Remove the generated step-order layout (the tag itself is untouched). */
+	public void clearManagedLayout()
+	{
+		clientThread.invokeLater(() ->
+		{
+			try
+			{
+				layoutManager.removeLayout(TAG);
+			}
+			catch (Exception e)
+			{
+				log.warn("Could not remove managed bank tab layout", e);
+			}
+		});
 	}
 }

@@ -193,6 +193,32 @@ public class ItemIconResolver
 	}
 
 	/**
+	 * True when the name maps to a REAL item as far as we can currently tell:
+	 * a curated known id, or a previously resolved cache entry (directly or
+	 * via its colloquial alias). Cheap map lookups only - no searching - so
+	 * it's safe on the client thread every tick. Used to keep unverifiable
+	 * free text ("2 Food") from blocking the trip-ready check.
+	 */
+	public boolean isKnownItem(String name)
+	{
+		if (name == null)
+		{
+			return false;
+		}
+		if (byKnownId(name) > 0)
+		{
+			return true;
+		}
+		String key = ItemReq.normalize(name);
+		if (cache.containsKey(key))
+		{
+			return true;
+		}
+		String canonical = ItemAliases.canonical(key);
+		return canonical != null && cache.containsKey(ItemReq.normalize(canonical));
+	}
+
+	/**
 	 * Scan every item definition for the pending unresolved names, in
 	 * client-thread chunks so no single tick stalls. Finds untradeable items
 	 * (talismans, quest amulets, moulds, ...) that the price-based search
