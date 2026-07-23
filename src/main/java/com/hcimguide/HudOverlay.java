@@ -13,6 +13,7 @@ import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
+import net.runelite.client.ui.overlay.components.PanelComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
 
 /**
@@ -42,10 +43,14 @@ public class HudOverlay extends OverlayPanel
 	private static final int ICON_PAD = 2;
 	private static final int MAX_ICON_ROWS = 2;
 	private static final int STRIP_GAP = 2;
+	/** Vertical gap between the current-step box and the "Next steps" box. */
+	private static final int BOX_GAP = 4;
 
 	private final HcimGuidePlugin plugin;
 	private final HcimGuideConfig config;
 	private final ItemManager itemManager;
+	/** Second box for upcoming steps, so the current step stands alone. */
+	private final PanelComponent nextStepsPanel = new PanelComponent();
 
 	/** Local (overlay-relative) attached-arrow rects; null = not shown this frame. */
 	private volatile Rectangle prevRect;
@@ -99,18 +104,29 @@ public class HudOverlay extends OverlayPanel
 
 		int shown = 0;
 		int max = config.hudMaxSteps();
+		// with the split enabled, upcoming steps move to their own box below,
+		// so the current step stands alone and is easy to focus on
+		boolean split = config.hudSplitNextSteps() && max > 1;
+		java.util.List<GuideStep> upcoming = split ? new java.util.ArrayList<>() : null;
 		for (GuideStep step : bank.getSteps())
 		{
 			if (plugin.isStepDone(step.getKey()))
 			{
 				continue;
 			}
-			// FULL text, never truncated: LineComponent word-wraps to the
-			// panel width, so long steps grow the box instead of losing words
-			panelComponent.getChildren().add(LineComponent.builder()
-				.left((shown == 0 ? "> " : "- ") + step.getText())
-				.leftColor(shown == 0 ? NEXT_STEP_COLOR : LATER_STEP_COLOR)
-				.build());
+			if (shown == 0 || !split)
+			{
+				// FULL text, never truncated: LineComponent word-wraps to the
+				// panel width, so long steps grow the box instead of losing words
+				panelComponent.getChildren().add(LineComponent.builder()
+					.left((shown == 0 ? "> " : "- ") + step.getText())
+					.leftColor(shown == 0 ? NEXT_STEP_COLOR : LATER_STEP_COLOR)
+					.build());
+			}
+			else
+			{
+				upcoming.add(step);
+			}
 			if (++shown >= max)
 			{
 				break;
@@ -148,6 +164,10 @@ public class HudOverlay extends OverlayPanel
 		{
 			y = drawItemStrip(graphics, d.width, y);
 		}
+		if (upcoming != null && !upcoming.isEmpty())
+		{
+			y = drawNextStepsBox(graphics, d.width, y, upcoming);
+		}
 		if (config.navArrows() == HcimGuideConfig.ArrowMode.ATTACHED)
 		{
 			y = drawAttachedArrows(graphics, d.width, y);
@@ -157,6 +177,42 @@ public class HudOverlay extends OverlayPanel
 			clearArrowRects();
 		}
 		return new Dimension(d.width, y);
+	}
+
+	/**
+	 * The optional "Next steps" box, a visually separate panel under the
+	 * current-step box (and its item strip). Word-wraps exactly like the main
+	 * box and shares its width, font and background opacity.
+	 */
+	private int drawNextStepsBox(Graphics2D g, int width, int y, List<GuideStep> upcoming)
+	{
+		nextStepsPanel.getChildren().clear();
+		// follow the MAIN box's actual rendered width (an Alt-resized overlay
+		// overrides hudWidth), so the second box never escapes the bounds
+		nextStepsPanel.setPreferredSize(new Dimension(width, 0));
+		nextStepsPanel.setBackgroundColor(backgroundColor());
+		nextStepsPanel.setPreferredLocation(new Point(0, y + BOX_GAP));
+		nextStepsPanel.getChildren().add(TitleComponent.builder()
+			.text("Next steps")
+			.color(LATER_STEP_COLOR)
+			.build());
+		for (GuideStep step : upcoming)
+		{
+			nextStepsPanel.getChildren().add(LineComponent.builder()
+				.left("- " + step.getText())
+				.leftColor(LATER_STEP_COLOR)
+				.build());
+		}
+		// PanelComponent sizes its background (and return value) from the
+		// PREVIOUS render's child measurements - stale whenever this box was
+		// hidden last frame. A clipped measuring pass warms that cache so the
+		// visible render below is correctly sized on its very first frame.
+		Graphics2D measure = (Graphics2D) g.create();
+		measure.setClip(new Rectangle(0, 0, 0, 0));
+		nextStepsPanel.render(measure);
+		measure.dispose();
+		Dimension d = nextStepsPanel.render(g);
+		return d == null ? y : y + BOX_GAP + d.height;
 	}
 
 	/**

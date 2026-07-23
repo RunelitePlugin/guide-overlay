@@ -84,6 +84,8 @@ off in the settings.
 ## On-screen overlay
 
 - A small movable box shows your current section, next steps, and route tip
+- Showing more than one step? The current step gets its own box with a
+  separate "Next steps" box underneath, so it's easy to focus (toggleable)
 - The current step's item pictures can show right in the box (toggleable),
   so you see what to grab without opening the sidebar
 - Shift+right-click the box for quick actions: next step, previous step,

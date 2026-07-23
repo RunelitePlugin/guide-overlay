@@ -502,12 +502,24 @@ public interface HcimGuideConfig extends Config
 		return 3;
 	}
 
+	@ConfigItem(
+		keyName = "hudSplitNextSteps",
+		name = "Separate 'Next steps' box",
+		description = "Show the current step in its own box, with the upcoming steps in a second box underneath - easier to focus than one packed list. Applies when Step count is more than 1.",
+		position = 3,
+		section = hudSection
+	)
+	default boolean hudSplitNextSteps()
+	{
+		return true;
+	}
+
 	@Range(min = 160, max = 320)
 	@ConfigItem(
 		keyName = "hudWidth",
 		name = "Width",
 		description = "Width of the on-screen step overlay, in pixels",
-		position = 3,
+		position = 4,
 		section = hudSection
 	)
 	default int hudWidth()
@@ -519,7 +531,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "overlayFontStyle",
 		name = "Overlay font",
 		description = "Font used by this plugin's overlays (step HUD, compass distance, NPC name labels). 'Client default' follows RuneLite's own overlay font setting.",
-		position = 4,
+		position = 5,
 		section = hudSection
 	)
 	default FontStyle overlayFontStyle()
@@ -531,7 +543,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "hudShowStepItems",
 		name = "Item pictures on HUD",
 		description = "Show the current step's item pictures inside the on-screen box. The side panel's own item grids have a separate toggle under Side panel, so you can show items in either place, both, or neither.",
-		position = 5,
+		position = 6,
 		section = hudSection
 	)
 	default boolean hudShowStepItems()
@@ -544,7 +556,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "hudBackgroundOpacity",
 		name = "Background opacity",
 		description = "Opacity of the on-screen box's dark background (percent). Higher makes the text easier to read over busy scenes.",
-		position = 6,
+		position = 7,
 		section = hudSection
 	)
 	default int hudBackgroundOpacity()
