@@ -215,7 +215,7 @@ public interface HcimGuideConfig extends Config
 	)
 	default boolean compassShowRing()
 	{
-		return true;
+		return false;
 	}
 
 	@ConfigItem(

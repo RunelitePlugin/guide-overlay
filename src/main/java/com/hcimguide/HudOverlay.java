@@ -31,7 +31,10 @@ public class HudOverlay extends OverlayPanel
 {
 	private static final Color NEXT_STEP_COLOR = Color.WHITE;
 	private static final Color LATER_STEP_COLOR = new Color(205, 205, 205);
-	private static final Color ROUTE_COLOR = new Color(130, 230, 170);
+	/** Section titles in warm orange so headers separate from body text at a glance. */
+	private static final Color TITLE_COLOR = new Color(255, 172, 60);
+	/** Teleport/route suggestions in light blue - distinct from the green trip-ready tick. */
+	private static final Color ROUTE_COLOR = new Color(110, 200, 255);
 	private static final Color TRIP_READY_COLOR = new Color(90, 240, 130);
 	/** Near-black base for the box background; alpha comes from config. */
 	private static final Color BG_BASE = new Color(16, 16, 16);
@@ -100,6 +103,7 @@ public class HudOverlay extends OverlayPanel
 		int[] progress = plugin.progressOf(bank.getSteps());
 		panelComponent.getChildren().add(TitleComponent.builder()
 			.text(bank.getTitle() + "  (" + progress[0] + "/" + progress[1] + ")")
+			.color(TITLE_COLOR)
 			.build());
 
 		int shown = 0;
@@ -194,7 +198,7 @@ public class HudOverlay extends OverlayPanel
 		nextStepsPanel.setPreferredLocation(new Point(0, y + BOX_GAP));
 		nextStepsPanel.getChildren().add(TitleComponent.builder()
 			.text("Next steps")
-			.color(LATER_STEP_COLOR)
+			.color(TITLE_COLOR)
 			.build());
 		for (GuideStep step : upcoming)
 		{
