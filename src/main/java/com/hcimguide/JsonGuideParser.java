@@ -281,7 +281,12 @@ public class JsonGuideParser
 			{
 				for (JsonElement nEl : nested)
 				{
-					if (stepCount >= MAX_STEPS || !nEl.isJsonObject())
+					if (stepCount >= MAX_STEPS)
+					{
+						guide.markTruncated();
+						continue;
+					}
+					if (!nEl.isJsonObject())
 					{
 						continue;
 					}
@@ -335,6 +340,9 @@ public class JsonGuideParser
 			{
 				if (stepCount >= MAX_STEPS)
 				{
+					// mid-paragraph cap: later chunks are dropped - admit it,
+					// this can be the LAST element with no outer check left
+					guide.markTruncated();
 					break;
 				}
 				// the items suffix stays on the paragraph's first step only

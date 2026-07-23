@@ -79,6 +79,14 @@ public class NpcLocationStore
 				return size() > LOOKUP_CACHE_SIZE;
 			}
 		});
+	/**
+	 * Guards against a lookup that STRADDLES an invalidation: it read the old
+	 * map, the importer put new data and cleared the cache, and only then
+	 * would the lookup cache its stale result - which nothing would ever
+	 * invalidate again. Snapshot before reading, only cache when unchanged.
+	 */
+	private final java.util.concurrent.atomic.AtomicInteger cacheGen =
+		new java.util.concurrent.atomic.AtomicInteger();
 
 	@Inject
 	public NpcLocationStore(Gson gson)
@@ -198,13 +206,17 @@ public class NpcLocationStore
 		{
 			return cached.orElse(null);
 		}
+		int gen = cacheGen.get();
 		int[] v = locations.get(norm);
 		if (v == null)
 		{
 			v = looseMatch(norm);
 		}
 		WorldPoint result = v == null ? null : new WorldPoint(v[0], v[1], v[2]);
-		lookupCache.put(norm, Optional.ofNullable(result));
+		if (cacheGen.get() == gen)
+		{
+			lookupCache.put(norm, Optional.ofNullable(result));
+		}
 		return result;
 	}
 
@@ -251,6 +263,7 @@ public class NpcLocationStore
 
 	private void invalidateLookupCache()
 	{
+		cacheGen.incrementAndGet();
 		lookupCache.clear();
 	}
 

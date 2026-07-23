@@ -1808,12 +1808,13 @@ public class HcimGuidePlugin extends Plugin
 			{
 				continue;
 			}
-			if (itemSteps >= 12)
+			if (itemSteps >= 200)
 			{
-				// same bound as the bank tag: a trip is one inventory. More
-				// item-bearing steps remain UNCHECKED past the cap, so a
-				// "ready" verdict here would be a guess - fail closed instead
-				// of showing/sounding ready with requirements unexamined.
+				// hostile-input bound only: the real guides max out at 66
+				// item-bearing steps per section (BRUHsailer) - unlike the
+				// bank tag's 12, readiness must examine EVERY requirement or
+				// none, so past the cap it fails closed rather than guessing
+				// "ready" with requirements unexamined.
 				complete = false;
 				break;
 			}

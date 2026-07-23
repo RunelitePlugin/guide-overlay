@@ -53,8 +53,10 @@ public final class ItemListParser
 	 * unbounded quantifiers backtracked quadratically on malformed
 	 * whitespace-heavy text with an unclosed parenthesis (measured ~0.5s at
 	 * 10k chars - enough to stall a guide import). Same semantics: the
-	 * stripped region must end the string, and its content can't contain a
-	 * closing parenthesis.
+	 * stripped region must end the string, its content can't contain a
+	 * closing parenthesis, and like the regex's leftmost match it starts at
+	 * the EARLIEST open parenthesis after the second-to-last close - so an
+	 * unbalanced "(see (note)" strips whole, never leaving a dangling "(see".
 	 */
 	static String stripTrailingAdvice(String value)
 	{
@@ -67,17 +69,13 @@ public final class ItemListParser
 		{
 			return value;
 		}
-		int open = value.lastIndexOf('(', end - 2);
-		if (open < 0)
+		int lastClose = value.lastIndexOf(')', end - 2);
+		int open = value.indexOf('(', lastClose + 1);
+		if (open < 0 || open >= end - 1)
 		{
 			return value;
 		}
 		String inner = value.substring(open + 1, end - 1);
-		if (inner.indexOf(')') >= 0)
-		{
-			// nested close - the old regex never matched across one
-			return value;
-		}
 		boolean advice = inner.length() >= 8;
 		for (int i = 0; !advice && i < inner.length(); i++)
 		{
