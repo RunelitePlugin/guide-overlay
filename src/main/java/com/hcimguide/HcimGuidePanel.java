@@ -37,6 +37,7 @@ import javax.swing.event.DocumentListener;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.LinkBrowser;
 
 public class HcimGuidePanel extends PluginPanel
 {
@@ -1137,6 +1138,15 @@ public class HcimGuidePanel extends PluginPanel
 				}
 			});
 			rowMenu.add(skipItem);
+			// steps referencing a video guide (whitelisted hosts only) get a
+			// browser-open action; a deliberate click, never automatic
+			if (step.getVideoUrl() != null)
+			{
+				JMenuItem watchVideo = new JMenuItem("Watch video in browser");
+				watchVideo.setToolTipText(step.getVideoUrl());
+				watchVideo.addActionListener(e -> LinkBrowser.browse(step.getVideoUrl()));
+				rowMenu.add(watchVideo);
+			}
 			rowMenu.addPopupMenuListener(new javax.swing.event.PopupMenuListener()
 			{
 				@Override
@@ -1183,6 +1193,15 @@ public class HcimGuidePanel extends PluginPanel
 			else
 			{
 				pinButton = null;
+			}
+			if (step.getVideoUrl() != null)
+			{
+				JButton videoButton = new JButton("▶");
+				videoButton.setToolTipText("Watch video guide: " + step.getVideoUrl());
+				videoButton.setMargin(new Insets(0, 4, 0, 4));
+				videoButton.setFocusPainted(false);
+				videoButton.addActionListener(e -> LinkBrowser.browse(step.getVideoUrl()));
+				east.add(videoButton);
 			}
 			if (cond != null)
 			{

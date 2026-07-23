@@ -21,7 +21,7 @@ dependencies {
 }
 
 group = 'com.hcimguide'
-version = '1.2.0'
+version = '1.2.2'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_11

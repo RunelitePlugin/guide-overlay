@@ -297,7 +297,18 @@ public class WikitextParser
 				// separated by the occurrence suffix; a 32-bit collision between two
 				// DIFFERENT texts within one ~30-step bank is vanishingly unlikely.
 				String key = bank.getId() + "#" + Integer.toHexString(text.hashCode()) + "#" + occ;
-				bank.getSteps().add(new GuideStep(key, text, depth, bank.getId()));
+				GuideStep guideStep = new GuideStep(key, text, depth, bank.getId());
+				// video URLs become a per-step "watch in browser" action; text
+				// (and therefore keys) untouched. The RAW line is the fallback:
+				// cleanInline strips labeled extlinks ("[url watch this]" ->
+				// "watch this"), so their URL only survives pre-clean
+				String videoUrl = VideoLinks.firstVideoUrl(text);
+				if (videoUrl == null)
+				{
+					videoUrl = VideoLinks.firstVideoUrl(b.group(2));
+				}
+				guideStep.setVideoUrl(videoUrl);
+				bank.getSteps().add(guideStep);
 			}
 			// anything else (plain paragraphs, templates, iframes) is ignored
 		}

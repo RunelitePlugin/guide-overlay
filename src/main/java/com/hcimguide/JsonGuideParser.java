@@ -183,6 +183,7 @@ public class JsonGuideParser
 			if (!raw.isEmpty())
 			{
 				stepCount = addParagraph(guide, bank, raw, legacyRaw, itemsSuffix, 0,
+					videoLinks(optArray(step, "content")),
 					occByText, occByOld, occByLegacy, stepCount);
 			}
 
@@ -202,6 +203,7 @@ public class JsonGuideParser
 					{
 						int depth = Math.max(1, Math.min(4, optInt(n, "level", 1)));
 						stepCount = addParagraph(guide, bank, nRaw, nLegacy, "", depth,
+							videoLinks(optArray(n, "content")),
 							occByText, occByOld, occByLegacy, stepCount);
 					}
 				}
@@ -224,7 +226,8 @@ public class JsonGuideParser
 	 * either generation of saved progress lands on the split steps).
 	 */
 	private static int addParagraph(Guide guide, GuideBank bank, String raw, String legacyRaw,
-		String itemsSuffix, int depth, java.util.Map<String, Integer> occByText,
+		String itemsSuffix, int depth, java.util.List<String[]> videoLinks,
+		java.util.Map<String, Integer> occByText,
 		java.util.Map<String, Integer> occByOld, java.util.Map<String, Integer> occByLegacy, int stepCount)
 	{
 		if (raw.length() > MAX_PARAGRAPH)
@@ -232,6 +235,7 @@ public class JsonGuideParser
 			raw = raw.substring(0, MAX_PARAGRAPH - 1) + "…";
 		}
 		java.util.List<String> newKeys = new java.util.ArrayList<>();
+		java.util.List<GuideStep> added = new java.util.ArrayList<>();
 		boolean first = true;
 		for (String fragment : splitDigestible(raw))
 		{
@@ -247,10 +251,44 @@ public class JsonGuideParser
 				// the items suffix stays on the paragraph's first step only
 				String text = first ? chunk + itemsSuffix : chunk;
 				int d = fragmentHead ? depth : Math.min(4, depth + 1);
-				newKeys.add(addStep(bank, text, d, occByText));
+				GuideStep guideStep = addStep(bank, text, d, occByText);
+				// bare video URLs in the text itself (some runs carry the URL
+				// as their visible text)
+				guideStep.setVideoUrl(VideoLinks.firstVideoUrl(guideStep.getText()));
+				newKeys.add(guideStep.getKey());
+				added.add(guideStep);
 				stepCount++;
 				first = false;
 				fragmentHead = false;
+			}
+		}
+
+		// linked runs ("Getting Rats for 2t Oaks" -> youtube): attach each
+		// video to the split step whose text contains the anchor, falling back
+		// to the paragraph's first step when the anchor got chunked apart
+		for (String[] link : videoLinks)
+		{
+			String anchor = link[0];
+			String needle = anchor.length() > 24 ? anchor.substring(0, 24) : anchor;
+			GuideStep dest = null;
+			if (!needle.isEmpty())
+			{
+				for (GuideStep s : added)
+				{
+					if (s.getText().contains(needle))
+					{
+						dest = s;
+						break;
+					}
+				}
+			}
+			if (dest == null && !added.isEmpty())
+			{
+				dest = added.get(0);
+			}
+			if (dest != null && dest.getVideoUrl() == null)
+			{
+				dest.setVideoUrl(link[1]);
 			}
 		}
 
@@ -288,14 +326,54 @@ public class JsonGuideParser
 		return stepCount;
 	}
 
-	private static String addStep(GuideBank bank, String text, int depth, java.util.Map<String, Integer> occByText)
+	private static GuideStep addStep(GuideBank bank, String text, int depth, java.util.Map<String, Integer> occByText)
 	{
 		// enforce the documented cap on the COMBINED text (items suffix included)
 		text = cap(text);
 		int occ = occByText.merge(text, 1, Integer::sum) - 1;
 		String key = bank.getId() + "#" + Integer.toHexString(text.hashCode()) + "#" + occ;
-		bank.getSteps().add(new GuideStep(key, text, depth, bank.getId()));
-		return key;
+		GuideStep step = new GuideStep(key, text, depth, bank.getId());
+		bank.getSteps().add(step);
+		return step;
+	}
+
+	/**
+	 * (anchor text, url) pairs for content runs that carry a whitelisted video
+	 * link - the url lives either on the run itself or in its formatting
+	 * object, depending on the exporter version.
+	 */
+	private static java.util.List<String[]> videoLinks(JsonArray content)
+	{
+		java.util.List<String[]> out = new java.util.ArrayList<>();
+		if (content == null)
+		{
+			return out;
+		}
+		for (JsonElement el : content)
+		{
+			if (!el.isJsonObject())
+			{
+				continue;
+			}
+			JsonObject run = el.getAsJsonObject();
+			String url = optString(run, "url", "");
+			if (url.isEmpty())
+			{
+				JsonElement f = run.get("formatting");
+				if (f != null && f.isJsonObject())
+				{
+					url = optString(f.getAsJsonObject(), "url", "");
+				}
+			}
+			// store the TRIMMED form: validation trims before checking, so an
+			// untrimmed original would pass here yet break LinkBrowser later
+			url = url.trim();
+			if (!url.isEmpty() && VideoLinks.isVideoUrl(url))
+			{
+				out.add(new String[]{WikitextParser.sanitizeDisplay(optString(run, "text", "")), url});
+			}
+		}
+		return out;
 	}
 
 	/**

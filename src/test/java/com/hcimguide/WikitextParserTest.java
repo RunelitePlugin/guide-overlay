@@ -115,6 +115,22 @@ public class WikitextParserTest
 	}
 
 	@Test
+	public void bareVideoUrlsBecomeStepVideoLinksWithoutChangingText()
+	{
+		String wiki = "== Episode 1 - x ==\n"
+			+ "'''Bank 1'''\n"
+			+ "* Watch https://youtu.be/O6LDG19Gk5M before the fight\n"
+			+ "* Check https://imgur.com/jZUFUCR for the layout\n";
+		Guide g = new WikitextParser().parse(wiki);
+		GuideStep video = g.getEpisodes().get(0).getBanks().get(0).getSteps().get(0);
+		GuideStep image = g.getEpisodes().get(0).getBanks().get(0).getSteps().get(1);
+		assertEquals("https://youtu.be/O6LDG19Gk5M", video.getVideoUrl());
+		// text (and therefore the progress key) still contains the URL verbatim
+		assertTrue(video.getText().contains("https://youtu.be/O6LDG19Gk5M"));
+		assertEquals(null, image.getVideoUrl());
+	}
+
+	@Test
 	public void parsesChecklistTemplateFormatWithBankComments()
 	{
 		// the LIVE B0aty guide's real structure (verified against the actual

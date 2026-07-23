@@ -86,6 +86,40 @@ public class JsonGuideParserTest
 	}
 
 	@Test
+	public void videoLinkAttachesToTheFragmentContainingItsAnchor()
+	{
+		Guide g = new JsonGuideParser().parse("{\"chapters\":[{\"sections\":[{\"steps\":["
+			+ "{\"content\":["
+			+ "{\"text\":\"Train woodcutting to 35 first. \"},"
+			+ "{\"text\":\"Getting Rats for 2t Oaks\",\"url\":\"https://www.youtube.com/watch?v=3ysPgln5qZ4\",\"isLink\":true},"
+			+ "{\"text\":\" shows the method. Then bank everything you have.\"}"
+			+ "]}"
+			+ "]}]}]}");
+		GuideBank sec = g.getEpisodes().get(0).getBanks().get(0);
+		int withVideo = 0;
+		for (GuideStep s : sec.getSteps())
+		{
+			if (s.getVideoUrl() != null)
+			{
+				withVideo++;
+				assertTrue(s.getText().contains("Getting Rats"));
+				assertEquals("https://www.youtube.com/watch?v=3ysPgln5qZ4", s.getVideoUrl());
+			}
+		}
+		assertEquals(1, withVideo);
+	}
+
+	@Test
+	public void nonVideoUrlsNeverBecomeLinks()
+	{
+		Guide g = new JsonGuideParser().parse("{\"chapters\":[{\"sections\":[{\"steps\":["
+			+ "{\"content\":[{\"text\":\"Wiki map reference for the route.\","
+			+ "\"formatting\":{\"url\":\"https://oldschool.runescape.wiki/w/Map\",\"isLink\":true}}]}"
+			+ "]}]}]}");
+		assertTrue(g.getEpisodes().get(0).getBanks().get(0).getSteps().get(0).getVideoUrl() == null);
+	}
+
+	@Test
 	public void oldParagraphKeyMapsToAllSplitChildren()
 	{
 		Guide g = new JsonGuideParser().parse("{\"chapters\":[{\"sections\":[{\"steps\":["

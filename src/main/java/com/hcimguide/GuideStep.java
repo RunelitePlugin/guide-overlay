@@ -9,6 +9,12 @@ public class GuideStep
 	private final String text;
 	private final int depth;
 	private final String bankId;
+	/**
+	 * First whitelisted video link (YouTube/Streamable) this step references,
+	 * or null. Display metadata only - NEVER part of the step text, so keys
+	 * (users' saved progress) are unaffected by link changes.
+	 */
+	private String videoUrl;
 
 	public GuideStep(String key, String text, int depth, String bankId)
 	{
@@ -42,5 +48,15 @@ public class GuideStep
 	public String getBankId()
 	{
 		return bankId;
+	}
+
+	public String getVideoUrl()
+	{
+		return videoUrl;
+	}
+
+	void setVideoUrl(String videoUrl)
+	{
+		this.videoUrl = videoUrl;
 	}
 }
