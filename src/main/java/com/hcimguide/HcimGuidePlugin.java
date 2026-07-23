@@ -21,6 +21,7 @@ import net.runelite.api.GameState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.MenuAction;
 import net.runelite.api.NPC;
 import net.runelite.api.QuestState;
 import net.runelite.api.TileItem;
@@ -33,6 +34,7 @@ import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ItemDespawned;
 import net.runelite.api.events.ItemSpawned;
+import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.api.events.NpcSpawned;
 import net.runelite.api.events.WallObjectDespawned;
@@ -41,6 +43,7 @@ import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -191,6 +194,10 @@ public class HcimGuidePlugin extends Plugin
 	private volatile Map<String, List<ItemReq>> stepItems = Collections.emptyMap();
 	/** Step key -&gt; dialogue-choice sequence parsed from "(2,1)" notation. */
 	private volatile Map<String, int[]> dialogSequences = Collections.emptyMap();
+	/** Step key -&gt; normalized NPC-name candidates the sequence belongs to. */
+	private volatile Map<String, List<String>> dialogNpcs = Collections.emptyMap();
+	/** Step key -&gt; normalized scene-object words for object-driven dialogue. */
+	private volatile Map<String, Set<String>> dialogObjectWords = Collections.emptyMap();
 	/** Step key -&gt; extracted NPC target name; precomputed at import (never re-extracted per tick). */
 	private volatile Map<String, String> stepTargets = Collections.emptyMap();
 	/** Normalized target names of the current guide - bounds what the location store learns. */
@@ -310,6 +317,8 @@ public class HcimGuidePlugin extends Plugin
 
 	/** A pleasant "success" chime from the game's own sound effects. */
 	private static final int SUCCESS_SOUND = net.runelite.api.SoundEffectID.GE_ADD_OFFER_DINGALING;
+	/** Distinct from SUCCESS_SOUND so "ready to leave" never sounds like "done". */
+	private static final int TRIP_READY_SOUND = net.runelite.api.SoundEffectID.GE_COIN_TINKLE;
 
 	private boolean tripReady;
 	private String tripReadySoundedBank;
@@ -359,6 +368,42 @@ public class HcimGuidePlugin extends Plugin
 	private static final int DIALOG_RESET_TICKS = 4;
 	/** 1-based option the overlay should outline right now; -1 = none. */
 	private volatile int dialogHighlightOption = -1;
+	/**
+	 * Normalized names of who the CURRENT conversation is with: seeded by the
+	 * NPC or scene object the player clicked, extended by every speaker name
+	 * shown on the NPC dialogue widget. The highlight only draws when one of
+	 * these matches the guided step's own NPC/object - a step that names
+	 * nobody, or a chat with the wrong NPC, gets NO highlight (fail closed;
+	 * Quest Helper covers in-quest dialogue). Cleared when a new interaction
+	 * starts or the conversation times out. Client thread only.
+	 */
+	private final Set<String> conversationNames = new HashSet<>();
+	/** Bounds conversationNames against pathological many-speaker cutscenes. */
+	private static final int MAX_CONVERSATION_NAMES = 8;
+	/** Strips "(level-42)" from clicked-menu target text before matching. */
+	private static final java.util.regex.Pattern LEVEL_SUFFIX =
+		java.util.regex.Pattern.compile("(?i)\\s*\\(level[-\\s]*[0-9]+\\)\\s*$");
+	/** Tick of the last NPC/object interaction click that seeded the names. */
+	private int lastInteractionClickTick = -1;
+	/**
+	 * The click seed must survive the walk TO the target (no dialogue open
+	 * yet), or menu-first dialogs would never know their partner. Cleared
+	 * only once the conversation has also been quiet past this grace.
+	 */
+	private static final int CLICK_SEED_GRACE_TICKS = 50;
+	/**
+	 * An interaction click dismisses any option menu still on screen WITHOUT
+	 * answering it - that close must not advance the sequence. Set on click,
+	 * cleared when the next menu loads or the stale one's close is skipped.
+	 */
+	private boolean pendingInteractionClick;
+	/**
+	 * Whether the conversation on screen matched the guided step when last
+	 * evaluated - the widget-close advance gate. Kept up to date even while
+	 * the highlight config is off, so re-enabling mid-conversation resumes
+	 * at the RIGHT menu instead of a stale position.
+	 */
+	private boolean dialogAdvanceArmed;
 
 	private final net.runelite.client.input.MouseAdapter navMouse =
 		new net.runelite.client.input.MouseAdapter()
@@ -525,6 +570,8 @@ public class HcimGuidePlugin extends Plugin
 		conditions = Collections.emptyMap();
 		stepItems = Collections.emptyMap();
 		dialogSequences = Collections.emptyMap();
+		dialogNpcs = Collections.emptyMap();
+		dialogObjectWords = Collections.emptyMap();
 		dialogHighlightOption = -1;
 		clearHudItems();
 		stepTargets = Collections.emptyMap();
@@ -560,6 +607,10 @@ public class HcimGuidePlugin extends Plugin
 			dialogSeq = null;
 			dialogPos = 0;
 			lastDialogActivityTick = -1;
+			conversationNames.clear();
+			lastInteractionClickTick = -1;
+			pendingInteractionClick = false;
+			dialogAdvanceArmed = false;
 			prevActiveBankId = null;
 			prevActiveBankGuide = null;
 			nextStepPoint = null;
@@ -616,6 +667,8 @@ public class HcimGuidePlugin extends Plugin
 		conditions = Collections.emptyMap();
 		stepItems = Collections.emptyMap();
 		dialogSequences = Collections.emptyMap();
+		dialogNpcs = Collections.emptyMap();
+		dialogObjectWords = Collections.emptyMap();
 		dialogHighlightOption = -1;
 		clearHudItems();
 		stepTargets = Collections.emptyMap();
@@ -1273,6 +1326,8 @@ public class HcimGuidePlugin extends Plugin
 		Map<String, StepCondition> cond = new HashMap<>();
 		Map<String, List<ItemReq>> items = new HashMap<>();
 		Map<String, int[]> dialogSeqs = new HashMap<>();
+		Map<String, List<String>> dialogNpcMap = new HashMap<>();
+		Map<String, Set<String>> dialogObjMap = new HashMap<>();
 		Map<String, String> targets = new HashMap<>();
 		Set<String> namesNorm = new HashSet<>();
 		for (GuideEpisode ep : guide.getEpisodes())
@@ -1305,6 +1360,43 @@ public class HcimGuidePlugin extends Plugin
 					if (seq != null)
 					{
 						dialogSeqs.put(step.getKey(), seq);
+						// who the sequence's conversation is with: the name
+						// written right before the notation plus the step's
+						// "Talk to X" target - either may be null or wrong
+						// ("Client of Kourend"), so keep every candidate
+						List<String> npcCandidates = new ArrayList<>();
+						String before = DialogSequenceParser.npcBefore(step.getText());
+						if (before != null && !Names.normalize(before).isEmpty())
+						{
+							npcCandidates.add(Names.normalize(before));
+						}
+						String verbTarget = TargetExtractor.extract(step.getText());
+						if (verbTarget != null && !Names.normalize(verbTarget).isEmpty()
+							&& !npcCandidates.contains(Names.normalize(verbTarget)))
+						{
+							npcCandidates.add(Names.normalize(verbTarget));
+						}
+						String travelTarget = TargetExtractor.extractSecondary(step.getText());
+						if (travelTarget != null && !Names.normalize(travelTarget).isEmpty()
+							&& !npcCandidates.contains(Names.normalize(travelTarget)))
+						{
+							npcCandidates.add(Names.normalize(travelTarget));
+						}
+						if (!npcCandidates.isEmpty())
+						{
+							dialogNpcMap.put(step.getKey(), npcCandidates);
+						}
+						else
+						{
+							// object words only when the step names NO NPC:
+							// "talk to Reldo" steps that merely pass stairs
+							// must not light up the staircase's climb menu
+							Set<String> objWords = TargetExtractor.objectWordsIn(step.getText());
+							if (!objWords.isEmpty())
+							{
+								dialogObjMap.put(step.getKey(), objWords);
+							}
+						}
 					}
 					String target = TargetExtractor.extract(step.getText());
 					if (target == null)
@@ -1329,6 +1421,8 @@ public class HcimGuidePlugin extends Plugin
 		conditions = cond;
 		stepItems = items;
 		dialogSequences = dialogSeqs;
+		dialogNpcs = dialogNpcMap;
+		dialogObjectWords = dialogObjMap;
 		stepTargets = targets;
 		targetNamesNorm = namesNorm;
 		currentGuide = guide;
@@ -1690,7 +1784,7 @@ public class HcimGuidePlugin extends Plugin
 			tripReadySoundedBank = bank.getId();
 			try
 			{
-				client.playSoundEffect(SUCCESS_SOUND);
+				client.playSoundEffect(TRIP_READY_SOUND);
 			}
 			catch (Exception ignored)
 			{
@@ -1875,7 +1969,80 @@ public class HcimGuidePlugin extends Plugin
 		if (completed)
 		{
 			releasePinForStep(stepKey);
+			// when this very completion finishes the ACTIVE section, only the
+			// section-complete chime should play - not the same sound twice.
+			// Backfilling the last step of some other bank never triggers the
+			// section notice, so it keeps the step chime.
+			int hash = stepKey.indexOf('#');
+			String bankId = hash > 0 ? stepKey.substring(0, hash) : null;
+			boolean sectionChimes = config.bankCompleteSound()
+				&& bankId != null && bankId.equals(prevActiveBankId)
+				&& bankNowDone(stepKey);
+			if (!sectionChimes)
+			{
+				playStepCompleteSound();
+			}
 		}
+	}
+
+	/** Whether every step of the bank owning this key is now done. */
+	private boolean bankNowDone(String stepKey)
+	{
+		Guide guide = currentGuide;
+		int hash = stepKey == null ? -1 : stepKey.indexOf('#');
+		if (guide == null || hash <= 0)
+		{
+			return false;
+		}
+		String bankId = stepKey.substring(0, hash);
+		for (GuideEpisode ep : guide.getEpisodes())
+		{
+			for (GuideBank bank : ep.getBanks())
+			{
+				if (!bank.getId().equals(bankId))
+				{
+					continue;
+				}
+				for (GuideStep s : bank.getSteps())
+				{
+					if (!isStepDone(s.getKey()))
+					{
+						return false;
+					}
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Success chime for a single step getting checked off (manually or by
+	 * auto-completion). Safe from any thread; the effect itself must play on
+	 * the client thread. Bulk administrative actions (mark-bank-complete,
+	 * account sync, undo) stay silent on purpose.
+	 */
+	private void playStepCompleteSound()
+	{
+		if (!active || !config.stepCompleteSound())
+		{
+			return;
+		}
+		clientThread.invokeLater(() ->
+		{
+			if (!active)
+			{
+				return;
+			}
+			try
+			{
+				client.playSoundEffect(SUCCESS_SOUND);
+			}
+			catch (Exception e)
+			{
+				// sound is best-effort; never let it break anything
+			}
+		});
 	}
 
 	/** Bulk update used by "mark bank complete" etc. Persists once. */
@@ -3008,6 +3175,9 @@ public class HcimGuidePlugin extends Plugin
 		if (event.getGroupId() == InterfaceID.CHATMENU)
 		{
 			lastDialogActivityTick = tickCounter;
+			// this menu belongs to the conversation the click started - the
+			// stale-menu dismissal it guarded against can no longer happen
+			pendingInteractionClick = false;
 		}
 	}
 
@@ -3015,14 +3185,73 @@ public class HcimGuidePlugin extends Plugin
 	public void onWidgetClosed(WidgetClosed event)
 	{
 		// an option menu closing means the player answered it: the NEXT menu
-		// of the conversation wants the NEXT number in the sequence
+		// of the conversation wants the NEXT number in the sequence. Only a
+		// menu of the MATCHED conversation consumes a position (unrelated
+		// conversations must never desync the sequence), and a menu that a
+		// fresh interaction click swept away was dismissed, not answered
 		if (event.getGroupId() == InterfaceID.CHATMENU)
 		{
 			lastDialogActivityTick = tickCounter;
-			if (dialogSeq != null && dialogPos < dialogSeq.length)
+			if (pendingInteractionClick)
+			{
+				pendingInteractionClick = false;
+			}
+			else if (dialogAdvanceArmed && dialogSeq != null && dialogPos < dialogSeq.length)
 			{
 				dialogPos++;
 			}
+		}
+	}
+
+	/**
+	 * Clicking an NPC or a scene object starts a new conversation: remember
+	 * who with, so the dialogue guidance can tell the guided step's
+	 * conversation apart from small talk with bystanders. Reading the
+	 * player's own click - display bookkeeping only, nothing is acted on.
+	 */
+	@Subscribe
+	public void onMenuOptionClicked(MenuOptionClicked event)
+	{
+		MenuAction action = event.getMenuAction();
+		boolean npcClick = action == MenuAction.NPC_FIRST_OPTION
+			|| action == MenuAction.NPC_SECOND_OPTION
+			|| action == MenuAction.NPC_THIRD_OPTION
+			|| action == MenuAction.NPC_FOURTH_OPTION
+			|| action == MenuAction.NPC_FIFTH_OPTION;
+		boolean objectClick = action == MenuAction.GAME_OBJECT_FIRST_OPTION
+			|| action == MenuAction.GAME_OBJECT_SECOND_OPTION
+			|| action == MenuAction.GAME_OBJECT_THIRD_OPTION
+			|| action == MenuAction.GAME_OBJECT_FOURTH_OPTION
+			|| action == MenuAction.GAME_OBJECT_FIFTH_OPTION;
+		if (!npcClick && !objectClick)
+		{
+			return;
+		}
+		// a fresh interaction ends whatever conversation came before it, and
+		// its first option menu is menu #1 of the sequence again
+		conversationNames.clear();
+		dialogPos = 0;
+		lastInteractionClickTick = tickCounter;
+		pendingInteractionClick = true;
+		String name = null;
+		if (npcClick)
+		{
+			NPC npc = event.getMenuEntry().getNpc();
+			if (npc != null && npc.getName() != null)
+			{
+				name = Text.removeTags(npc.getName());
+			}
+		}
+		if (name == null && event.getMenuTarget() != null)
+		{
+			// object clicks and NPC entries without a live NPC: the menu
+			// target text is the name (minus tags and a combat-level suffix)
+			name = LEVEL_SUFFIX.matcher(Text.removeTags(event.getMenuTarget())).replaceAll("");
+		}
+		String norm = Names.normalize(name);
+		if (!norm.isEmpty())
+		{
+			conversationNames.add(norm);
 		}
 	}
 
@@ -3035,13 +3264,49 @@ public class HcimGuidePlugin extends Plugin
 	/**
 	 * Maintain the dialogue-guidance state. The guiding step is the pinned
 	 * step when set, else the current (first not-done) step of the active
-	 * bank. Position resets when the step changes or the conversation goes
-	 * quiet. Client thread, every tick; the common case is two comparisons.
+	 * bank. Position resets when the step changes, a new interaction starts,
+	 * or the conversation goes quiet. Client thread, every tick.
 	 */
 	private void updateDialogHighlight()
 	{
-		if (!config.highlightDialogOptions() || currentGuide == null)
+		// conversation bookkeeping runs even with the highlight toggled off
+		// (and with no guide), so the position and partner names track the
+		// live conversation and re-enabling mid-chat resumes correctly.
+		// While any dialogue widget is on screen the conversation is alive -
+		// a slow read must NEVER reset the sequence position (that would
+		// point the highlight at the wrong option). Only a few quiet ticks
+		// with no dialogue at all mean the conversation ended or was
+		// abandoned - and the names a click seeded survive the walk to the
+		// target through their own longer grace period.
+		if (isDialogueOpen())
 		{
+			lastDialogActivityTick = tickCounter;
+			// a click that failed to dismiss this dialogue (locked/scripted)
+			// will never produce the WidgetClosed the flag waits for - clear
+			// it so it can't swallow a real answer's close later
+			if (pendingInteractionClick && lastInteractionClickTick >= 0
+				&& tickCounter - lastInteractionClickTick > DIALOG_RESET_TICKS)
+			{
+				pendingInteractionClick = false;
+			}
+			captureConversationSpeaker();
+		}
+		else if (lastDialogActivityTick >= 0
+			&& tickCounter - lastDialogActivityTick > DIALOG_RESET_TICKS)
+		{
+			dialogPos = 0;
+			if (!conversationNames.isEmpty()
+				&& (lastInteractionClickTick < 0
+					|| tickCounter - lastInteractionClickTick > CLICK_SEED_GRACE_TICKS))
+			{
+				conversationNames.clear();
+			}
+		}
+		if (currentGuide == null)
+		{
+			dialogStepKey = null;
+			dialogSeq = null;
+			dialogAdvanceArmed = false;
 			dialogHighlightOption = -1;
 			return;
 		}
@@ -3067,6 +3332,7 @@ public class HcimGuidePlugin extends Plugin
 		{
 			dialogStepKey = null;
 			dialogSeq = null;
+			dialogAdvanceArmed = false;
 			dialogHighlightOption = -1;
 			return;
 		}
@@ -3078,23 +3344,42 @@ public class HcimGuidePlugin extends Plugin
 		}
 		if (dialogSeq == null)
 		{
+			dialogAdvanceArmed = false;
 			dialogHighlightOption = -1;
 			return;
 		}
-		// while any dialogue widget is on screen the conversation is alive -
-		// a slow read must NEVER reset the sequence position (that would
-		// point the highlight at the wrong option). Only a few quiet ticks
-		// with no dialogue at all mean the conversation ended or was abandoned.
-		if (isDialogueOpen())
+		// the sequence only applies to the conversation the step describes:
+		// no name match, no highlight and no position advance. A step whose
+		// NPC/object could not be extracted highlights nothing rather than
+		// mislead (Quest Helper covers mid-quest dialogue).
+		boolean matched = TargetExtractor.conversationMatches(
+			conversationNames, dialogNpcs.get(key), dialogObjectWords.get(key));
+		dialogAdvanceArmed = matched && dialogPos < dialogSeq.length;
+		dialogHighlightOption = dialogAdvanceArmed && config.highlightDialogOptions()
+			? dialogSeq[dialogPos] : -1;
+	}
+
+	/**
+	 * While a dialogue is showing, note who is speaking (the name line of the
+	 * NPC chat widget) so mid-conversation menus - and conversations the
+	 * player didn't start with a click - still identify their NPC.
+	 */
+	private void captureConversationSpeaker()
+	{
+		if (conversationNames.size() >= MAX_CONVERSATION_NAMES)
 		{
-			lastDialogActivityTick = tickCounter;
+			return;
 		}
-		else if (dialogPos > 0 && lastDialogActivityTick >= 0
-			&& tickCounter - lastDialogActivityTick > DIALOG_RESET_TICKS)
+		Widget nameWidget = client.getWidget(InterfaceID.ChatLeft.NAME);
+		if (nameWidget == null || nameWidget.isHidden() || nameWidget.getText() == null)
 		{
-			dialogPos = 0;
+			return;
 		}
-		dialogHighlightOption = dialogPos < dialogSeq.length ? dialogSeq[dialogPos] : -1;
+		String norm = Names.normalize(Text.removeTags(nameWidget.getText()));
+		if (!norm.isEmpty())
+		{
+			conversationNames.add(norm);
+		}
 	}
 
 	/**
@@ -3293,6 +3578,13 @@ public class HcimGuidePlugin extends Plugin
 
 		// single bulk update -> one JSON persist instead of one per step
 		setCompletedBulk(justCompleted, true);
+		// one chime per burst, not per step - and none when the burst just
+		// finished the section (the section-complete chime covers it)
+		String furthest = justCompleted.get(justCompleted.size() - 1).getKey();
+		if (!(config.bankCompleteSound() && bankNowDone(furthest)))
+		{
+			playStepCompleteSound();
+		}
 
 		if (config.notifyAutoComplete())
 		{

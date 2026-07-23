@@ -15,8 +15,10 @@ import net.runelite.client.ui.overlay.OverlayPosition;
 /**
  * Outlines the chat dialogue option the guide says to click, Quest
  * Helper-style. The guide's "(2,1)" notation is parsed per step; the plugin
- * tracks which menu of the conversation is showing and this overlay draws a
- * box around that option's text. Display only - the player still clicks.
+ * tracks which menu of the conversation is showing - and that the
+ * conversation is with the NPC or object the step actually names, so chatting
+ * with bystanders never draws a box - and this overlay outlines that option's
+ * text. Display only - the player still clicks.
  */
 public class DialogOptionOverlay extends Overlay
 {
