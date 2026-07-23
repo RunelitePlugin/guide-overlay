@@ -16,14 +16,19 @@ public interface HcimGuideConfig extends Config
 
 	/**
 	 * Font choice for the plugin's overlays (HUD, compass, NPC labels).
-	 * RuneLite's config UI title-cases the enum names for display.
+	 * RuneLite's config UI title-cases the enum names for display. The SANS_*
+	 * options use the system sans-serif font - plainer than the RuneScape
+	 * fonts but noticeably easier to read at small sizes.
 	 */
 	enum FontStyle
 	{
 		CLIENT_DEFAULT,
 		SMALL,
 		REGULAR,
-		BOLD
+		BOLD,
+		SANS_SMALL,
+		SANS,
+		SANS_LARGE
 	}
 
 	/** Where the clickable next/previous step arrows live. */
@@ -530,13 +535,13 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "overlayFontStyle",
 		name = "Overlay font",
-		description = "Font used by this plugin's overlays (step HUD, compass distance, NPC name labels). 'Client default' follows RuneLite's own overlay font setting.",
+		description = "Font used by this plugin's overlays (step HUD, compass distance, NPC name labels). 'Client default' follows RuneLite's own overlay font setting; the Sans options are plainer but easier to read.",
 		position = 5,
 		section = hudSection
 	)
 	default FontStyle overlayFontStyle()
 	{
-		return FontStyle.CLIENT_DEFAULT;
+		return FontStyle.SMALL;
 	}
 
 	@ConfigItem(
