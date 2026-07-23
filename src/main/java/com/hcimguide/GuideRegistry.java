@@ -145,6 +145,10 @@ public class GuideRegistry
 				List<Entry> saved = gson.fromJson(json, ENTRY_LIST);
 				if (saved != null)
 				{
+					// keyed by id, FIRST valid entry wins: a tampered registry
+					// with duplicate ids must yield one stable dropdown entry,
+					// not several that byId()/remove can disagree about
+					java.util.Map<String, Entry> byId = new java.util.LinkedHashMap<>();
 					for (Entry e : saved)
 					{
 						// re-validate ids on READ, not just on creation: ids become
@@ -156,9 +160,10 @@ public class GuideRegistry
 						{
 							e.title = sanitizeTitle(e.title); // defense on read too
 							e.sourceUrl = null; // user entries can never carry a raw URL
-							entries.add(e);
+							byId.putIfAbsent(e.id, e);
 						}
 					}
+					entries.addAll(byId.values());
 				}
 			}
 			catch (Exception e)

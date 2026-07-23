@@ -1,6 +1,7 @@
 package com.hcimguide;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.io.File;
 import java.io.IOException;
@@ -58,11 +59,35 @@ public class GuideService
 	 */
 	private Guide parseGuide(String text)
 	{
-		if (JsonGuideParser.looksLikeJsonGuide(text))
+		// single-pass: tryParse both sniffs AND parses, so a multi-MB JSON
+		// import isn't parsed twice (once to identify, once to build)
+		Guide json = jsonParser.tryParse(text);
+		return json != null ? json : parser.parse(text);
+	}
+
+	/**
+	 * The page wikitext out of a MediaWiki parse-API response, or null when
+	 * the response has any other shape. Every level is type-checked: the API
+	 * (or a proxy in between) can legally return "parse" as a non-object,
+	 * omit "wikitext", or make it a non-string - none of which may throw.
+	 */
+	static String extractWikiText(JsonObject root)
+	{
+		if (root == null)
 		{
-			return jsonParser.parse(text);
+			return null;
 		}
-		return parser.parse(text);
+		JsonElement parse = root.get("parse");
+		if (parse == null || !parse.isJsonObject())
+		{
+			return null;
+		}
+		JsonElement text = parse.getAsJsonObject().get("wikitext");
+		if (text == null || !text.isJsonPrimitive() || !text.getAsJsonPrimitive().isString())
+		{
+			return null;
+		}
+		return text.getAsString();
 	}
 
 	@Inject
@@ -244,7 +269,8 @@ public class GuideService
 					else
 					{
 						JsonObject root = gson.fromJson(readBounded(body), JsonObject.class);
-						if (root == null || !root.has("parse"))
+						String wikitext = extractWikiText(root);
+						if (wikitext == null)
 						{
 							error = root != null && root.has("error")
 								? "Wiki page not found"
@@ -252,7 +278,6 @@ public class GuideService
 						}
 						else
 						{
-							String wikitext = root.getAsJsonObject("parse").get("wikitext").getAsString();
 							guide = parseGuide(wikitext);
 							if (guide.isEmpty())
 							{
@@ -330,7 +355,9 @@ public class GuideService
 	 * Fetches a built-in guide directly from a trusted raw URL (e.g. the
 	 * BRUHsailer JSON) and stores it as the snapshot. The URL is only ever a
 	 * hardcoded built-in source, never user-supplied. Same one-of/exactly-one
-	 * callback contract as {@link #fetch}.
+	 * callback contract as {@link #fetch}, with one deliberate exception: a
+	 * URL that fails validation reports onError SYNCHRONOUSLY on the calling
+	 * thread, before any network work starts.
 	 */
 	public void fetchUrl(String guideId, String sourceUrl, java.util.function.BiConsumer<Guide, String> onSuccess, Consumer<String> onError)
 	{

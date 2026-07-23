@@ -18,7 +18,10 @@ check_absent() {
 }
 
 check_absent "no generated mouse/keyboard input" 'java\.awt\.Robot|MouseEvent\(|KeyEvent\(|setMouse|setKeyboard'
-check_absent "no generated in-game actions" 'invokeMenuAction|MenuAction|\.interact\(|ClientPacket|PacketBuffer'
+# match actual dispatch mechanisms, not the MenuAction enum type itself -
+# READING MenuAction values (e.g. classifying the player's own clicks) is
+# fine and expected; only invoking/synthesizing actions is prohibited
+check_absent "no generated in-game actions" 'invokeMenuAction|client\.menuAction\(|\.interact\(|ClientPacket|PacketBuffer|queueClickPacket'
 check_absent "no subprocess execution" 'ProcessBuilder|Runtime\.getRuntime\(\)\.exec|\.exec\('
 check_absent "no native loading/JNI" 'System\.load(Library)?\(|native[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\('
 check_absent "no dangerous reflection" 'setAccessible\(|Class\.forName\(|getDeclared(Method|Field|Constructor)\('

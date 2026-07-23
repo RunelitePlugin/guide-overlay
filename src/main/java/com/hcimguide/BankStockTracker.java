@@ -113,10 +113,10 @@ public class BankStockTracker
 					if (low.startsWith(part))
 					{
 						int[] row = counts.computeIfAbsent(part, k -> new int[SOURCES * 2]);
-						row[source * 2] += item.getQuantity();
+						row[source * 2] = addSaturated(row[source * 2], item.getQuantity());
 						if (hasChargeSuffix(low))
 						{
-							row[source * 2 + 1] += item.getQuantity();
+							row[source * 2 + 1] = addSaturated(row[source * 2 + 1], item.getQuantity());
 						}
 					}
 				}
@@ -248,5 +248,16 @@ public class BankStockTracker
 		counts.clear();
 		bankSeenLive = false;
 		revision++;
+	}
+
+	/**
+	 * Prefix-matched variants can pool into one counter, so the live sum can
+	 * theoretically exceed int range - clamp instead of wrapping negative
+	 * (a negative count would corrupt route decisions).
+	 */
+	private static int addSaturated(int a, int b)
+	{
+		long sum = (long) a + b;
+		return sum > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
 	}
 }

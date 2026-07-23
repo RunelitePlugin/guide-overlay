@@ -344,18 +344,18 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				return;
 			}
-			String json;
-			try
+			// clipboard is read off the EDT - a stalled clipboard owner (X11)
+			// must never freeze the client UI
+			setStatus("Reading clipboard…");
+			plugin.readClipboardText(json ->
 			{
-				json = (String) java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
-					.getData(java.awt.datatransfer.DataFlavor.stringFlavor);
-			}
-			catch (Exception ex)
-			{
-				setStatus("Clipboard does not contain text");
-				return;
-			}
-			plugin.importLocations(json);
+				if (json == null)
+				{
+					SwingUtilities.invokeLater(() -> setStatus("Clipboard does not contain text"));
+					return;
+				}
+				plugin.importLocations(json);
+			});
 		});
 		menu.add(importLocations);
 
@@ -370,19 +370,18 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				return;
 			}
-			// clipboard only touched after the user confirms
-			String code;
-			try
+			// clipboard only touched after the user confirms, and read off the
+			// EDT so a stalled clipboard owner can't freeze the client UI
+			setStatus("Reading clipboard…");
+			plugin.readClipboardText(code ->
 			{
-				code = (String) java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
-					.getData(java.awt.datatransfer.DataFlavor.stringFlavor);
-			}
-			catch (Exception ex)
-			{
-				setStatus("Clipboard does not contain text");
-				return;
-			}
-			plugin.importProgress(code);
+				if (code == null)
+				{
+					SwingUtilities.invokeLater(() -> setStatus("Clipboard does not contain text"));
+					return;
+				}
+				plugin.importProgress(code);
+			});
 		});
 		menu.add(importProgress);
 

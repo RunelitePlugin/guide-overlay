@@ -12,8 +12,11 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -60,11 +63,22 @@ public class NpcLocationStore
 	 * lookup() runs every game tick while a pinned target is out of scene, and
 	 * its loose-match fallback scans the whole map on a miss - trivial for the
 	 * seed, but a bundled full-game database makes that tens of thousands of
-	 * comparisons per tick. Memoize the last query (including misses) and
-	 * invalidate whenever the map changes.
+	 * comparisons per tick. Memoize recent queries INCLUDING misses (an empty
+	 * Optional), so alternating between two unknown targets never rescans, and
+	 * invalidate whenever the map changes. Access-order LRU, synchronized;
+	 * clear() replaces the old two-field cache whose separate writes could
+	 * briefly pair a query with the wrong result.
 	 */
-	private volatile String cachedQuery;
-	private volatile WorldPoint cachedResult;
+	private static final int LOOKUP_CACHE_SIZE = 16;
+	private final Map<String, Optional<WorldPoint>> lookupCache =
+		Collections.synchronizedMap(new LinkedHashMap<String, Optional<WorldPoint>>(32, 0.75f, true)
+		{
+			@Override
+			protected boolean removeEldestEntry(Map.Entry<String, Optional<WorldPoint>> eldest)
+			{
+				return size() > LOOKUP_CACHE_SIZE;
+			}
+		});
 
 	@Inject
 	public NpcLocationStore(Gson gson)
@@ -179,33 +193,65 @@ public class NpcLocationStore
 		{
 			return null;
 		}
-		if (norm.equals(cachedQuery))
+		Optional<WorldPoint> cached = lookupCache.get(norm);
+		if (cached != null)
 		{
-			return cachedResult;
+			return cached.orElse(null);
 		}
 		int[] v = locations.get(norm);
 		if (v == null)
 		{
-			// loose fallback for prefix-style matches ("Veos" vs "Veos the captain")
-			for (Map.Entry<String, int[]> e : locations.entrySet())
-			{
-				if (Names.matchNormalized(norm, e.getKey()))
-				{
-					v = e.getValue();
-					break;
-				}
-			}
+			v = looseMatch(norm);
 		}
 		WorldPoint result = v == null ? null : new WorldPoint(v[0], v[1], v[2]);
-		cachedResult = result;
-		cachedQuery = norm;
+		lookupCache.put(norm, Optional.ofNullable(result));
 		return result;
+	}
+
+	/**
+	 * Deterministic loose fallback for prefix-style matches ("Veos" vs "Veos
+	 * the captain"), used only after an exact miss. Prefix matching is only
+	 * attempted when both names have at least four normalized characters -
+	 * a two-letter query would loose-match half of a full-game database.
+	 * Among the candidates the closest length wins, ties broken
+	 * lexicographically, so the same query resolves to the same entry
+	 * regardless of map iteration order or capacity.
+	 */
+	private int[] looseMatch(String norm)
+	{
+		if (norm.length() < 4)
+		{
+			return null;
+		}
+		String bestKey = null;
+		int[] best = null;
+		for (Map.Entry<String, int[]> e : locations.entrySet())
+		{
+			String key = e.getKey();
+			if (key.length() < 4 || !Names.matchNormalized(norm, key))
+			{
+				continue;
+			}
+			if (bestKey == null || closerTo(norm, key, bestKey))
+			{
+				bestKey = key;
+				best = e.getValue();
+			}
+		}
+		return best;
+	}
+
+	/** True when candidate is a strictly better match for query than incumbent. */
+	private static boolean closerTo(String query, String candidate, String incumbent)
+	{
+		int c = Math.abs(candidate.length() - query.length());
+		int i = Math.abs(incumbent.length() - query.length());
+		return c != i ? c < i : candidate.compareTo(incumbent) < 0;
 	}
 
 	private void invalidateLookupCache()
 	{
-		cachedQuery = null;
-		cachedResult = null;
+		lookupCache.clear();
 	}
 
 	/** All known locations as shareable JSON (name -&gt; [x, y, plane]). */

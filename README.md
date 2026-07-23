@@ -66,8 +66,10 @@ off in the settings.
 ## Fastest route
 
 - The on-screen overlay suggests the quickest teleport to your next objective
-- Only suggests teleports you can actually use — it checks your runes and
-  jewelry in your inventory, gear, and bank ("in bank" items are labeled)
+- Suggestions are item-aware — it checks your runes and jewelry in your
+  inventory, gear, and bank ("in bank" items are labeled). It does not yet
+  model Magic level, spellbook, quest unlocks, or cooldowns, so treat a
+  suggestion as "you have the items", not "guaranteed castable"
 - Choose which kinds count: spells, teleport tablets, jewelry, other items
 - Have the Shortest Path plugin installed? Guide Overlay sends it your
   destination so the walking path is drawn on the ground for you

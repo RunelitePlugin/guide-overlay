@@ -24,11 +24,75 @@ public final class ItemListParser
 	private static final Pattern GATHER_CUTOFF = Pattern.compile(
 		"(?i)\\s+(?:off|from|inside|outside|at|on|next to|near|in|to|south|north|east|west|whenever|if|while|then|and wield|and equip|by)\\b.*$");
 
+	// every expression below runs once per step during import - precompiled
+	// so a large guide doesn't compile thousands of throwaway Patterns
+	private static final Pattern SLOTS_PAREN = Pattern.compile("(?i)\\s*\\([^)]*slots?[^)]*\\)");
+	private static final Pattern SLOTS_BRACKET = Pattern.compile("(?i)\\s*\\[[^\\]]*slots?[^\\]]*]");
+	private static final Pattern SLOTS_UNCLOSED = Pattern.compile("(?i)\\s*\\([^)]*slots?.*$");
+	private static final Pattern TRAILING_DOTS = Pattern.compile("[.\\s]+$");
+	private static final Pattern LIST_SPLIT = Pattern.compile(",|&|\\+");
+	private static final Pattern INSTRUCTION_FRAGMENT = Pattern.compile("(?i)^(?:wear|wield|equip|use|then|and|if)\\b.*");
+	private static final Pattern GATHER_BOUNDARY = Pattern.compile("[.\\[(,&+]");
+	private static final Pattern LEADING_ARTICLE = Pattern.compile("^(?:the|a|an)\\s+");
+
 	private static final Set<String> NOT_ITEMS = new HashSet<>(Arrays.asList(
 		"everything", "all", "it", "them", "both", "one", "this", "these"));
 
 	private ItemListParser()
 	{
+	}
+
+	/**
+	 * Drops ONE trailing "(advice here)" parenthetical - but NEVER a short
+	 * dose/charge suffix like "Prayer potion(4)", "Ring of dueling(8)" or
+	 * "(t)", whose parenthetical is part of the real item name. Advice
+	 * contains whitespace or is 8+ characters; suffixes are short and solid.
+	 *
+	 * A single left-to-right scan replacing the old
+	 * {@code \s*\((?:[^)]*\s[^)]*|[^)]{8,})\)\s*$} regex, whose overlapping
+	 * unbounded quantifiers backtracked quadratically on malformed
+	 * whitespace-heavy text with an unclosed parenthesis (measured ~0.5s at
+	 * 10k chars - enough to stall a guide import). Same semantics: the
+	 * stripped region must end the string, and its content can't contain a
+	 * closing parenthesis.
+	 */
+	static String stripTrailingAdvice(String value)
+	{
+		int end = value.length();
+		while (end > 0 && Character.isWhitespace(value.charAt(end - 1)))
+		{
+			end--;
+		}
+		if (end == 0 || value.charAt(end - 1) != ')')
+		{
+			return value;
+		}
+		int open = value.lastIndexOf('(', end - 2);
+		if (open < 0)
+		{
+			return value;
+		}
+		String inner = value.substring(open + 1, end - 1);
+		if (inner.indexOf(')') >= 0)
+		{
+			// nested close - the old regex never matched across one
+			return value;
+		}
+		boolean advice = inner.length() >= 8;
+		for (int i = 0; !advice && i < inner.length(); i++)
+		{
+			advice = Character.isWhitespace(inner.charAt(i));
+		}
+		if (!advice)
+		{
+			return value;
+		}
+		// also consume the whitespace that preceded the parenthetical
+		while (open > 0 && Character.isWhitespace(value.charAt(open - 1)))
+		{
+			open--;
+		}
+		return value.substring(0, open);
 	}
 
 	/**
@@ -45,18 +109,16 @@ public final class ItemListParser
 		{
 			return null;
 		}
-		String list = m.group(1)
-			// drop "(8 Inventory slots)" style notes ANYWHERE in the list -
-			// the live guide often continues after them ("... (14 Inventory
-			// Slots) + Food"), so trailing-only stripping isn't enough
-			.replaceAll("(?i)\\s*\\([^)]*slots?[^)]*\\)", "")
-			.replaceAll("(?i)\\s*\\[[^\\]]*slots?[^\\]]*]", "")
-			// same, when the writer forgot the closing parenthesis
-			.replaceAll("(?i)\\s*\\([^)]*slots?.*$", "")
-			// drop trailing parenthetical advice (never short dose suffixes -
-			// "Prayer potion(4)" as the last item must keep its "(4)")
-			.replaceAll("\\s*\\((?:[^)]*\\s[^)]*|[^)]{8,})\\)\\s*$", "")
-			.replaceAll("[.\\s]+$", "");
+		// drop "(8 Inventory slots)" style notes ANYWHERE in the list -
+		// the live guide often continues after them ("... (14 Inventory
+		// Slots) + Food"), so trailing-only stripping isn't enough; the third
+		// covers a writer who forgot the closing parenthesis
+		String list = m.group(1);
+		list = SLOTS_PAREN.matcher(list).replaceAll("");
+		list = SLOTS_BRACKET.matcher(list).replaceAll("");
+		list = SLOTS_UNCLOSED.matcher(list).replaceAll("");
+		list = stripTrailingAdvice(list);
+		list = TRAILING_DOTS.matcher(list).replaceAll("");
 
 		return parseList(list);
 	}
@@ -112,14 +174,9 @@ public final class ItemListParser
 	{
 		List<ItemReq> out = new ArrayList<>();
 		// the guide separates items with commas, ampersands, and plus signs
-		for (String part : list.split(",|&|\\+"))
+		for (String part : LIST_SPLIT.split(list))
 		{
-			String p = part.trim();
-			// per-item cleanup: trailing "(Optional)"/"(buy new ones ...)"
-			// advice - but NEVER dose/charge suffixes like "Prayer potion(4)",
-			// "Ring of dueling(8)" or "(t)", whose parenthetical is part of the
-			// real item name. Advice has spaces or is long; suffixes are short.
-			p = p.replaceAll("\\s*\\((?:[^)]*\\s[^)]*|[^)]{8,})\\)\\s*$", "");
+			String p = stripTrailingAdvice(part.trim());
 			// trailing sentences ("Ball of Wool. If 85 Crafting...")
 			int sentence = p.indexOf(". ");
 			if (sentence > 0)
@@ -132,7 +189,7 @@ public final class ItemListParser
 				continue;
 			}
 			// instruction fragments after '&' splits ("wear them", "equip it")
-			if (p.matches("(?i)^(?:wear|wield|equip|use|then|and|if)\\b.*"))
+			if (INSTRUCTION_FRAGMENT.matcher(p).matches())
 			{
 				continue;
 			}
@@ -194,10 +251,10 @@ public final class ItemListParser
 		// cut at sentence/bracket/parenthesis/conjunction boundaries, then at
 		// location phrasing. split() can return an empty array when rest is
 		// only delimiters
-		String[] parts = rest.split("[.\\[(,&+]");
+		String[] parts = GATHER_BOUNDARY.split(rest);
 		rest = parts.length > 0 ? parts[0].trim() : "";
 		rest = GATHER_CUTOFF.matcher(rest).replaceAll("").trim();
-		rest = rest.replaceAll("^(?:the|a|an)\\s+", "");
+		rest = LEADING_ARTICLE.matcher(rest).replaceFirst("");
 
 		if (rest.isEmpty() || rest.length() > 30 || NOT_ITEMS.contains(rest.toLowerCase(java.util.Locale.ROOT)))
 		{

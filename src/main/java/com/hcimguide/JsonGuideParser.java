@@ -27,6 +27,14 @@ import com.google.gson.JsonParser;
 public class JsonGuideParser
 {
 	private static final int MAX_STEPS = 25_000;
+	/**
+	 * Structural caps, mirroring WikitextParser: the step cap alone doesn't
+	 * bound the MODEL - a 16 MB file of empty chapters/sections would still
+	 * allocate thousands of episodes and banks. Hitting one marks the guide
+	 * truncated. Real BRUHsailer data: 4 chapters, ~30 sections.
+	 */
+	private static final int MAX_EPISODES = 500;
+	private static final int MAX_SECTIONS_PER_CHAPTER = 500;
 	private static final int MAX_TEXT = 400;
 	/** Fragments shorter than this fold into their neighbor instead of standing alone. */
 	private static final int MIN_FRAGMENT = 12;
@@ -49,15 +57,32 @@ public class JsonGuideParser
 	private static final java.util.Set<String> ABBREVIATIONS = new java.util.HashSet<>(java.util.Arrays.asList(
 		"e.g", "i.e", "vs", "approx", "etc", "mr", "mrs", "st", "no"));
 
-	/** True when the text is a JSON guide this parser understands. */
-	public static boolean looksLikeJsonGuide(String text)
+	/**
+	 * First non-whitespace character is '{' - the cheap sniff shared by
+	 * every JSON entry point, deliberately NOT trim(): trimming a 16 MB
+	 * import allocates a second 16 MB string just to look at one char.
+	 */
+	private static boolean sniffJson(String text)
 	{
 		if (text == null)
 		{
 			return false;
 		}
-		String t = text.trim();
-		if (t.isEmpty() || t.charAt(0) != '{')
+		for (int i = 0; i < text.length(); i++)
+		{
+			char c = text.charAt(i);
+			if (!Character.isWhitespace(c))
+			{
+				return c == '{';
+			}
+		}
+		return false;
+	}
+
+	/** True when the text is a JSON guide this parser understands. */
+	public static boolean looksLikeJsonGuide(String text)
+	{
+		if (!sniffJson(text))
 		{
 			return false;
 		}
@@ -65,7 +90,7 @@ public class JsonGuideParser
 		{
 			// instance API, not JsonParser.parseString: the client bundles an
 			// older gson where the static method does not exist
-			JsonElement root = new JsonParser().parse(t);
+			JsonElement root = new JsonParser().parse(text);
 			return root.isJsonObject() && root.getAsJsonObject().has("chapters");
 		}
 		catch (Exception e)
@@ -74,12 +99,40 @@ public class JsonGuideParser
 		}
 	}
 
+	/**
+	 * Parses the text as a JSON guide in ONE pass, or returns null when it
+	 * isn't one (not JSON, not an object, or no "chapters") so the caller
+	 * can fall back to the wikitext parser - without the parse-twice cost of
+	 * calling {@link #looksLikeJsonGuide} first on a multi-MB import.
+	 */
+	public Guide tryParse(String text)
+	{
+		if (!sniffJson(text))
+		{
+			return null;
+		}
+		JsonObject root;
+		try
+		{
+			JsonElement parsed = new JsonParser().parse(text);
+			if (!parsed.isJsonObject() || !parsed.getAsJsonObject().has("chapters"))
+			{
+				return null;
+			}
+			root = parsed.getAsJsonObject();
+		}
+		catch (Exception e)
+		{
+			return null;
+		}
+		return build(root);
+	}
+
 	public Guide parse(String text)
 	{
-		Guide guide = new Guide();
 		if (text == null)
 		{
-			return guide;
+			return new Guide();
 		}
 		JsonObject root;
 		try
@@ -87,14 +140,20 @@ public class JsonGuideParser
 			JsonElement parsed = new JsonParser().parse(text);
 			if (!parsed.isJsonObject())
 			{
-				return guide;
+				return new Guide();
 			}
 			root = parsed.getAsJsonObject();
 		}
 		catch (Exception e)
 		{
-			return guide;
+			return new Guide();
 		}
+		return build(root);
+	}
+
+	private Guide build(JsonObject root)
+	{
+		Guide guide = new Guide();
 
 		JsonArray chapters = optArray(root, "chapters");
 		if (chapters == null)
@@ -112,10 +171,19 @@ public class JsonGuideParser
 			}
 			JsonObject chapter = chapterEl.getAsJsonObject();
 			chapterNo++;
+			if (guide.getEpisodes().size() >= MAX_EPISODES)
+			{
+				guide.markTruncated();
+				continue;
+			}
 			GuideEpisode episode = new GuideEpisode(chapterNo, WikitextParser.sanitizeDisplay(optString(chapter, "title", "Chapter " + chapterNo)));
-			guide.getEpisodes().add(episode);
 
-			// a chapter may hold sections, or steps directly
+			// a chapter may hold sections, or steps directly. Banks and the
+			// episode itself attach to the model only once populated, so a
+			// malformed/hostile file of empty structures allocates nothing -
+			// while chapterNo/sectionNo still count EVERY source structure, so
+			// the C<n>.S<n> ids in persisted step keys never renumber when an
+			// empty chapter sits between populated ones.
 			JsonArray sections = optArray(chapter, "sections");
 			if (sections == null)
 			{
@@ -123,25 +191,41 @@ public class JsonGuideParser
 				if (directSteps != null)
 				{
 					GuideBank bank = new GuideBank("C" + chapterNo + ".S0", "Steps", chapterNo);
-					episode.getBanks().add(bank);
 					stepCount = addSteps(guide, bank, directSteps, stepCount);
+					if (!bank.getSteps().isEmpty())
+					{
+						episode.getBanks().add(bank);
+					}
 				}
-				continue;
 			}
-
-			int sectionNo = 0;
-			for (JsonElement sectionEl : sections)
+			else
 			{
-				if (!sectionEl.isJsonObject())
+				int sectionNo = 0;
+				for (JsonElement sectionEl : sections)
 				{
-					continue;
+					if (!sectionEl.isJsonObject())
+					{
+						continue;
+					}
+					JsonObject section = sectionEl.getAsJsonObject();
+					sectionNo++;
+					if (sectionNo > MAX_SECTIONS_PER_CHAPTER)
+					{
+						guide.markTruncated();
+						continue;
+					}
+					String title = WikitextParser.sanitizeDisplay(optString(section, "title", "Section " + sectionNo));
+					GuideBank bank = new GuideBank("C" + chapterNo + ".S" + sectionNo, title, chapterNo);
+					stepCount = addSteps(guide, bank, optArray(section, "steps"), stepCount);
+					if (!bank.getSteps().isEmpty())
+					{
+						episode.getBanks().add(bank);
+					}
 				}
-				JsonObject section = sectionEl.getAsJsonObject();
-				sectionNo++;
-				String title = WikitextParser.sanitizeDisplay(optString(section, "title", "Section " + sectionNo));
-				GuideBank bank = new GuideBank("C" + chapterNo + ".S" + sectionNo, title, chapterNo);
-				episode.getBanks().add(bank);
-				stepCount = addSteps(guide, bank, optArray(section, "steps"), stepCount);
+			}
+			if (!episode.getBanks().isEmpty())
+			{
+				guide.getEpisodes().add(episode);
 			}
 		}
 		return guide;
@@ -166,7 +250,12 @@ public class JsonGuideParser
 		java.util.Map<String, Integer> occByLegacy = new java.util.HashMap<>();
 		for (JsonElement stepEl : steps)
 		{
-			if (stepCount >= MAX_STEPS || !stepEl.isJsonObject())
+			if (stepCount >= MAX_STEPS)
+			{
+				guide.markTruncated();
+				continue;
+			}
+			if (!stepEl.isJsonObject())
 			{
 				continue;
 			}
@@ -365,12 +454,12 @@ public class JsonGuideParser
 					url = optString(f.getAsJsonObject(), "url", "");
 				}
 			}
-			// store the TRIMMED form: validation trims before checking, so an
-			// untrimmed original would pass here yet break LinkBrowser later
-			url = url.trim();
-			if (!url.isEmpty() && VideoLinks.isVideoUrl(url))
+			// store the ACCEPTED form: trimmed (an untrimmed original would
+			// pass validation yet break LinkBrowser later) and https-normalized
+			String ok = VideoLinks.accepted(url);
+			if (ok != null)
 			{
-				out.add(new String[]{WikitextParser.sanitizeDisplay(optString(run, "text", "")), url});
+				out.add(new String[]{WikitextParser.sanitizeDisplay(optString(run, "text", "")), ok});
 			}
 		}
 		return out;

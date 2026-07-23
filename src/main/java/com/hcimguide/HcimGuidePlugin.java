@@ -8,6 +8,7 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -345,10 +346,27 @@ public class HcimGuidePlugin extends Plugin
 	 * cleared on scene load. Only whitelist matches are stored, so this holds
 	 * dozens of entries, not the whole scene.
 	 */
+	// COVERAGE NOTE: only GameObjects and WallObjects are tracked (the two
+	// types guide objectives actually use); DecorativeObject/GroundObject have
+	// no spawn/despawn subscriptions and are never inserted here. Anyone
+	// adding a third type MUST add its despawn handler too, or this map leaks.
 	private final Map<net.runelite.api.TileObject, String> sceneObjects = new HashMap<>();
 	private List<net.runelite.api.TileObject> objectHighlights = new ArrayList<>();
-	/** Object id -> normalized whitelisted name ("" = not whitelisted). */
-	private final Map<Integer, String> objectNameCache = new HashMap<>();
+	/**
+	 * Object id -> normalized whitelisted name ("" = not whitelisted).
+	 * Access-order LRU bounded against very long sessions crossing many
+	 * regions (compositions are cheap to re-resolve on eviction).
+	 * Client thread only.
+	 */
+	private final Map<Integer, String> objectNameCache =
+		new LinkedHashMap<Integer, String>(64, 0.75f, true)
+	{
+		@Override
+		protected boolean removeEldestEntry(Map.Entry<Integer, String> eldest)
+		{
+			return size() > 2048;
+		}
+	};
 
 	// ------- dialogue option guidance (client thread)
 
@@ -1260,6 +1278,36 @@ public class HcimGuidePlugin extends Plugin
 	}
 
 	/** Import NPC locations from shared JSON (community dataset or a friend's export). */
+	/**
+	 * Reads the system clipboard OFF the EDT - getData can block (notably on
+	 * X11 when the clipboard owner stalls) and must never freeze the client
+	 * UI - then hands the text to the consumer on the executor thread, or
+	 * null when the clipboard holds no text. Call only after the user
+	 * explicitly confirmed the paste action; the clipboard is never read
+	 * speculatively.
+	 */
+	void readClipboardText(java.util.function.Consumer<String> onText)
+	{
+		executor.execute(() ->
+		{
+			if (!active)
+			{
+				return;
+			}
+			String text;
+			try
+			{
+				text = (String) java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
+					.getData(java.awt.datatransfer.DataFlavor.stringFlavor);
+			}
+			catch (Exception ex)
+			{
+				text = null;
+			}
+			onText.accept(text);
+		});
+	}
+
 	void importLocations(String json)
 	{
 		executor.execute(() ->
@@ -1436,6 +1484,11 @@ public class HcimGuidePlugin extends Plugin
 		String structure = banks > 0
 			? banks + " banks, " + guide.totalSteps() + " steps"
 			: guide.totalSections() + " sections, " + guide.totalSteps() + " steps";
+		if (guide.isTruncated())
+		{
+			// never present a capped import as the complete guide
+			structure += " — source exceeded a safety limit and was TRUNCATED";
+		}
 		String finalStatus = status + " — " + structure;
 		// warn ONLY when the wikitext fallback dumped steps into "Notes"
 		// sections - JSON/generic guides legitimately have no numbered banks
@@ -1741,6 +1794,7 @@ public class HcimGuidePlugin extends Plugin
 		}
 		boolean any = false;
 		boolean all = true;
+		boolean complete = true;
 		int itemSteps = 0;
 		outer:
 		for (GuideStep step : bank.getSteps())
@@ -1754,6 +1808,16 @@ public class HcimGuidePlugin extends Plugin
 			{
 				continue;
 			}
+			if (itemSteps >= 12)
+			{
+				// same bound as the bank tag: a trip is one inventory. More
+				// item-bearing steps remain UNCHECKED past the cap, so a
+				// "ready" verdict here would be a guess - fail closed instead
+				// of showing/sounding ready with requirements unexamined.
+				complete = false;
+				break;
+			}
+			itemSteps++;
 			for (ItemReq req : reqs)
 			{
 				if (!iconResolver.isKnownItem(req.getName()))
@@ -1767,12 +1831,8 @@ public class HcimGuidePlugin extends Plugin
 					break outer;
 				}
 			}
-			if (++itemSteps >= 12)
-			{
-				break; // same bound as the bank tag: a trip is one inventory
-			}
 		}
-		boolean ready = any && all;
+		boolean ready = any && all && complete;
 		// baseline tick for a newly active bank: item-name resolution may
 		// still be in flight, so a same-tick "ready" verdict is not trusted
 		// with the sound - the TEXT self-corrects, the ding cannot
@@ -1926,11 +1986,18 @@ public class HcimGuidePlugin extends Plugin
 			grid.applyIcons(itemManager, reqs, ids);
 			// names the price search can't see (untradeables like talismans
 			// and quest amulets) get one chunked full-database scan; when it
-			// finds anything, every visible grid re-resolves
+			// finds anything, EVERY consumer of resolved ids must refresh -
+			// not just the panel grids: the HUD strip caches by step key and
+			// the managed bank tag caches by signature, and neither key
+			// changes when a name resolves late
 			if (iconResolver.hasPendingScan())
 			{
 				iconResolver.scanFullDatabase(() ->
-					SwingUtilities.invokeLater(() -> panel.reresolveIcons()));
+				{
+					clearHudItems();
+					bankTagIntegration.invalidate();
+					SwingUtilities.invokeLater(() -> panel.reresolveIcons());
+				});
 			}
 		});
 	}
