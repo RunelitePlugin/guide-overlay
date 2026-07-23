@@ -16,6 +16,10 @@ off in the settings.
 ## Checklist
 
 - Checkboxes for every step, with progress bars per section and overall
+- Long guide paragraphs are split into one action per step, so nothing
+  gets cut off and every action is its own checkbox
+- Steps that reference a video guide get a ▶ button (and a right-click
+  option) that opens the YouTube/Streamable link in your browser
 - Progress saves automatically and keeps across sessions
 - Search your guide, or jump straight to your next unchecked step
 - When a finished bank auto-collapses, the next one opens and scrolls into
