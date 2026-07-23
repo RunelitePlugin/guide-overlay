@@ -59,7 +59,9 @@ off in the settings.
 - NPCs, ground items, AND scene objects (ladders, altars, doors, furnaces...)
   your current section needs are highlighted automatically
 - Steps that note chat choices — "(2,1)" — get the right dialogue option
-  outlined in the chat box as each menu appears (you still click it)
+  outlined in the chat box as each menu appears (you still click it), and
+  only while you're talking to the NPC (or using the object) the step names —
+  chatting with anyone else never draws a box
 
 ## Fastest route
 
@@ -76,10 +78,11 @@ off in the settings.
   arranged in the order the guide uses them (toggleable)
 - Finished steps drop off the tab automatically
 - Item pictures under each step turn green when you have the item, red when missing
-- A "✓ Trip ready" indicator (with an optional success sound) confirms the
+- A "✓ Trip ready" indicator (with its own distinct sound) confirms the
   moment everything the section needs is in your inventory
-- Finishing a section prints a chat message and can play a success sound —
-  all four confirmations have their own toggles
+- Checking off a step plays a short success chime, and finishing a section
+  prints a chat message and can chime too — every confirmation has its
+  own toggle
 
 ## On-screen overlay
 

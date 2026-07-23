@@ -14,7 +14,7 @@ import java.util.regex.Pattern;
 public final class TargetExtractor
 {
 	private static final Pattern VERB = Pattern.compile(
-		"(?i)\\b(?:talk to|speak to|speak with|talk with|trade with|trade|kill|attack|pickpocket)\\s+(?:the\\s+)?([A-Z][A-Za-z'’()_-]*(?:\\s+[A-Z][A-Za-z'’()_-]*)*)");
+		"(?i)\\b(?:talk to|talk with|talking to|talking with|speak to|speak with|speaking to|speaking with|trade with|trade|kill|attack|pickpocket|sell(?:\\s+[a-z0-9',]+){1,4}?\\s+to)\\s+(?:the\\s+)?([A-Z][A-Za-z'’()_-]*(?:\\s+[A-Z][A-Za-z'’()_-]*)*)");
 
 	// words that end a name if the guide continues the sentence in lowercase
 	private static final Pattern TRAILING = Pattern.compile(
@@ -27,13 +27,62 @@ public final class TargetExtractor
 	{
 	}
 
+	/**
+	 * VERB's capitalized-run tail recurses per word in java.util.regex, so
+	 * unbounded input (a hostile wiki edit) would StackOverflowError the
+	 * import. No real step approaches this; overflow needs several thousand
+	 * words. Anything longer is scanned only up to the cap (fails closed).
+	 */
+	private static final int MAX_SCAN_CHARS = 1000;
+
 	public static String extract(String stepText)
+	{
+		return extractWith(VERB, stepText);
+	}
+
+	/**
+	 * Travel-verb phrasings ("Head to King Roald and start ... (1,1,3)")
+	 * name who a dialogue sequence is with when no talk verb does. Kept
+	 * separate from {@link #extract} on purpose: find() takes the EARLIEST
+	 * match, and "Head to the Soul Altar &amp; talk to Aretha" must keep
+	 * resolving to Aretha for highlighting - this is only ever an EXTRA
+	 * dialogue-partner candidate, never the primary target.
+	 */
+	private static final Pattern TRAVEL_VERB = Pattern.compile(
+		"\\b(?i:head to|head over to|go to|go over to|walk to|run to|return to)\\s+(?i:the\\s+)?([A-Z][A-Za-z'’()_-]*(?:\\s+[A-Z][A-Za-z'’()_-]*)*)");
+
+	public static String extractSecondary(String stepText)
+	{
+		String name = extractWith(TRAVEL_VERB, stepText);
+		if (name == null)
+		{
+			return null;
+		}
+		// travel destinations are often scenery ("Head to the Soul Altar"):
+		// a candidate that is (or prefixes) a scene-object word would let a
+		// click on that object arm the highlight with no conversation at all
+		String norm = Names.normalize(name);
+		for (String w : OBJECT_WORDS)
+		{
+			if (norm.contains(w) || w.startsWith(norm))
+			{
+				return null;
+			}
+		}
+		return name;
+	}
+
+	private static String extractWith(Pattern verb, String stepText)
 	{
 		if (stepText == null)
 		{
 			return null;
 		}
-		Matcher m = VERB.matcher(stepText);
+		if (stepText.length() > MAX_SCAN_CHARS)
+		{
+			stepText = stepText.substring(0, MAX_SCAN_CHARS);
+		}
+		Matcher m = verb.matcher(stepText);
 		if (!m.find())
 		{
 			return null;
@@ -55,6 +104,41 @@ public final class TargetExtractor
 	public static boolean namesMatch(String guideName, String npcName)
 	{
 		return Names.matchNormalized(Names.normalize(guideName), Names.normalize(npcName));
+	}
+
+	/**
+	 * Whether a conversation belongs to the step that is being guided:
+	 * true when any name seen in the conversation (the clicked NPC or scene
+	 * object, or a dialogue speaker) matches one of the step's extracted NPC
+	 * candidates, or is one of the step's scene-object words. Everything is
+	 * pre-normalized; empty/null collections simply never match, so a step
+	 * that names nobody fails closed.
+	 */
+	public static boolean conversationMatches(java.util.Set<String> speakersNorm,
+		java.util.List<String> npcCandidatesNorm, java.util.Set<String> objectWordsNorm)
+	{
+		if (speakersNorm == null || speakersNorm.isEmpty())
+		{
+			return false;
+		}
+		for (String speaker : speakersNorm)
+		{
+			if (npcCandidatesNorm != null)
+			{
+				for (String candidate : npcCandidatesNorm)
+				{
+					if (Names.matchNormalized(candidate, speaker))
+					{
+						return true;
+					}
+				}
+			}
+			if (objectWordsNorm != null && objectWordsNorm.contains(speaker))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

@@ -150,7 +150,7 @@ public interface HcimGuideConfig extends Config
 
 	@ConfigSection(
 		name = "Notifications & sounds",
-		description = "Trip-ready and section-complete confirmations: on-screen/chat text plus an optional success sound",
+		description = "Step, trip-ready and section-complete confirmations: on-screen/chat text plus optional sounds (trip-ready uses its own sound)",
 		position = 10,
 		closedByDefault = true
 	)
@@ -421,7 +421,7 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "highlightDialogOptions",
 		name = "Highlight dialogue options",
-		description = "When your current step notes the chat choices to pick - \"(2,1)\" - outline the right option in the dialogue box as each menu appears. You still click it yourself.",
+		description = "When your current step notes the chat choices to pick - \"(2,1)\" - outline the right option in the dialogue box as each menu appears, but only while talking to the NPC (or using the object) that step names. Other conversations are never highlighted. You still click it yourself.",
 		position = 7,
 		section = highlightSection
 	)
@@ -795,6 +795,18 @@ public interface HcimGuideConfig extends Config
 	// ------------------------------------------------------------------ notifications & sounds
 
 	@ConfigItem(
+		keyName = "stepCompleteSound",
+		name = "Step complete sound",
+		description = "Play the success chime whenever a step gets checked off - by you or by auto-completion. Bulk actions (mark bank complete, account sync) stay silent.",
+		position = 0,
+		section = notifySection
+	)
+	default boolean stepCompleteSound()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "tripReadyIndicator",
 		name = "Trip-ready indicator",
 		description = "Show a green \"✓ Trip ready\" line on the on-screen box once every item the current section still needs is in your inventory",
@@ -809,7 +821,7 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "tripReadySound",
 		name = "Trip-ready sound",
-		description = "Play a short success sound the moment the trip becomes ready (once per section)",
+		description = "Play a short sound (distinct from the success chime) the moment the trip becomes ready (once per section)",
 		position = 2,
 		section = notifySection
 	)
