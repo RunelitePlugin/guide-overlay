@@ -1872,11 +1872,16 @@ public class HcimGuidePlugin extends Plugin
 		activeBankDirty = true;
 		stepHighlightsDirty = true;
 		persistCompletedSteps();
+		if (completed)
+		{
+			releasePinForStep(stepKey);
+		}
 	}
 
 	/** Bulk update used by "mark bank complete" etc. Persists once. */
 	void setCompletedBulk(Iterable<GuideStep> steps, boolean completed)
 	{
+		String pinnedChanged = null;
 		synchronized (completedSteps)
 		{
 			for (GuideStep s : steps)
@@ -1884,6 +1889,10 @@ public class HcimGuidePlugin extends Plugin
 				if (completed)
 				{
 					completedSteps.add(s.getKey());
+					if (s.getKey().equals(pinnedStepKey))
+					{
+						pinnedChanged = s.getKey();
+					}
 				}
 				else
 				{
@@ -1895,6 +1904,7 @@ public class HcimGuidePlugin extends Plugin
 		activeBankDirty = true;
 		stepHighlightsDirty = true;
 		persistCompletedSteps();
+		releasePinForStep(pinnedChanged);
 	}
 
 	int countCompleted(Iterable<GuideStep> steps)
@@ -1950,6 +1960,10 @@ public class HcimGuidePlugin extends Plugin
 		activeBankDirty = true;
 		stepHighlightsDirty = true;
 		persistSkippedSteps();
+		if (skipped)
+		{
+			releasePinForStep(stepKey);
+		}
 	}
 
 	/**
@@ -3446,6 +3460,80 @@ public class HcimGuidePlugin extends Plugin
 		}
 		pinnedStepKey = step.getKey();
 		targetName = stepTargets.get(step.getKey());
+	}
+
+	/**
+	 * The step that JUST became completed/skipped can no longer be the tracked
+	 * target: without this, its NPC keeps the outline and hint arrow forever
+	 * (e.g. the candle seller after "buy a candle" is ticked). Advances the
+	 * pin to the next trackable step AFTER it in guide order when auto-advance
+	 * is on, otherwise clears it.
+	 *
+	 * Strictly event-scoped: fires only when the changed step IS the pinned
+	 * one, so completing/unticking/skipping unrelated steps never disturbs a
+	 * pin - including a deliberately re-pinned already-done step. The state
+	 * change runs on the client thread (immediately when already there),
+	 * serializing with evaluateAutoCompletion's advance and target tracking;
+	 * the pin is re-validated there so a stale request self-cancels.
+	 */
+	private void releasePinForStep(String changedKey)
+	{
+		if (changedKey == null || !changedKey.equals(pinnedStepKey))
+		{
+			return;
+		}
+		clientThread.invoke(() ->
+		{
+			String pinned = pinnedStepKey;
+			if (pinned == null || !pinned.equals(changedKey) || !isStepDone(pinned))
+			{
+				return;
+			}
+			Guide guide = currentGuide;
+			GuideStep next = (guide != null && config.autoTrackNext())
+				? findNextTrackableStepAfter(guide, pinned) : null;
+			if (next != null)
+			{
+				pinnedStepKey = next.getKey();
+				targetName = stepTargets.get(next.getKey());
+				final String newTarget = targetName;
+				SwingUtilities.invokeLater(() -> panel.onPinChanged(newTarget));
+			}
+			else
+			{
+				pinStep(null);
+				SwingUtilities.invokeLater(() -> panel.onPinChanged(null));
+			}
+		});
+	}
+
+	/**
+	 * First unchecked trackable step strictly AFTER the given step in guide
+	 * order - the pin must advance forward from where the player is working,
+	 * never jump back to stale steps left unchecked in earlier banks.
+	 */
+	private GuideStep findNextTrackableStepAfter(Guide guide, String afterKey)
+	{
+		boolean seen = false;
+		for (GuideEpisode ep : guide.getEpisodes())
+		{
+			for (GuideBank bank : ep.getBanks())
+			{
+				for (GuideStep step : bank.getSteps())
+				{
+					if (!seen)
+					{
+						seen = step.getKey().equals(afterKey);
+						continue;
+					}
+					if (!isStepDone(step.getKey()) && stepTargets.containsKey(step.getKey()))
+					{
+						return step;
+					}
+				}
+			}
+		}
+		return null;
 	}
 
 	String getPinnedStepKey()
