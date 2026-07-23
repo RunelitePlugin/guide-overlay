@@ -8,6 +8,11 @@ public class GuideEpisode
 	private final int number;
 	private final String title;
 	private final List<GuideBank> banks = new ArrayList<>();
+	/**
+	 * Video guide for the whole episode, from the {{Youtube|id}} embed the
+	 * wiki places right under each episode heading. Display metadata only.
+	 */
+	private String videoUrl;
 
 	public GuideEpisode(int number, String title)
 	{
@@ -28,6 +33,16 @@ public class GuideEpisode
 	public List<GuideBank> getBanks()
 	{
 		return banks;
+	}
+
+	public String getVideoUrl()
+	{
+		return videoUrl;
+	}
+
+	void setVideoUrl(String videoUrl)
+	{
+		this.videoUrl = videoUrl;
 	}
 
 	public int totalSteps()

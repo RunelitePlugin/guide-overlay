@@ -131,6 +131,20 @@ public class WikitextParserTest
 	}
 
 	@Test
+	public void videoMarkersAttachToBankOrEpisode()
+	{
+		Guide g = new WikitextParser().parse("== Episode 1 - x ==\n"
+			+ "{{Youtube|introVid123}}\n"
+			+ "'''Bank 30'''\n"
+			+ "* Pay to enter the Agility Arena\n"
+			+ "Video Guide: https://youtu.be/O6LDG19Gk5M\n"
+			+ "'''Bank 31'''\n* Another step entirely\n");
+		assertEquals("https://youtu.be/introVid123", g.getEpisodes().get(0).getVideoUrl());
+		assertEquals("https://youtu.be/O6LDG19Gk5M", g.getEpisodes().get(0).getBanks().get(0).getVideoUrl());
+		assertEquals(null, g.getEpisodes().get(0).getBanks().get(1).getVideoUrl());
+	}
+
+	@Test
 	public void parsesChecklistTemplateFormatWithBankComments()
 	{
 		// the LIVE B0aty guide's real structure (verified against the actual

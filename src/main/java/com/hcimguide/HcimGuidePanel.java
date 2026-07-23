@@ -58,6 +58,8 @@ public class HcimGuidePanel extends PluginPanel
 
 	private Guide guide;
 	private final List<BankSection> bankSections = new ArrayList<>();
+	/** Optional "episode video guide" link rows; hidden while a search filter is active. */
+	private final List<JPanel> episodeVideoRows = new ArrayList<>();
 	private boolean rebuilding;
 
 	HcimGuidePanel(HcimGuidePlugin plugin, HcimGuideConfig config)
@@ -430,6 +432,7 @@ public class HcimGuidePanel extends PluginPanel
 		rebuilding = false;
 		banksContainer.removeAll();
 		bankSections.clear();
+		episodeVideoRows.clear();
 		overallProgress.setValue(0);
 		overallProgress.setString("no guide");
 		setTargetStatus(null, false); // the old guide's pin no longer exists
@@ -635,6 +638,7 @@ public class HcimGuidePanel extends PluginPanel
 		}
 		banksContainer.removeAll();
 		bankSections.clear();
+		episodeVideoRows.clear();
 
 		// every bank in the whole guide, flat - collapsed section headers are
 		// cheap, rows only build on first expand
@@ -650,6 +654,15 @@ public class HcimGuidePanel extends PluginPanel
 			String activeId = plugin.getActiveBankId();
 			for (GuideEpisode ep : guide.getEpisodes())
 			{
+				// optional clickable episode video guide link, shown at the
+				// start of the episode's banks (only when the guide has one)
+				if (ep.getVideoUrl() != null)
+				{
+					JPanel row = buildEpisodeVideoRow(ep);
+					episodeVideoRows.add(row);
+					banksContainer.add(row, gbc);
+					gbc.gridy++;
+				}
 				for (GuideBank bank : ep.getBanks())
 				{
 					BankSection section = new BankSection(bank);
@@ -738,8 +751,33 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			section.filter(q);
 		}
+		// episode video rows have no steps to match - hide them while filtering
+		for (JPanel row : episodeVideoRows)
+		{
+			row.setVisible(q.isEmpty());
+		}
 		banksContainer.revalidate();
 		banksContainer.repaint();
+	}
+
+	/** Slim link-styled row that opens an episode's video guide in the browser. */
+	private JPanel buildEpisodeVideoRow(GuideEpisode ep)
+	{
+		JPanel row = new JPanel(new BorderLayout());
+		row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		JButton link = new JButton("▶ Episode " + ep.getNumber() + " video guide");
+		link.setToolTipText("Open in browser: " + ep.getVideoUrl());
+		link.setHorizontalAlignment(JButton.LEFT);
+		link.setBorderPainted(false);
+		link.setContentAreaFilled(false);
+		link.setFocusPainted(false);
+		link.setForeground(ColorScheme.BRAND_ORANGE);
+		link.setFont(FontManager.getRunescapeSmallFont());
+		link.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		link.setMargin(new Insets(1, 4, 1, 4));
+		link.addActionListener(e -> LinkBrowser.browse(ep.getVideoUrl()));
+		row.add(link, BorderLayout.WEST);
+		return row;
 	}
 
 	void updateProgress()
@@ -852,7 +890,21 @@ public class HcimGuidePanel extends PluginPanel
 
 			headerCount.setFont(FontManager.getRunescapeSmallFont());
 			headerCount.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-			headerPanel.add(headerCount, BorderLayout.EAST);
+			JPanel headerEast = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+			headerEast.setOpaque(false);
+			if (bank.getVideoUrl() != null)
+			{
+				JButton videoButton = new JButton("▶");
+				videoButton.setToolTipText("Watch this section's video guide: " + bank.getVideoUrl());
+				videoButton.setMargin(new Insets(0, 4, 0, 4));
+				videoButton.setFocusPainted(false);
+				// keep the header's right-click menu reachable over the button
+				videoButton.setInheritsPopupMenu(true);
+				videoButton.addActionListener(e -> LinkBrowser.browse(bank.getVideoUrl()));
+				headerEast.add(videoButton);
+			}
+			headerEast.add(headerCount);
+			headerPanel.add(headerEast, BorderLayout.EAST);
 
 			JPopupMenu menu = new JPopupMenu();
 			JMenuItem markAll = new JMenuItem("Mark bank complete");
@@ -864,6 +916,13 @@ public class HcimGuidePanel extends PluginPanel
 			JMenuItem upToHere = new JMenuItem("Mark everything before this bank complete");
 			upToHere.addActionListener(e -> markEverythingBefore());
 			menu.add(upToHere);
+			if (bank.getVideoUrl() != null)
+			{
+				JMenuItem watchVideo = new JMenuItem("Watch section video guide");
+				watchVideo.setToolTipText(bank.getVideoUrl());
+				watchVideo.addActionListener(e -> LinkBrowser.browse(bank.getVideoUrl()));
+				menu.add(watchVideo);
+			}
 			headerPanel.setComponentPopupMenu(menu);
 
 			headerPanel.addMouseListener(new MouseAdapter()

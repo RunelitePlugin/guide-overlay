@@ -27,6 +27,14 @@ public class WikitextParser
 		"^Bank\\s*#?\\s*([0-9]+[A-Za-z]?)(?:\\s*(?:[-:–—]\\s*.+|\\([^)]*\\)|\\[[^]]*]))?\\s*[.:]?\\s*$",
 		Pattern.CASE_INSENSITIVE);
 	private static final Pattern BOLD_RUN = Pattern.compile("'''\\s*(.*?)\\s*'''");
+	/**
+	 * {{Youtube|id}} embed template. The id must be the FIRST argument and be
+	 * terminated by '|' or '}' - so named parameters ({{Youtube|width=400|id}})
+	 * and over-long ids yield no video at all rather than a wrong URL, in
+	 * keeping with the tolerant-parser design. Both live capitalizations of
+	 * the template name match.
+	 */
+	private static final Pattern YOUTUBE_TEMPLATE = Pattern.compile("\\{\\{\\s*[Yy]ou[Tt]ube\\s*\\|\\s*([A-Za-z0-9_-]{5,20})\\s*[|}]");
 	// NOTE: HTML comments are stripped with the regex-free stripHtmlComments()
 	// - a lazy <!--.*?--> pattern goes quadratic on unterminated prefixes
 
@@ -36,6 +44,29 @@ public class WikitextParser
 	 */
 	private static final Pattern BANK_COMMENT = Pattern.compile(
 		"^<!--\\s*Bank\\s*#?\\s*([0-9]+[A-Za-z]?)\\s*-->$", Pattern.CASE_INSENSITIVE);
+
+	/**
+	 * Video URL in a standalone marker line: a {{Youtube|id}} embed or a
+	 * bare/labeled link. The wiki uses {{Youtube}} in two roles - section
+	 * videos AND inline embeds of the video the PREVIOUS step already links
+	 * (bullet with the URL, then the embed). An embed whose id appears in the
+	 * previous line is the step's video, already surfaced on the step row, so
+	 * it must not be promoted to "section video guide".
+	 */
+	private static String bankVideoIn(String line, String previousLine)
+	{
+		Matcher yt = YOUTUBE_TEMPLATE.matcher(line);
+		if (yt.find())
+		{
+			String id = yt.group(1);
+			if (previousLine != null && previousLine.contains(id))
+			{
+				return null;
+			}
+			return "https://youtu.be/" + id;
+		}
+		return VideoLinks.firstVideoUrl(line);
+	}
 
 	/** Extracts a {{Checklist}} block's title= argument (may be empty or computed). */
 	private static String checklistTitle(String line)
@@ -128,6 +159,9 @@ public class WikitextParser
 		// literal bank number announced by a "<!-- Bank N -->" comment, waiting
 		// for its {{Checklist}} block (an image line may sit between them)
 		String pendingBank = null;
+		// previous non-empty line, for telling a section {{Youtube}} embed
+		// apart from an inline embed of the preceding step's own video
+		String lastNonEmpty = null;
 
 		for (String rawLine : wikitext.split("\r?\n"))
 		{
@@ -136,6 +170,8 @@ public class WikitextParser
 			{
 				continue;
 			}
+			String previousLine = lastNonEmpty;
+			lastNonEmpty = line;
 
 			Matcher h = HEADING.matcher(line);
 			if (h.matches())
@@ -309,6 +345,33 @@ public class WikitextParser
 				}
 				guideStep.setVideoUrl(videoUrl);
 				bank.getSteps().add(guideStep);
+				continue;
+			}
+
+			// standalone video markers - "Video Guide: <url>" lines and
+			// {{Youtube|id}} embed templates - attach to the bank they follow;
+			// one placed right under an episode heading (before any bank) is
+			// that EPISODE's video guide. First marker wins at each level. A
+			// marker sitting between a "<!-- Bank N -->" comment and its
+			// {{Checklist}} belongs to the ANNOUNCED bank, which doesn't exist
+			// yet - never credit it to the previous bank.
+			if (episode != null && !handledAsChecklist && pendingBank == null)
+			{
+				String video = bankVideoIn(line, previousLine);
+				if (video != null)
+				{
+					if (bank != null)
+					{
+						if (bank.getVideoUrl() == null)
+						{
+							bank.setVideoUrl(video);
+						}
+					}
+					else if (episode.getVideoUrl() == null)
+					{
+						episode.setVideoUrl(video);
+					}
+				}
 			}
 			// anything else (plain paragraphs, templates, iframes) is ignored
 		}
