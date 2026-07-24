@@ -55,6 +55,7 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDependency;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.banktags.BankTagsPlugin;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -121,6 +122,15 @@ public class HcimGuidePlugin extends Plugin
 	private NpcLocationStore locationStore;
 
 	@Inject
+	private PlaceDirectory placeDirectory;
+
+	@Inject
+	private TransportResolver transportResolver;
+
+	@Inject
+	private CustomLocationStore customLocationStore;
+
+	@Inject
 	private LocationDbDownloader locationDbDownloader;
 
 	@Inject
@@ -152,6 +162,9 @@ public class HcimGuidePlugin extends Plugin
 
 	@Inject
 	private StepNavOverlay stepNavOverlay;
+
+	@Inject
+	private PluginManager pluginManager;
 
 	@Inject
 	private DialogOptionOverlay dialogOptionOverlay;
@@ -202,6 +215,20 @@ public class HcimGuidePlugin extends Plugin
 	private volatile Map<String, Set<String>> dialogObjectWords = Collections.emptyMap();
 	/** Step key -&gt; extracted NPC target name; precomputed at import (never re-extracted per tick). */
 	private volatile Map<String, String> stepTargets = Collections.emptyMap();
+	/**
+	 * Step key -&gt; destination point. Direct entries come from a named place or
+	 * known NPC/item location; inferred entries carry the last reliable area
+	 * forward for consecutive local actions.
+	 */
+	private volatile Map<String, StepLocationPlan> stepLocationPlans = Collections.emptyMap();
+	/** Versioned cache metadata; prevents reparsing a loaded guide until a real input changes. */
+	private volatile Guide locationPlanCacheGuide;
+	private volatile String locationPlanCacheGuideId;
+	private volatile long locationPlanCacheCustomRevision = -1;
+	private volatile int locationPlanCacheLocationRevision = -1;
+	private volatile int locationPlanCacheResolverVersion = -1;
+	/** Active waypoint index per step; persisted through CustomLocationStore when enabled. */
+	private final Map<String, Integer> activeWaypointIndexes = new java.util.concurrent.ConcurrentHashMap<>();
 	/** Normalized target names of the current guide - bounds what the location store learns. */
 	private volatile Set<String> targetNamesNorm = Collections.emptySet();
 	private volatile InventorySnapshot inventory = InventorySnapshot.EMPTY;
@@ -231,6 +258,11 @@ public class HcimGuidePlugin extends Plugin
 	private volatile String targetName;
 	private volatile NPC targetNpc;
 	private boolean hintArrowSet;
+	/** Destination-aware suppression: carries across equivalent steps until the player leaves. */
+	private final LocationSuppressionState locationSuppression = new LocationSuppressionState();
+	/** Global five-minute display snooze; destination suppression is tracked separately. */
+	private volatile int locationSnoozeUntilTick;
+	private final WaypointArrivalTracker waypointArrivalTracker = new WaypointArrivalTracker();
 
 	// active-bank highlighting (all fields client-thread only; overlay renders on client thread)
 	private final Map<TileItem, GroundHighlight> groundItems = new HashMap<>();
@@ -248,10 +280,15 @@ public class HcimGuidePlugin extends Plugin
 	// movement/target/stock guards, so most cycles are a few comparisons)
 	private volatile String routeSuggestion;    // HUD line; null = nothing to suggest
 	private WorldPoint nextStepPoint;           // next unchecked step's known location
+	private String nextStepKey;                 // key owning nextStepPoint (suppression scope)
 	private WorldPoint lastRoutePlayer;
 	private WorldPoint lastRouteObjective;
 	private long lastStockRevision = -1;
 	private volatile boolean routeDirty = true; // config/stock changed -> recompute
+	private enum GuidanceBand { NEAR, MEDIUM, FAR }
+	private GuidanceBand guidanceBand = GuidanceBand.FAR;
+	private volatile boolean questHelperActiveCached;
+	private volatile int questHelperCheckedTick = Integer.MIN_VALUE;
 
 	// icon prefetch (small buffer of upcoming banks; executor-side warm-up)
 	private volatile String lastPrefetchKey;
@@ -435,6 +472,21 @@ public class HcimGuidePlugin extends Plugin
 			{
 				return e;
 			}
+			if (hitLocationToggle(e.getPoint()))
+			{
+				navPressConsumed = true;
+				e.consume();
+				toggleLocationGuideForCurrentStep();
+				return e;
+			}
+			int waypointDir = hitWaypointArrow(e.getPoint());
+			if (waypointDir != 0)
+			{
+				navPressConsumed = true;
+				e.consume();
+				navigateWaypoint(waypointDir);
+				return e;
+			}
 			int dir = hitNavArrow(e.getPoint());
 			if (dir != 0)
 			{
@@ -460,7 +512,8 @@ public class HcimGuidePlugin extends Plugin
 		public java.awt.event.MouseEvent mouseClicked(java.awt.event.MouseEvent e)
 		{
 			if (e.getButton() == java.awt.event.MouseEvent.BUTTON1 && !e.isAltDown()
-				&& hitNavArrow(e.getPoint()) != 0)
+				&& (hitLocationToggle(e.getPoint()) || hitWaypointArrow(e.getPoint()) != 0
+					|| hitNavArrow(e.getPoint()) != 0))
 			{
 				e.consume();
 			}
@@ -478,6 +531,7 @@ public class HcimGuidePlugin extends Plugin
 	protected void startUp()
 	{
 		active = true;
+		locationSnoozeUntilTick = 0;
 		panel = new HcimGuidePanel(this, config);
 
 		BufferedImage icon = ImageUtil.loadImageResource(HcimGuidePlugin.class, "panel_icon.png");
@@ -594,7 +648,17 @@ public class HcimGuidePlugin extends Plugin
 		dialogHighlightOption = -1;
 		clearHudItems();
 		stepTargets = Collections.emptyMap();
+		stepLocationPlans = Collections.emptyMap();
+		locationPlanCacheGuide = null;
+		locationPlanCacheGuideId = null;
+		locationPlanCacheCustomRevision = -1;
+		locationPlanCacheLocationRevision = -1;
+		locationPlanCacheResolverVersion = -1;
 		targetNamesNorm = Collections.emptySet();
+		clearLocationSuppression();
+		locationSnoozeUntilTick = 0;
+		waypointArrivalTracker.reset();
+		activeWaypointIndexes.clear();
 		activeBankCache = null;
 		activeBankCacheGuide = null;
 		activeBankDirty = true;
@@ -633,6 +697,7 @@ public class HcimGuidePlugin extends Plugin
 			prevActiveBankId = null;
 			prevActiveBankGuide = null;
 			nextStepPoint = null;
+			nextStepKey = null;
 			lastRoutePlayer = null;
 			lastRouteObjective = null;
 			pathfinder.clear(); // take the drawn path down with the plugin
@@ -691,7 +756,14 @@ public class HcimGuidePlugin extends Plugin
 		dialogHighlightOption = -1;
 		clearHudItems();
 		stepTargets = Collections.emptyMap();
+		stepLocationPlans = Collections.emptyMap();
+		locationPlanCacheGuide = null;
+		locationPlanCacheGuideId = null;
+		locationPlanCacheCustomRevision = -1;
+		locationPlanCacheLocationRevision = -1;
+		locationPlanCacheResolverVersion = -1;
 		targetNamesNorm = Collections.emptySet();
+		clearLocationSuppression();
 		activeBankCache = null;
 		activeBankCacheGuide = null;
 		activeBankDirty = true;
@@ -1473,12 +1545,15 @@ public class HcimGuidePlugin extends Plugin
 				}
 			}
 		}
+		Map<String, StepLocationPlan> locations = buildStepLocations(guide, targets);
 		conditions = cond;
 		stepItems = items;
 		dialogSequences = dialogSeqs;
 		dialogNpcs = dialogNpcMap;
 		dialogObjectWords = dialogObjMap;
 		stepTargets = targets;
+		stepLocationPlans = locations;
+		loadWaypointIndexes(locations);
 		targetNamesNorm = namesNorm;
 		currentGuide = guide;
 		hudItemsKey = null; // re-derive the HUD's current-step items
@@ -1522,6 +1597,61 @@ public class HcimGuidePlugin extends Plugin
 		}
 		String displayStatus = finalStatus;
 		SwingUtilities.invokeLater(() -> panel.setGuide(guide, displayStatus));
+	}
+
+	/** Build direct/inferred plans, then apply profile-scoped manual overrides. */
+	private Map<String, StepLocationPlan> buildStepLocations(Guide guide, Map<String, String> targets)
+	{
+		long customRevision = customLocationStore.getRevision();
+		int locationRevision = locationStore.getRevision();
+		if (locationPlanCacheGuide == guide
+			&& java.util.Objects.equals(locationPlanCacheGuideId, currentGuideId)
+			&& locationPlanCacheCustomRevision == customRevision
+			&& locationPlanCacheLocationRevision == locationRevision
+			&& locationPlanCacheResolverVersion == StepLocationPlanner.RESOLVER_VERSION)
+		{
+			return stepLocationPlans;
+		}
+		Map<String, StepLocationPlan> built = new HashMap<>(StepLocationPlanner.buildPlans(
+			guide, targets, placeDirectory, transportResolver, locationStore::lookup));
+		for (GuideEpisode episode : guide.getEpisodes())
+		{
+			for (GuideBank bank : episode.getBanks())
+			{
+				for (GuideStep step : bank.getSteps())
+				{
+					StepLocationPlan custom = customLocationStore.getPlan(currentGuideId, step.getKey());
+					if (custom != null)
+					{
+						built.put(step.getKey(), custom);
+					}
+				}
+			}
+		}
+		Map<String, StepLocationPlan> immutable = Collections.unmodifiableMap(built);
+		locationPlanCacheGuide = guide;
+		locationPlanCacheGuideId = currentGuideId;
+		locationPlanCacheCustomRevision = customRevision;
+		locationPlanCacheLocationRevision = locationRevision;
+		locationPlanCacheResolverVersion = StepLocationPlanner.RESOLVER_VERSION;
+		return immutable;
+	}
+
+	private void loadWaypointIndexes(Map<String, StepLocationPlan> plans)
+	{
+		activeWaypointIndexes.clear();
+		if (!config.persistWaypointIndex())
+		{
+			return;
+		}
+		for (Map.Entry<String, StepLocationPlan> entry : plans.entrySet())
+		{
+			int saved = customLocationStore.getActiveIndex(currentGuideId, entry.getKey());
+			if (saved > 0 && saved < entry.getValue().size())
+			{
+				activeWaypointIndexes.put(entry.getKey(), saved);
+			}
+		}
 	}
 
 	private boolean migrateLegacyNotesProgress(Guide guide)
@@ -1655,7 +1785,7 @@ public class HcimGuidePlugin extends Plugin
 		});
 	}
 
-	/** Pin the next unchecked step that has a trackable NPC target. */
+	/** Pin the next unchecked step that has a trackable NPC, item, or place. */
 	void pinNextTrackableStep()
 	{
 		Guide guide = currentGuide;
@@ -1669,7 +1799,7 @@ public class HcimGuidePlugin extends Plugin
 			return;
 		}
 		pinStep(next);
-		final String target = stepTargets.get(next.getKey());
+		final String target = getStepTarget(next.getKey());
 		SwingUtilities.invokeLater(() ->
 		{
 			if (active && panel != null)
@@ -1700,6 +1830,39 @@ public class HcimGuidePlugin extends Plugin
 			return stepNavOverlay.hitArrow(p);
 		}
 		return 0;
+	}
+
+	private int hitWaypointArrow(java.awt.Point p)
+	{
+		if (!active || currentGuide == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return 0;
+		}
+		HcimGuideConfig.ArrowMode mode = config.navArrows();
+		if (mode == HcimGuideConfig.ArrowMode.FLOATING)
+		{
+			return stepNavOverlay.hitWaypointArrow(p);
+		}
+		return hudOverlay.hitWaypointArrow(p);
+	}
+
+	/** Hit test for the per-step show/hide location-guide button. */
+	private boolean hitLocationToggle(java.awt.Point p)
+	{
+		if (!active || currentGuide == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return false;
+		}
+		HcimGuideConfig.ArrowMode mode = config.navArrows();
+		if (mode == HcimGuideConfig.ArrowMode.ATTACHED)
+		{
+			return hudOverlay.hitLocationToggle(p);
+		}
+		if (mode == HcimGuideConfig.ArrowMode.FLOATING)
+		{
+			return stepNavOverlay.hitLocationToggle(p);
+		}
+		return mode == HcimGuideConfig.ArrowMode.HIDDEN && hudOverlay.hitLocationToggle(p);
 	}
 
 	/**
@@ -1980,17 +2143,27 @@ public class HcimGuidePlugin extends Plugin
 			return; // canvas not ready - retry next tick
 		}
 		navCenterChecked = true;
-		int arrowsW = StepNavOverlay.BUTTON_W * 2 + StepNavOverlay.BUTTON_GAP;
+		int arrowsW = StepNavOverlay.totalWidth(true);
 		stepNavOverlay.setPreferredLocation(new java.awt.Point(
 			Math.max(0, (w - arrowsW) / 2),
 			Math.max(0, h / 2 - StepNavOverlay.BUTTON_H / 2)));
 		overlayManager.saveOverlay(stepNavOverlay);
 	}
 
-	/** Precomputed NPC target for a step, or null when the step has none. */
+	/** Label shown by the sidebar pin button for any locatable step. */
 	String getStepTarget(String stepKey)
 	{
-		return stepTargets.get(stepKey);
+		StepLocationHint hint = activeWaypoint(stepKey);
+		if (hint != null && hint.isPreferredOverEntity())
+		{
+			return hint.getLabel();
+		}
+		String target = stepTargets.get(stepKey);
+		if (target != null)
+		{
+			return target;
+		}
+		return hint == null ? null : hint.getLabel();
 	}
 
 	InventorySnapshot getInventorySnapshot()
@@ -2532,6 +2705,8 @@ public class HcimGuidePlugin extends Plugin
 		}
 		loadCompletedSteps();
 		loadSkippedSteps();
+		customLocationStore.invalidate();
+		rebuildLocationPlans();
 		// only reset the manual-untick suppression when this is really a
 		// DIFFERENT character - relogging the same character must not let
 		// previously unticked steps re-auto-complete ("manual always wins")
@@ -2558,6 +2733,8 @@ public class HcimGuidePlugin extends Plugin
 	{
 		loadCompletedSteps();
 		loadSkippedSteps();
+		customLocationStore.invalidate();
+		rebuildLocationPlans();
 		sectionNoticeResetPending = true; // store swap, not gameplay progress
 		activeBankDirty = true;
 		stepHighlightsDirty = true;
@@ -2856,7 +3033,10 @@ public class HcimGuidePlugin extends Plugin
 		// rebuild rows so UI-affecting toggles apply without a guide refresh
 		if ("showItemGrids".equals(key) || "dimCompletedSteps".equals(key)
 			|| "autoCollapseCompleted".equals(key) || "panelTextSize".equals(key)
-			|| "itemPresenceBorders".equals(key))
+			|| "itemPresenceBorders".equals(key) || "colorTransportSteps".equals(key)
+			|| "transportStepColor".equals(key) || "colorDangerSteps".equals(key)
+			|| "dangerStepColor".equals(key) || "colorPreparationSteps".equals(key)
+			|| "preparationStepColor".equals(key))
 		{
 			SwingUtilities.invokeLater(() -> panel.onConfigChanged());
 		}
@@ -2940,6 +3120,10 @@ public class HcimGuidePlugin extends Plugin
 	public void onGameTick(GameTick tick)
 	{
 		++tickCounter;
+		updateSnoozeExpiry();
+		updateGuidanceDistanceBand();
+		updateSuppressionLeaveState();
+		updateWaypointArrival();
 		updateTargetTracking();
 		updateStepHighlights(tickCounter % HIGHLIGHT_SAFETY_REFRESH_TICKS == 0);
 		// every tick so the drawn path reacts to a completed step within one
@@ -2975,6 +3159,59 @@ public class HcimGuidePlugin extends Plugin
 		}
 	}
 
+	private void updateSnoozeExpiry()
+	{
+		if (locationSnoozeUntilTick != 0 && tickCounter >= locationSnoozeUntilTick)
+		{
+			locationSnoozeUntilTick = 0;
+			routeDirty = true;
+		}
+	}
+
+	/** Suppression only carries while the player has not actually left the hidden area. */
+	private void updateSuppressionLeaveState()
+	{
+		WorldPoint me = client.getLocalPlayer() == null
+			? null : client.getLocalPlayer().getWorldLocation();
+		if (locationSuppression.updatePlayer(me, config.locationLeaveRadius()))
+		{
+			routeDirty = true;
+		}
+	}
+
+	/** Arrival-based waypoint advancement; never completes the checklist step. */
+	private void updateWaypointArrival()
+	{
+		if (!config.autoAdvanceWaypoints() || client.getLocalPlayer() == null)
+		{
+			waypointArrivalTracker.reset();
+			return;
+		}
+		String key = guidedStepKey();
+		StepLocationPlan plan = getStepPlan(key);
+		if (plan == null || plan.size() <= 1)
+		{
+			waypointArrivalTracker.reset();
+			return;
+		}
+		int index = activeWaypointIndex(key, plan);
+		if (index >= plan.size() - 1)
+		{
+			waypointArrivalTracker.reset();
+			return;
+		}
+		WorldPoint me = client.getLocalPlayer().getWorldLocation();
+		if (waypointArrivalTracker.update(key, index, plan.get(index), me))
+		{
+			navigateWaypoint(1, true);
+		}
+	}
+
+	private static int tileDistance(WorldPoint a, WorldPoint b)
+	{
+		return Math.max(Math.abs(a.getX() - b.getX()), Math.abs(a.getY() - b.getY()));
+	}
+
 	/**
 	 * Keep the Shortest Path plugin (if installed) pointed at the CURRENT
 	 * objective. Runs every tick: the objective comes from fields already
@@ -2990,12 +3227,12 @@ public class HcimGuidePlugin extends Plugin
 			return;
 		}
 		WorldPoint objective = currentObjective();
-		if (objective == null)
+		if (objective == null || !allowShortestPathGuidance(objective))
 		{
 			pathfinder.clear();
 			return;
 		}
-		pathfinder.setTarget(objective, targetNpc != null);
+		pathfinder.setTarget(objective, getTargetNpc() != null);
 	}
 
 	// ------------------------------------------------------------------ routing & teleports
@@ -3013,16 +3250,31 @@ public class HcimGuidePlugin extends Plugin
 	 */
 	private WorldPoint currentObjective()
 	{
-		if (targetName != null)
+		String pinned = pinnedStepKey;
+		if (pinned != null)
 		{
+			if (isLocationSuppressed(pinned))
+			{
+				return null;
+			}
+			StepLocationHint precomputed = activeWaypoint(pinned);
+			if (precomputed != null && precomputed.isPreferredOverEntity())
+			{
+				return farTarget != null ? farTarget : precomputed.getPoint();
+			}
 			NPC npc = targetNpc;
 			if (npc != null)
 			{
 				return npc.getWorldLocation();
 			}
-			return farTarget;
+			if (farTarget != null)
+			{
+				return farTarget;
+			}
+			StepLocationHint known = resolveStepLocation(pinned);
+			return known == null ? null : known.getPoint();
 		}
-		return nextStepPoint;
+		return isLocationSuppressed(nextStepKey) ? null : nextStepPoint;
 	}
 
 	/**
@@ -3726,7 +3978,7 @@ public class HcimGuidePlugin extends Plugin
 			}
 		}
 
-		// auto-advance: pin the next unchecked step that has a target NPC
+		// auto-advance: pin the next unchecked step with any known destination
 		String advanceTarget = null;
 		if (config.autoTrackNext())
 		{
@@ -3735,7 +3987,7 @@ public class HcimGuidePlugin extends Plugin
 			{
 				pinnedStepKey = next.getKey();
 				targetName = stepTargets.get(next.getKey());
-				advanceTarget = targetName;
+				advanceTarget = getStepTarget(next.getKey());
 			}
 		}
 
@@ -3807,7 +4059,7 @@ public class HcimGuidePlugin extends Plugin
 			{
 				for (GuideStep step : bank.getSteps())
 				{
-					if (!isStepDone(step.getKey()) && stepTargets.containsKey(step.getKey()))
+					if (!isStepDone(step.getKey()) && isStepTrackable(step.getKey()))
 					{
 						return step;
 					}
@@ -3855,7 +4107,498 @@ public class HcimGuidePlugin extends Plugin
 
 	// ------------------------------------------------------------------ target tracking
 
-	/** Pin a step: track its NPC target with hint arrow + outline. Pass null to unpin. */
+	private boolean isStepTrackable(String stepKey)
+	{
+		StepLocationPlan plan = stepKey == null ? null : stepLocationPlans.get(stepKey);
+		return stepKey != null && (stepTargets.containsKey(stepKey)
+			|| (plan != null && plan.hasWaypoints()));
+	}
+
+	private StepLocationPlan getStepPlan(String stepKey)
+	{
+		return stepKey == null ? null : stepLocationPlans.get(stepKey);
+	}
+
+	private int activeWaypointIndex(String stepKey, StepLocationPlan plan)
+	{
+		if (stepKey == null || plan == null || !plan.hasWaypoints())
+		{
+			return 0;
+		}
+		Integer index = activeWaypointIndexes.get(stepKey);
+		return Math.max(0, Math.min(index == null ? 0 : index, plan.size() - 1));
+	}
+
+	private StepLocationHint activeWaypoint(String stepKey)
+	{
+		StepLocationPlan plan = getStepPlan(stepKey);
+		return plan == null ? null : plan.get(activeWaypointIndex(stepKey, plan));
+	}
+
+	/** Latest known active destination; live NPC coordinates are handled separately. */
+	private StepLocationHint resolveStepLocation(String stepKey)
+	{
+		if (stepKey == null)
+		{
+			return null;
+		}
+		StepLocationHint precomputed = activeWaypoint(stepKey);
+		if (precomputed != null && precomputed.isPreferredOverEntity())
+		{
+			return visibleConfidence(precomputed) ? precomputed : null;
+		}
+		String target = stepTargets.get(stepKey);
+		if (target != null)
+		{
+			WorldPoint known = locationStore.lookup(target);
+			if (known != null)
+			{
+				return new StepLocationHint(target, known, false, false, false,
+					"entity:" + Names.normalize(target), LocationSource.STORED_ENTITY,
+					LocationConfidence.HIGH, 3, 2);
+			}
+		}
+		return visibleConfidence(precomputed) ? precomputed : null;
+	}
+
+	private boolean visibleConfidence(StepLocationHint hint)
+	{
+		return hint != null && (!config.hideLowConfidenceLocations()
+			|| hint.getConfidence() != LocationConfidence.LOW);
+	}
+
+	/** Pinned step, otherwise the checklist's first unchecked step. */
+	private String guidedStepKey()
+	{
+		String pinned = pinnedStepKey;
+		if (pinned != null)
+		{
+			return pinned;
+		}
+		Guide guide = currentGuide;
+		GuideBank activeBank = guide == null ? null : findActiveBank(guide);
+		if (activeBank != null)
+		{
+			for (GuideStep step : activeBank.getSteps())
+			{
+				if (!isStepDone(step.getKey()))
+				{
+					return step.getKey();
+				}
+			}
+		}
+		return null;
+	}
+
+	boolean hasLocationForGuidedStep()
+	{
+		return isStepTrackable(guidedStepKey());
+	}
+
+	boolean hasMultipleWaypointsForGuidedStep()
+	{
+		StepLocationPlan plan = getStepPlan(guidedStepKey());
+		return plan != null && plan.size() > 1;
+	}
+
+	String getWaypointStatus()
+	{
+		String key = guidedStepKey();
+		StepLocationPlan plan = getStepPlan(key);
+		if (plan == null || !plan.hasWaypoints())
+		{
+			return null;
+		}
+		int index = activeWaypointIndex(key, plan);
+		return "Waypoint " + (index + 1) + "/" + plan.size();
+	}
+
+	String getActiveLocationSummary()
+	{
+		StepLocationHint hint = resolveStepLocation(guidedStepKey());
+		if (hint == null)
+		{
+			return null;
+		}
+		StringBuilder out = new StringBuilder(hint.getLabel());
+		StepLocationPlan plan = getStepPlan(guidedStepKey());
+		if (plan != null && plan.size() > 1)
+		{
+			out.append(" · ").append(getWaypointStatus());
+		}
+		if (config.showLocationConfidence())
+		{
+			out.append(" · ").append(hint.getSource().displayName())
+				.append(" · ").append(hint.getConfidence().displayName());
+		}
+		return out.toString();
+	}
+
+	boolean isLocationGuideHiddenForGuidedStep()
+	{
+		return isLocationSuppressed(guidedStepKey());
+	}
+
+	/** Hide/show the current semantic destination, not merely the current step key. */
+	void toggleLocationGuideForCurrentStep()
+	{
+		clientThread.invokeLater(this::toggleLocationGuideOnClientThread);
+	}
+
+	private void toggleLocationGuideOnClientThread()
+	{
+		String key = guidedStepKey();
+		StepLocationHint hint = resolveStepLocation(key);
+		if (hint == null)
+		{
+			return;
+		}
+		if (tickCounter < locationSnoozeUntilTick)
+		{
+			restoreLocationGuide();
+			return;
+		}
+		if (isLocationSuppressed(key))
+		{
+			clearLocationSuppression();
+		}
+		else
+		{
+			WorldPoint player = client.getLocalPlayer() == null
+				? null : client.getLocalPlayer().getWorldLocation();
+			locationSuppression.hide(key, hint, player, config.locationLeaveRadius());
+		}
+		routeDirty = true;
+		clientThread.invokeLater(() ->
+		{
+			if (isLocationSuppressed(key))
+			{
+				clearArrowOnClientThread();
+				clearFarTarget();
+				nextStepPoint = null;
+				nextStepKey = null;
+				routeSuggestion = null;
+				pathfinder.clear();
+			}
+		});
+	}
+
+	private void clearLocationSuppression()
+	{
+		locationSuppression.clear();
+	}
+
+	private boolean isLocationSuppressed(String stepKey)
+	{
+		if (tickCounter < locationSnoozeUntilTick)
+		{
+			return true;
+		}
+		StepLocationHint hint = resolveStepLocation(stepKey);
+		if (hint == null)
+		{
+			// A transiently unresolved local step does not destroy suppression.
+			return false;
+		}
+		if (locationSuppression.hides(stepKey, hint, config.locationEquivalentRadius()))
+		{
+			return true;
+		}
+		// A materially new destination restores guidance immediately.
+		if (locationSuppression.isActive())
+		{
+			clearLocationSuppression();
+		}
+		return false;
+	}
+
+	void snoozeLocationGuide()
+	{
+		locationSnoozeUntilTick = tickCounter + 500; // five minutes at 0.6 s/tick
+		routeDirty = true;
+		clientThread.invokeLater(() ->
+		{
+			clearArrowOnClientThread();
+			clearFarTarget();
+			nextStepPoint = null;
+			nextStepKey = null;
+			routeSuggestion = null;
+			pathfinder.clear();
+		});
+		SwingUtilities.invokeLater(() -> panel.setStatus("Location guidance snoozed for 5 minutes"));
+	}
+
+	void restoreLocationGuide()
+	{
+		locationSnoozeUntilTick = 0;
+		clearLocationSuppression();
+		routeDirty = true;
+		SwingUtilities.invokeLater(() -> panel.setStatus("Location guidance restored"));
+	}
+
+	void navigateWaypoint(int direction)
+	{
+		clientThread.invokeLater(() -> navigateWaypoint(direction, false));
+	}
+
+	private void navigateWaypoint(int direction, boolean automatic)
+	{
+		String key = guidedStepKey();
+		StepLocationPlan plan = getStepPlan(key);
+		if (key == null || plan == null || plan.size() <= 1 || direction == 0)
+		{
+			return;
+		}
+		int current = activeWaypointIndex(key, plan);
+		int next = Math.max(0, Math.min(plan.size() - 1, current + (direction > 0 ? 1 : -1)));
+		if (next == current)
+		{
+			return;
+		}
+		activeWaypointIndexes.put(key, next);
+		if (config.persistWaypointIndex())
+		{
+			customLocationStore.setActiveIndex(currentGuideId, key, next);
+		}
+		waypointArrivalTracker.reset();
+		clearLocationSuppression();
+		routeDirty = true;
+		stepHighlightsDirty = true;
+		targetNpc = null;
+		clearArrowOnClientThread();
+		clearFarTarget();
+		pathfinder.clear();
+		final String summary = getActiveLocationSummary();
+		SwingUtilities.invokeLater(() ->
+		{
+			panel.onPinChanged(summary);
+			if (!automatic)
+			{
+				panel.setStatus("Selected " + getWaypointStatus());
+			}
+		});
+	}
+
+	void setCurrentTileAsCustomPin(boolean append)
+	{
+		clientThread.invokeLater(() ->
+		{
+			String key = guidedStepKey();
+			if (key == null || client.getLocalPlayer() == null)
+			{
+				return;
+			}
+			WorldPoint point = client.getLocalPlayer().getWorldLocation();
+			setCustomPin(key, append, "Custom pin", point);
+		});
+	}
+
+	void setWorldMapCenterAsCustomPin(boolean append)
+	{
+		clientThread.invokeLater(() ->
+		{
+			String key = guidedStepKey();
+			if (key == null || client.getWorldMap() == null)
+			{
+				return;
+			}
+			net.runelite.api.Point map = client.getWorldMap().getWorldMapPosition();
+			if (map == null)
+			{
+				return;
+			}
+			// The world map exposes x/y but no selected plane. Global map pins are
+			// therefore surface points; use the current-tile action for interiors.
+			setCustomPin(key, append, "Custom map pin", new WorldPoint(map.getX(), map.getY(), 0));
+		});
+	}
+
+	private void setCustomPin(String stepKey, boolean append, String label, WorldPoint point)
+	{
+		try
+		{
+			if (append)
+			{
+				customLocationStore.append(currentGuideId, stepKey, getStepPlan(stepKey), label, point);
+			}
+			else
+			{
+				customLocationStore.replace(currentGuideId, stepKey, label, point);
+			}
+			rebuildLocationPlans();
+			StepLocationPlan plan = getStepPlan(stepKey);
+			if (plan != null && append)
+			{
+				int last = plan.size() - 1;
+				activeWaypointIndexes.put(stepKey, last);
+				if (config.persistWaypointIndex())
+				{
+					customLocationStore.setActiveIndex(currentGuideId, stepKey, last);
+				}
+			}
+			clearLocationSuppression();
+			routeDirty = true;
+			stepHighlightsDirty = true;
+			SwingUtilities.invokeLater(() -> panel.setStatus(append
+				? "Added custom waypoint" : "Custom destination saved"));
+		}
+		catch (RuntimeException ex)
+		{
+			SwingUtilities.invokeLater(() -> panel.setStatus("Custom pin failed: " + ex.getMessage()));
+		}
+	}
+
+	void renameActiveCustomWaypoint()
+	{
+		String key = guidedStepKey();
+		StepLocationPlan plan = getStepPlan(key);
+		if (key == null || plan == null || !customLocationStore.hasPlan(currentGuideId, key))
+		{
+			SwingUtilities.invokeLater(() -> panel.setStatus("This step has no custom waypoint to rename"));
+			return;
+		}
+		int index = activeWaypointIndex(key, plan);
+		String current = plan.get(index).getLabel();
+		SwingUtilities.invokeLater(() ->
+		{
+			String label = javax.swing.JOptionPane.showInputDialog(panel,
+				"Waypoint label:", current);
+			if (label == null)
+			{
+				return;
+			}
+			clientThread.invokeLater(() ->
+			{
+				try
+				{
+					customLocationStore.rename(currentGuideId, key, index, label);
+					rebuildLocationPlans();
+					SwingUtilities.invokeLater(() -> panel.setStatus("Waypoint renamed"));
+				}
+				catch (RuntimeException ex)
+				{
+					SwingUtilities.invokeLater(() -> panel.setStatus("Rename failed: " + ex.getMessage()));
+				}
+			});
+		});
+	}
+
+	void moveActiveCustomWaypoint(int direction)
+	{
+		clientThread.invokeLater(() -> moveActiveCustomWaypointOnClientThread(direction));
+	}
+
+	private void moveActiveCustomWaypointOnClientThread(int direction)
+	{
+		String key = guidedStepKey();
+		StepLocationPlan plan = getStepPlan(key);
+		if (key == null || plan == null || !customLocationStore.hasPlan(currentGuideId, key))
+		{
+			SwingUtilities.invokeLater(() -> panel.setStatus("This step has no custom waypoint to reorder"));
+			return;
+		}
+		int moved = customLocationStore.move(currentGuideId, key, activeWaypointIndex(key, plan), direction);
+		rebuildLocationPlans();
+		activeWaypointIndexes.put(key, moved);
+		clearLocationSuppression();
+		routeDirty = true;
+		SwingUtilities.invokeLater(() -> panel.setStatus("Custom waypoint reordered"));
+	}
+
+	void removeActiveCustomWaypoint()
+	{
+		clientThread.invokeLater(this::removeActiveCustomWaypointOnClientThread);
+	}
+
+	private void removeActiveCustomWaypointOnClientThread()
+	{
+		String key = guidedStepKey();
+		StepLocationPlan plan = getStepPlan(key);
+		if (key == null || plan == null || !customLocationStore.hasPlan(currentGuideId, key))
+		{
+			SwingUtilities.invokeLater(() -> panel.setStatus("This step has no custom waypoint to remove"));
+			return;
+		}
+		int next = customLocationStore.removeWaypoint(currentGuideId, key, activeWaypointIndex(key, plan));
+		rebuildLocationPlans();
+		activeWaypointIndexes.put(key, next);
+		clearLocationSuppression();
+		routeDirty = true;
+		SwingUtilities.invokeLater(() -> panel.setStatus("Custom waypoint removed"));
+	}
+
+	void clearCustomPinForCurrentStep()
+	{
+		clientThread.invokeLater(this::clearCustomPinForCurrentStepOnClientThread);
+	}
+
+	private void clearCustomPinForCurrentStepOnClientThread()
+	{
+		String key = guidedStepKey();
+		if (key == null)
+		{
+			return;
+		}
+		customLocationStore.clear(currentGuideId, key);
+		rebuildLocationPlans();
+		clearLocationSuppression();
+		SwingUtilities.invokeLater(() -> panel.setStatus("Automatic destination restored"));
+	}
+
+	String exportCustomLocations()
+	{
+		return customLocationStore.exportGuide(currentGuideId);
+	}
+
+	int importCustomLocations(String json)
+	{
+		Set<String> valid = new HashSet<>();
+		Guide guide = currentGuide;
+		if (guide != null)
+		{
+			for (GuideEpisode episode : guide.getEpisodes())
+			{
+				for (GuideBank bank : episode.getBanks())
+				{
+					for (GuideStep step : bank.getSteps())
+					{
+						valid.add(step.getKey());
+					}
+				}
+			}
+		}
+		int imported = customLocationStore.importJson(json, currentGuideId, valid);
+		rebuildLocationPlans();
+		return imported;
+	}
+
+	String exportLocationAudit()
+	{
+		Guide guide = currentGuide;
+		if (guide == null)
+		{
+			return "# No guide loaded\n";
+		}
+		// User-triggered audit: refresh against locations learned/imported since the
+		// guide was loaded so partially resolved entity routes are not reported stale.
+		rebuildLocationPlans();
+		return LocationAudit.toMarkdown(currentGuideId, guide, stepLocationPlans);
+	}
+
+	private void rebuildLocationPlans()
+	{
+		Guide guide = currentGuide;
+		if (guide == null)
+		{
+			return;
+		}
+		Map<String, StepLocationPlan> rebuilt = buildStepLocations(guide, stepTargets);
+		stepLocationPlans = rebuilt;
+		loadWaypointIndexes(rebuilt);
+		waypointArrivalTracker.reset();
+	}
+
+	/** Pin a step: track its NPC/item/place destination. Pass null to unpin. */
 	void pinStep(GuideStep step)
 	{
 		if (step == null)
@@ -3908,7 +4651,7 @@ public class HcimGuidePlugin extends Plugin
 			{
 				pinnedStepKey = next.getKey();
 				targetName = stepTargets.get(next.getKey());
-				final String newTarget = targetName;
+				final String newTarget = getStepTarget(next.getKey());
 				SwingUtilities.invokeLater(() -> panel.onPinChanged(newTarget));
 			}
 			else
@@ -3938,7 +4681,7 @@ public class HcimGuidePlugin extends Plugin
 						seen = step.getKey().equals(afterKey);
 						continue;
 					}
-					if (!isStepDone(step.getKey()) && stepTargets.containsKey(step.getKey()))
+					if (!isStepDone(step.getKey()) && isStepTrackable(step.getKey()))
 					{
 						return step;
 					}
@@ -3955,7 +4698,7 @@ public class HcimGuidePlugin extends Plugin
 
 	NPC getTargetNpc()
 	{
-		return targetNpc;
+		return isLocationSuppressed(pinnedStepKey) ? null : targetNpc;
 	}
 
 	private void clearArrowOnClientThread()
@@ -3970,8 +4713,11 @@ public class HcimGuidePlugin extends Plugin
 
 	private void updateTargetTracking()
 	{
-		String name = targetName;
-		if (name == null)
+		String stepKey = pinnedStepKey;
+		StepLocationHint pinnedHint = stepKey == null ? null : activeWaypoint(stepKey);
+		String name = pinnedHint != null && pinnedHint.isPreferredOverEntity()
+			? null : targetName;
+		if (stepKey == null)
 		{
 			if (targetNpc != null || hintArrowSet)
 			{
@@ -3980,31 +4726,45 @@ public class HcimGuidePlugin extends Plugin
 			}
 			farTarget = null;
 			// nothing pinned: keep the world map useful by marking the NEXT
-			// unchecked step's target (config-gated; compass/arrow stay pinned-only)
+			// unchecked step's destination (config-gated)
 			updateNextStepMarker();
 			return;
 		}
 
-		// normalize the pinned name once, not once per scene NPC
-		final String nameNorm = Names.normalize(name);
+		boolean suppressed = isLocationSuppressed(stepKey);
 		NPC found = null;
-		for (NPC npc : client.getTopLevelWorldView().npcs())
+		if (name != null)
 		{
-			if (npc == null || npc.getName() == null)
+			// normalize the pinned name once, not once per scene NPC
+			final String nameNorm = Names.normalize(name);
+			for (NPC npc : client.getTopLevelWorldView().npcs())
 			{
-				continue;
-			}
-			if (Names.matchNormalized(nameNorm, Names.normalize(Text.removeTags(npc.getName()))))
-			{
-				found = npc;
-				break;
+				if (npc == null || npc.getName() == null)
+				{
+					continue;
+				}
+				if (Names.matchNormalized(nameNorm, Names.normalize(Text.removeTags(npc.getName()))))
+				{
+					found = npc;
+					break;
+				}
 			}
 		}
 
 		if (found != targetNpc)
 		{
 			targetNpc = found;
-			if (found != null && config.enableHintArrow())
+			if (name != null)
+			{
+				final boolean nearby = found != null;
+				SwingUtilities.invokeLater(() -> panel.setTargetStatus(name, nearby));
+			}
+		}
+
+		if (found != null)
+		{
+			clearFarTarget();
+			if (!suppressed && config.enableHintArrow() && allowHintGuidance(found.getWorldLocation()))
 			{
 				client.setHintArrow(found);
 				hintArrowSet = true;
@@ -4014,41 +4774,196 @@ public class HcimGuidePlugin extends Plugin
 			{
 				clearArrowOnClientThread();
 			}
-			final boolean nearby = found != null;
-			SwingUtilities.invokeLater(() -> panel.setTargetStatus(name, nearby));
+			return;
 		}
 
-		if (found != null)
+		StepLocationHint location = resolveStepLocation(stepKey);
+		if (location == null || suppressed)
 		{
+			clearArrowOnClientThread();
 			clearFarTarget();
 			return;
 		}
 
-		// target not in the scene: fall back to the coordinate database
-		WorldPoint known = locationStore.lookup(name);
-		if (known == null)
-		{
-			clearFarTarget();
-			return;
-		}
+		WorldPoint known = location.getPoint();
 		LocalPoint lp = LocalPoint.fromWorld(client.getTopLevelWorldView(), known);
 		if (lp != null)
 		{
-			// stored location is inside the loaded scene (e.g. behind a wall or
-			// on another plane): use the native hint arrow on the tile
+			// Destination is inside the loaded scene: use the native hint arrow
+			// on the tile. This also covers named places without an NPC.
 			clearFarTarget();
-			if (config.enableHintArrow() && !known.equals(lastArrowPoint))
+			if (config.enableHintArrow() && allowHintGuidance(known) && !known.equals(lastArrowPoint))
 			{
 				client.setHintArrow(known);
 				hintArrowSet = true;
 				lastArrowPoint = known;
 			}
 		}
-		else if (!known.equals(farTarget))
+		else
 		{
-			farTarget = known;
-			updateMapMarker(known, name);
+			clearArrowOnClientThread();
+			if (!known.equals(farTarget) || !location.getLabel().equals(markerName))
+			{
+				farTarget = known;
+				updateMapMarker(known, location.getLabel());
+			}
 		}
+	}
+
+	private void updateGuidanceDistanceBand()
+	{
+		if (!config.distanceAwareGuidance())
+		{
+			return;
+		}
+		WorldPoint objective = rawObjectivePoint();
+		int distance = distanceFromPlayer(objective);
+		switch (guidanceBand)
+		{
+			case NEAR:
+				if (distance > 36)
+				{
+					guidanceBand = GuidanceBand.MEDIUM;
+				}
+				break;
+			case MEDIUM:
+				if (distance < 28)
+				{
+					guidanceBand = GuidanceBand.NEAR;
+				}
+				else if (distance > 112)
+				{
+					guidanceBand = GuidanceBand.FAR;
+				}
+				break;
+			case FAR:
+			default:
+				if (distance < 96)
+				{
+					guidanceBand = distance < 28 ? GuidanceBand.NEAR : GuidanceBand.MEDIUM;
+				}
+				break;
+		}
+	}
+
+	boolean allowSceneGuidance()
+	{
+		if (isLocationSuppressed(guidedStepKey()))
+		{
+			return false;
+		}
+		HcimGuideConfig.GuidanceDisplayMode mode = config.guidanceDisplayMode();
+		if (mode == HcimGuideConfig.GuidanceDisplayMode.WORLD_MAP_ONLY
+			|| mode == HcimGuideConfig.GuidanceDisplayMode.SHORTEST_PATH_ONLY)
+		{
+			return false;
+		}
+		if (config.preferQuestHelperMarkers() && isQuestHelperActive() && isGuidedQuestStage())
+		{
+			return false;
+		}
+		WorldPoint objective = rawObjectivePoint();
+		return !config.distanceAwareGuidance() || objective == null || guidanceBand == GuidanceBand.NEAR;
+	}
+
+	boolean allowCompassGuidance(WorldPoint objective)
+	{
+		HcimGuideConfig.GuidanceDisplayMode mode = config.guidanceDisplayMode();
+		if (mode != HcimGuideConfig.GuidanceDisplayMode.ALL)
+		{
+			return false;
+		}
+		if (!config.distanceAwareGuidance())
+		{
+			return true;
+		}
+		return guidanceBand == GuidanceBand.MEDIUM;
+	}
+
+	private boolean allowHintGuidance(WorldPoint objective)
+	{
+		HcimGuideConfig.GuidanceDisplayMode mode = config.guidanceDisplayMode();
+		if (mode == HcimGuideConfig.GuidanceDisplayMode.WORLD_MAP_ONLY
+			|| mode == HcimGuideConfig.GuidanceDisplayMode.SHORTEST_PATH_ONLY)
+		{
+			return false;
+		}
+		return !config.distanceAwareGuidance() || guidanceBand == GuidanceBand.NEAR;
+	}
+
+	private boolean allowWorldMapGuidance(WorldPoint objective)
+	{
+		HcimGuideConfig.GuidanceDisplayMode mode = config.guidanceDisplayMode();
+		if (mode == HcimGuideConfig.GuidanceDisplayMode.SHORTEST_PATH_ONLY
+			|| mode == HcimGuideConfig.GuidanceDisplayMode.NEARBY_ONLY)
+		{
+			return false;
+		}
+		return !config.distanceAwareGuidance() || guidanceBand != GuidanceBand.NEAR;
+	}
+
+	private boolean allowShortestPathGuidance(WorldPoint objective)
+	{
+		HcimGuideConfig.GuidanceDisplayMode mode = config.guidanceDisplayMode();
+		if (mode == HcimGuideConfig.GuidanceDisplayMode.WORLD_MAP_ONLY
+			|| mode == HcimGuideConfig.GuidanceDisplayMode.NEARBY_ONLY)
+		{
+			return false;
+		}
+		return !config.distanceAwareGuidance() || guidanceBand != GuidanceBand.NEAR;
+	}
+
+	private int distanceFromPlayer(WorldPoint point)
+	{
+		return point == null || client.getLocalPlayer() == null ? Integer.MAX_VALUE
+			: tileDistance(client.getLocalPlayer().getWorldLocation(), point);
+	}
+
+	private WorldPoint rawObjectivePoint()
+	{
+		String key = guidedStepKey();
+		StepLocationHint hint = resolveStepLocation(key);
+		return hint == null ? null : hint.getPoint();
+	}
+
+	private boolean isQuestHelperActive()
+	{
+		if (tickCounter - questHelperCheckedTick < 20)
+		{
+			return questHelperActiveCached;
+		}
+		questHelperCheckedTick = tickCounter;
+		boolean active = false;
+		for (Plugin plugin : pluginManager.getPlugins())
+		{
+			PluginDescriptor descriptor = plugin.getClass().getAnnotation(PluginDescriptor.class);
+			if (descriptor != null && "Quest Helper".equalsIgnoreCase(descriptor.name())
+				&& pluginManager.isPluginActive(plugin))
+			{
+				active = true;
+				break;
+			}
+		}
+		questHelperActiveCached = active;
+		return active;
+	}
+
+	private boolean isGuidedQuestStage()
+	{
+		String key = guidedStepKey();
+		GuideBank bank = currentGuide == null ? null : findActiveBank(currentGuide);
+		if (key == null || bank == null)
+		{
+			return false;
+		}
+		for (GuideStep step : bank.getSteps())
+		{
+			if (key.equals(step.getKey()))
+			{
+				return StepLocationPlanner.isQuestStageText(step.getText());
+			}
+		}
+		return false;
 	}
 
 	/** Last known location of the pinned target when it's beyond the loaded scene. Client thread. */
@@ -4070,7 +4985,7 @@ public class HcimGuidePlugin extends Plugin
 	 */
 	boolean hasPinnedTarget()
 	{
-		return targetName != null;
+		return pinnedStepKey != null && isStepTrackable(pinnedStepKey);
 	}
 
 	private void clearFarTarget()
@@ -4093,6 +5008,7 @@ public class HcimGuidePlugin extends Plugin
 		if ((!config.showNextStepOnMap() && !routingWanted && !compassWanted) || currentGuide == null)
 		{
 			nextStepPoint = null;
+			nextStepKey = null;
 			removeMapMarker();
 			return;
 		}
@@ -4106,18 +5022,16 @@ public class HcimGuidePlugin extends Plugin
 				{
 					continue;
 				}
-				String target = stepTargets.get(step.getKey());
-				if (target == null)
+				String key = step.getKey();
+				StepLocationHint location = resolveStepLocation(key);
+				if (location != null && !isLocationSuppressed(key))
 				{
-					continue; // next step has no locatable target -> look further down
-				}
-				WorldPoint known = locationStore.lookup(target);
-				if (known != null)
-				{
-					nextStepPoint = known;
+					nextStepPoint = location.getPoint();
+					nextStepKey = key;
 					if (config.showNextStepOnMap())
 					{
-						setMarker(known, "next step: " + target);
+						String prefix = location.isInferred() ? "next step near: " : "next step: ";
+						setMarker(location.getPoint(), prefix + location.getLabel());
 					}
 					else
 					{
@@ -4125,14 +5039,16 @@ public class HcimGuidePlugin extends Plugin
 					}
 					return;
 				}
-				// first targeted step has no known location - don't mislead by
-				// marking a LATER step's target instead
+				// Never skip past the current step to a later destination; that
+				// would produce a confident but misleading route.
 				nextStepPoint = null;
+				nextStepKey = null;
 				removeMapMarker();
 				return;
 			}
 		}
 		nextStepPoint = null;
+		nextStepKey = null;
 		removeMapMarker();
 	}
 
@@ -4154,7 +5070,7 @@ public class HcimGuidePlugin extends Plugin
 			return;
 		}
 		removeMapMarker();
-		if (point == null || !config.showWorldMapMarker())
+		if (point == null || !config.showWorldMapMarker() || !allowWorldMapGuidance(point))
 		{
 			return;
 		}

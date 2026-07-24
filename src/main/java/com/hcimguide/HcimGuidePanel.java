@@ -373,6 +373,93 @@ public class HcimGuidePanel extends PluginPanel
 		});
 		menu.add(importLocations);
 
+		menu.addSeparator();
+
+		JMenuItem setTilePin = new JMenuItem("Set current tile as step destination");
+		setTilePin.addActionListener(e -> plugin.setCurrentTileAsCustomPin(false));
+		menu.add(setTilePin);
+
+		JMenuItem addTileWaypoint = new JMenuItem("Add current tile as waypoint");
+		addTileWaypoint.addActionListener(e -> plugin.setCurrentTileAsCustomPin(true));
+		menu.add(addTileWaypoint);
+
+		JMenuItem setMapPin = new JMenuItem("Set world-map center as destination");
+		setMapPin.addActionListener(e -> plugin.setWorldMapCenterAsCustomPin(false));
+		menu.add(setMapPin);
+
+		JMenuItem addMapWaypoint = new JMenuItem("Add world-map center as waypoint");
+		addMapWaypoint.addActionListener(e -> plugin.setWorldMapCenterAsCustomPin(true));
+		menu.add(addMapWaypoint);
+
+		JMenuItem renameWaypoint = new JMenuItem("Rename active custom waypoint...");
+		renameWaypoint.addActionListener(e -> plugin.renameActiveCustomWaypoint());
+		menu.add(renameWaypoint);
+
+		JMenuItem moveWaypointEarlier = new JMenuItem("Move active custom waypoint earlier");
+		moveWaypointEarlier.addActionListener(e -> plugin.moveActiveCustomWaypoint(-1));
+		menu.add(moveWaypointEarlier);
+
+		JMenuItem moveWaypointLater = new JMenuItem("Move active custom waypoint later");
+		moveWaypointLater.addActionListener(e -> plugin.moveActiveCustomWaypoint(1));
+		menu.add(moveWaypointLater);
+
+		JMenuItem removeWaypoint = new JMenuItem("Remove active custom waypoint");
+		removeWaypoint.addActionListener(e -> plugin.removeActiveCustomWaypoint());
+		menu.add(removeWaypoint);
+
+		JMenuItem clearPin = new JMenuItem("Restore automatic destination for step");
+		clearPin.addActionListener(e -> plugin.clearCustomPinForCurrentStep());
+		menu.add(clearPin);
+
+		JMenuItem snoozeLocation = new JMenuItem("Snooze all location guidance for 5 minutes");
+		snoozeLocation.addActionListener(e -> plugin.snoozeLocationGuide());
+		menu.add(snoozeLocation);
+
+		JMenuItem restoreLocation = new JMenuItem("Restore all location guidance");
+		restoreLocation.addActionListener(e -> plugin.restoreLocationGuide());
+		menu.add(restoreLocation);
+
+		JMenuItem exportCustom = new JMenuItem("Export custom pins to file...");
+		exportCustom.addActionListener(e -> saveTextFile("custom-locations.json",
+			plugin.exportCustomLocations()));
+		menu.add(exportCustom);
+
+		JMenuItem importCustom = new JMenuItem("Import custom pins from clipboard...");
+		importCustom.addActionListener(e ->
+		{
+			int choice = JOptionPane.showConfirmDialog(this,
+				"Merge custom pins for the currently selected guide from the JSON on your clipboard?",
+				"Import custom pins", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+			if (choice != JOptionPane.OK_OPTION)
+			{
+				return;
+			}
+			setStatus("Reading clipboard…");
+			plugin.readClipboardText(json ->
+			{
+				if (json == null)
+				{
+					SwingUtilities.invokeLater(() -> setStatus("Clipboard does not contain text"));
+					return;
+				}
+				try
+				{
+					int imported = plugin.importCustomLocations(json);
+					SwingUtilities.invokeLater(() -> setStatus("Imported " + imported + " custom step locations"));
+				}
+				catch (RuntimeException ex)
+				{
+					SwingUtilities.invokeLater(() -> setStatus("Custom pin import failed: " + ex.getMessage()));
+				}
+			});
+		});
+		menu.add(importCustom);
+
+		JMenuItem exportAudit = new JMenuItem("Export unresolved location audit...");
+		exportAudit.addActionListener(e -> saveTextFile("unresolved-location-audit.md",
+			plugin.exportLocationAudit()));
+		menu.add(exportAudit);
+
 		JMenuItem importProgress = new JMenuItem("Import progress from clipboard...");
 		importProgress.addActionListener(e ->
 		{
@@ -400,6 +487,27 @@ public class HcimGuidePanel extends PluginPanel
 		menu.add(importProgress);
 
 		return menu;
+	}
+
+	private void saveTextFile(String suggestedName, String text)
+	{
+		JFileChooser chooser = new JFileChooser();
+		chooser.setDialogTitle("Save " + suggestedName);
+		chooser.setSelectedFile(new java.io.File(suggestedName));
+		if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION)
+		{
+			return;
+		}
+		try
+		{
+			java.nio.file.Files.write(chooser.getSelectedFile().toPath(),
+				text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			setStatus("Saved " + chooser.getSelectedFile().getName());
+		}
+		catch (java.io.IOException ex)
+		{
+			setStatus("Save failed: " + ex.getMessage());
+		}
 	}
 
 	// ---------------------------------------------------------------- API used by plugin
@@ -525,7 +633,8 @@ public class HcimGuidePanel extends PluginPanel
 	void onPinChanged(String newTargetName)
 	{
 		refreshAllPinButtons();
-		setTargetStatus(newTargetName, false);
+		String summary = plugin.getActiveLocationSummary();
+		setTargetStatus(summary != null ? summary : newTargetName, false);
 	}
 
 	/** Re-create rows so config toggles (item grids, dimming) apply immediately. */
@@ -1410,9 +1519,27 @@ public class HcimGuidePanel extends PluginPanel
 			}
 			else
 			{
-				body = escaped;
+				Color semanticColor = semanticStepColor();
+				body = semanticColor == null
+					? escaped
+					: "<span style='color:" + htmlColor(semanticColor) + "'>" + escaped + "</span>";
 			}
 			checkBox.setText("<html><body style='" + style + "'>" + body + "</body></html>");
+		}
+
+		private Color semanticStepColor()
+		{
+			switch (StepTextSemantic.classify(step.getText()))
+			{
+				case DANGER:
+					return config.colorDangerSteps() ? config.dangerStepColor() : null;
+				case PREPARATION:
+					return config.colorPreparationSteps() ? config.preparationStepColor() : null;
+				case TRANSPORT:
+					return config.colorTransportSteps() ? config.transportStepColor() : null;
+				default:
+					return null;
+			}
 		}
 
 		void syncPinVisual()
@@ -1434,6 +1561,12 @@ public class HcimGuidePanel extends PluginPanel
 				row.syncPinVisual();
 			}
 		}
+	}
+
+	private static String htmlColor(Color color)
+	{
+		Color safe = color == null ? new Color(80, 220, 255) : color;
+		return String.format("#%02x%02x%02x", safe.getRed(), safe.getGreen(), safe.getBlue());
 	}
 
 	private static String escapeHtml(String s)

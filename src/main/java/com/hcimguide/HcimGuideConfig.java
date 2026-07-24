@@ -46,6 +46,16 @@ public interface HcimGuideConfig extends Config
 		TAILED
 	}
 
+	/** Which parts of location guidance are visible. */
+	enum GuidanceDisplayMode
+	{
+		ALL,
+		WORLD_MAP_ONLY,
+		SHORTEST_PATH_ONLY,
+		NEARBY_ONLY,
+		NO_COMPASS
+	}
+
 	/** Text size for step text in the side panel. */
 	enum PanelTextSize
 	{
@@ -266,6 +276,80 @@ public interface HcimGuideConfig extends Config
 	default boolean compassShowDistance()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		keyName = "guidanceDisplayMode",
+		name = "Location display mode",
+		description = "Choose which native location guides are shown. The per-destination crosshair can still hide everything temporarily.",
+		position = 10,
+		section = targetSection
+	)
+	default GuidanceDisplayMode guidanceDisplayMode()
+	{
+		return GuidanceDisplayMode.ALL;
+	}
+
+	@ConfigItem(
+		keyName = "distanceAwareGuidance",
+		name = "Distance-aware guidance",
+		description = "Far away: map/path. Nearby: compass, hint arrow and scene highlights. Uses hysteresis to avoid flicker.",
+		position = 11,
+		section = targetSection
+	)
+	default boolean distanceAwareGuidance()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "showLocationConfidence",
+		name = "Show location source",
+		description = "Show the active destination, source and confidence in the HUD and side panel.",
+		position = 12,
+		section = targetSection
+	)
+	default boolean showLocationConfidence()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "hideLowConfidenceLocations",
+		name = "Hide low-confidence pins",
+		description = "Do not display locations classified as low confidence.",
+		position = 13,
+		section = targetSection
+	)
+	default boolean hideLowConfidenceLocations()
+	{
+		return true;
+	}
+
+	@Range(min = 1, max = 12)
+	@ConfigItem(
+		keyName = "locationEquivalentRadius",
+		name = "Same-location radius",
+		description = "Tiles within this radius count as the same destination for hide-state carryover.",
+		position = 14,
+		section = targetSection
+	)
+	default int locationEquivalentRadius()
+	{
+		return 4;
+	}
+
+	@Range(min = 8, max = 64)
+	@ConfigItem(
+		keyName = "locationLeaveRadius",
+		name = "Leave-location radius",
+		description = "After hiding a destination, guidance becomes eligible to reappear once you have actually moved this far away.",
+		position = 15,
+		section = targetSection
+	)
+	default int locationLeaveRadius()
+	{
+		return 32;
 	}
 
 	// ------------------------------------------------------------------ world map
@@ -541,7 +625,7 @@ public interface HcimGuideConfig extends Config
 	)
 	default FontStyle overlayFontStyle()
 	{
-		return FontStyle.SMALL;
+		return FontStyle.SANS_SMALL;
 	}
 
 	@ConfigItem(
@@ -642,6 +726,78 @@ public interface HcimGuideConfig extends Config
 	default boolean itemPresenceBorders()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		keyName = "colorTransportSteps",
+		name = "Cyan transport steps",
+		description = "Color teleport and transport instructions cyan in the side panel and HUD so route changes stand out.",
+		position = 7,
+		section = uiSection
+	)
+	default boolean colorTransportSteps()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "transportStepColor",
+		name = "Transport text color",
+		description = "Text color used for teleport, fairy-ring, boat, minecart, Quetzal, portal and similar transport steps.",
+		position = 8,
+		section = uiSection
+	)
+	default Color transportStepColor()
+	{
+		return new Color(80, 220, 255);
+	}
+
+	@ConfigItem(
+		keyName = "colorDangerSteps",
+		name = "Red danger steps",
+		description = "Color Wilderness, deliberate-death, item-loss and other explicit high-risk instructions coral red.",
+		position = 9,
+		section = uiSection
+	)
+	default boolean colorDangerSteps()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "dangerStepColor",
+		name = "Danger text color",
+		description = "Text color used for explicit danger, Wilderness, death-risk and item-loss instructions.",
+		position = 10,
+		section = uiSection
+	)
+	default Color dangerStepColor()
+	{
+		return new Color(255, 107, 107);
+	}
+
+	@ConfigItem(
+		keyName = "colorPreparationSteps",
+		name = "Amber preparation steps",
+		description = "Color withdrawals, equipment setup, charges and explicit prerequisites amber.",
+		position = 11,
+		section = uiSection
+	)
+	default boolean colorPreparationSteps()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "preparationStepColor",
+		name = "Preparation text color",
+		description = "Text color used for item setup, equipment, charges, minimum requirements and before-leaving reminders.",
+		position = 12,
+		section = uiSection
+	)
+	default Color preparationStepColor()
+	{
+		return new Color(255, 200, 87);
 	}
 
 	// ------------------------------------------------------------------ routing & teleports
@@ -790,6 +946,42 @@ public interface HcimGuideConfig extends Config
 	default Keybind prevStepKeybind()
 	{
 		return Keybind.NOT_SET;
+	}
+
+	@ConfigItem(
+		keyName = "autoAdvanceWaypoints",
+		name = "Auto-advance waypoints",
+		description = "Advance to the next waypoint after remaining inside its arrival radius for the required game ticks.",
+		position = 5,
+		section = navSection
+	)
+	default boolean autoAdvanceWaypoints()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "persistWaypointIndex",
+		name = "Remember waypoint position",
+		description = "Remember the active waypoint for each step across client restarts.",
+		position = 6,
+		section = navSection
+	)
+	default boolean persistWaypointIndex()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "preferQuestHelperMarkers",
+		name = "Prefer Quest Helper markers",
+		description = "For quest-stage steps, suppress duplicate Guide Overlay NPC/object highlights while keeping the checklist, map destination and Shortest Path route.",
+		position = 7,
+		section = navSection
+	)
+	default boolean preferQuestHelperMarkers()
+	{
+		return false;
 	}
 
 	// ------------------------------------------------------------------ notifications & sounds

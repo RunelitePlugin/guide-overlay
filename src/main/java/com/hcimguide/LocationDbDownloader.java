@@ -74,13 +74,20 @@ public class LocationDbDownloader
 			.header("User-Agent", "guide-overlay RuneLite plugin")
 			.build();
 
+		// Enforces the exactly-one-callback contract above. Without it, a throw
+		// from the store merge (which runs after onSuccess's inputs are ready)
+		// would fall into the outer catch and fire onError for a call that had
+		// already partially succeeded.
+		final java.util.concurrent.atomic.AtomicBoolean settled =
+			new java.util.concurrent.atomic.AtomicBoolean();
+
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
 				log.warn("Location database download failed", e);
-				safe(onError, "Download failed: " + e.getMessage());
+				safe(settled, onError, "Download failed: " + e.getMessage());
 			}
 
 			@Override
@@ -90,12 +97,12 @@ public class LocationDbDownloader
 				{
 					if (!response.isSuccessful() || body == null)
 					{
-						safe(onError, "Source returned HTTP " + response.code());
+						safe(settled, onError, "Source returned HTTP " + response.code());
 						return;
 					}
 					if (body.contentLength() > MAX_BODY_BYTES)
 					{
-						safe(onError, "Response implausibly large - aborted");
+						safe(settled, onError, "Response implausibly large - aborted");
 						return;
 					}
 					// hard byte cap that also covers chunked responses (where
@@ -139,24 +146,39 @@ public class LocationDbDownloader
 						new java.io.InputStreamReader(bounded, java.nio.charset.StandardCharsets.UTF_8)));
 					if (parsed.locations.isEmpty())
 					{
-						safe(onError, "No usable locations in the dataset");
+						safe(settled, onError, "No usable locations in the dataset");
 						return;
 					}
-					int added = store.addNormalizedIfAbsent(parsed.locations);
-					store.saveIfDirty();
+					int added;
 					try
 					{
-						onSuccess.accept(new DownloadResult(added, parsed.truncated));
+						added = store.addNormalizedIfAbsent(parsed.locations);
+						store.saveIfDirty();
 					}
 					catch (Exception e)
 					{
-						log.warn("Download success handler failed", e);
+						// distinct from the parse path below: the data was read
+						// fine, storing it is what failed
+						log.warn("Location database merge failed", e);
+						safe(settled, onError, "Merge failed: " + e.getMessage());
+						return;
+					}
+					if (settled.compareAndSet(false, true))
+					{
+						try
+						{
+							onSuccess.accept(new DownloadResult(added, parsed.truncated));
+						}
+						catch (Exception e)
+						{
+							log.warn("Download success handler failed", e);
+						}
 					}
 				}
 				catch (Exception e)
 				{
 					log.warn("Location database parse failed", e);
-					safe(onError, "Parse failed: " + e.getMessage());
+					safe(settled, onError, "Parse failed: " + e.getMessage());
 				}
 			}
 		});
@@ -275,8 +297,14 @@ public class LocationDbDownloader
 		return i == d ? i : fallback;
 	}
 
-	private static void safe(Consumer<String> onError, String message)
+	/** Fires onError at most once per call, per the download() contract. */
+	private static void safe(java.util.concurrent.atomic.AtomicBoolean settled,
+		Consumer<String> onError, String message)
 	{
+		if (!settled.compareAndSet(false, true))
+		{
+			return;
+		}
 		try
 		{
 			onError.accept(message);

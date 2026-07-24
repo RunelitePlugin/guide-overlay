@@ -281,13 +281,17 @@ public class GuideService
 			.header("User-Agent", "guide-overlay RuneLite plugin")
 			.build();
 
+		// Enforces the exactly-one-callback contract documented above.
+		final java.util.concurrent.atomic.AtomicBoolean settled =
+			new java.util.concurrent.atomic.AtomicBoolean();
+
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
 				log.warn("Guide download failed", e);
-				safeError(onError, "Download failed: " + e.getMessage());
+				safeError(settled, onError, "Download failed: " + e.getMessage());
 			}
 
 			@Override
@@ -374,18 +378,21 @@ public class GuideService
 				// other or propagate into the OkHttp dispatcher thread
 				if (guide != null)
 				{
-					try
+					if (settled.compareAndSet(false, true))
 					{
-						onSuccess.accept(guide, storageWarning);
-					}
-					catch (Exception e)
-					{
-						log.warn("Guide success handler failed", e);
+						try
+						{
+							onSuccess.accept(guide, storageWarning);
+						}
+						catch (Exception e)
+						{
+							log.warn("Guide success handler failed", e);
+						}
 					}
 				}
 				else
 				{
-					safeError(onError, error != null ? error : "Unknown error");
+					safeError(settled, onError, error != null ? error : "Unknown error");
 				}
 			}
 		});
@@ -435,7 +442,8 @@ public class GuideService
 		}
 		catch (Exception e)
 		{
-			safeError(onError, "Built-in guide source is invalid");
+			safeError(new java.util.concurrent.atomic.AtomicBoolean(), onError,
+				"Built-in guide source is invalid");
 			return;
 		}
 		Request request = new Request.Builder()
@@ -443,13 +451,17 @@ public class GuideService
 			.header("User-Agent", "guide-overlay RuneLite plugin")
 			.build();
 
+		// Enforces the exactly-one-callback contract documented above.
+		final java.util.concurrent.atomic.AtomicBoolean settled =
+			new java.util.concurrent.atomic.AtomicBoolean();
+
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
 				log.warn("Guide download failed", e);
-				safeError(onError, "Download failed: " + e.getMessage());
+				safeError(settled, onError, "Download failed: " + e.getMessage());
 			}
 
 			@Override
@@ -512,25 +524,34 @@ public class GuideService
 
 				if (guide != null)
 				{
-					try
+					if (settled.compareAndSet(false, true))
 					{
-						onSuccess.accept(guide, storageWarning);
-					}
-					catch (Exception e)
-					{
-						log.warn("Guide success handler failed", e);
+						try
+						{
+							onSuccess.accept(guide, storageWarning);
+						}
+						catch (Exception e)
+						{
+							log.warn("Guide success handler failed", e);
+						}
 					}
 				}
 				else
 				{
-					safeError(onError, error != null ? error : "Unknown error");
+					safeError(settled, onError, error != null ? error : "Unknown error");
 				}
 			}
 		});
 	}
 
-	private static void safeError(Consumer<String> onError, String message)
+	/** Fires onError at most once per fetch, per the exactly-one contract. */
+	private static void safeError(java.util.concurrent.atomic.AtomicBoolean settled,
+		Consumer<String> onError, String message)
 	{
+		if (!settled.compareAndSet(false, true))
+		{
+			return;
+		}
 		try
 		{
 			onError.accept(message);

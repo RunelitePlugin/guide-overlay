@@ -57,6 +57,9 @@ public class HudOverlay extends OverlayPanel
 
 	/** Local (overlay-relative) attached-arrow rects; null = not shown this frame. */
 	private volatile Rectangle prevRect;
+	private volatile Rectangle prevWaypointRect;
+	private volatile Rectangle locationRect;
+	private volatile Rectangle nextWaypointRect;
 	private volatile Rectangle nextRect;
 
 	@Inject
@@ -78,6 +81,20 @@ public class HudOverlay extends OverlayPanel
 			"Guide Overlay", e -> plugin.navigateStep(false));
 		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Pin next target",
 			"Guide Overlay", e -> plugin.pinNextTrackableStep());
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Toggle location guide",
+			"Guide Overlay", e -> plugin.toggleLocationGuideForCurrentStep());
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Snooze location guide (5 min)",
+			"Guide Overlay", e -> plugin.snoozeLocationGuide());
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Restore location guide",
+			"Guide Overlay", e -> plugin.restoreLocationGuide());
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Next waypoint",
+			"Guide Overlay", e -> plugin.navigateWaypoint(1));
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Previous waypoint",
+			"Guide Overlay", e -> plugin.navigateWaypoint(-1));
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Set current tile as pin",
+			"Guide Overlay", e -> plugin.setCurrentTileAsCustomPin(false));
+		addMenuEntry(net.runelite.api.MenuAction.RUNELITE_OVERLAY, "Add current tile as waypoint",
+			"Guide Overlay", e -> plugin.setCurrentTileAsCustomPin(true));
 	}
 
 	@Override
@@ -122,9 +139,11 @@ public class HudOverlay extends OverlayPanel
 			{
 				// FULL text, never truncated: LineComponent word-wraps to the
 				// panel width, so long steps grow the box instead of losing words
+				Color stepColor = semanticStepColor(step,
+					shown == 0 ? NEXT_STEP_COLOR : LATER_STEP_COLOR);
 				panelComponent.getChildren().add(LineComponent.builder()
 					.left((shown == 0 ? "> " : "- ") + step.getText())
-					.leftColor(shown == 0 ? NEXT_STEP_COLOR : LATER_STEP_COLOR)
+					.leftColor(stepColor)
 					.build());
 			}
 			else
@@ -156,6 +175,15 @@ public class HudOverlay extends OverlayPanel
 				.build());
 		}
 
+		String locationSummary = plugin.getActiveLocationSummary();
+		if (locationSummary != null && config.showLocationConfidence())
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("⌖ " + locationSummary)
+				.leftColor(ROUTE_COLOR)
+				.build());
+		}
+
 		Dimension d = super.render(graphics);
 		if (d == null)
 		{
@@ -176,11 +204,32 @@ public class HudOverlay extends OverlayPanel
 		{
 			y = drawAttachedArrows(graphics, d.width, y);
 		}
+		else if (config.navArrows() == HcimGuideConfig.ArrowMode.HIDDEN
+			&& plugin.hasLocationForGuidedStep())
+		{
+			y = drawLocationOnly(graphics, d.width, y);
+		}
 		else
 		{
 			clearArrowRects();
 		}
 		return new Dimension(d.width, y);
+	}
+
+	private Color semanticStepColor(GuideStep step, Color fallback)
+	{
+		StepTextSemantic.Kind kind = StepTextSemantic.classify(step == null ? null : step.getText());
+		switch (kind)
+		{
+			case DANGER:
+				return config.colorDangerSteps() ? config.dangerStepColor() : fallback;
+			case PREPARATION:
+				return config.colorPreparationSteps() ? config.preparationStepColor() : fallback;
+			case TRANSPORT:
+				return config.colorTransportSteps() ? config.transportStepColor() : fallback;
+			default:
+				return fallback;
+		}
 	}
 
 	/**
@@ -202,9 +251,10 @@ public class HudOverlay extends OverlayPanel
 			.build());
 		for (GuideStep step : upcoming)
 		{
+			Color stepColor = semanticStepColor(step, LATER_STEP_COLOR);
 			nextStepsPanel.getChildren().add(LineComponent.builder()
 				.left("- " + step.getText())
-				.leftColor(LATER_STEP_COLOR)
+				.leftColor(stepColor)
 				.build());
 		}
 		// PanelComponent sizes its background (and return value) from the
@@ -285,35 +335,115 @@ public class HudOverlay extends OverlayPanel
 		return y + stripH;
 	}
 
-	/** The attached ◀ ▶ buttons, centered under the box. */
+	/** Attached step, waypoint and location controls, centered under the box. */
 	private int drawAttachedArrows(Graphics2D g, int width, int y)
 	{
 		y += STRIP_GAP;
-		int totalW = StepNavOverlay.BUTTON_W * 2 + StepNavOverlay.BUTTON_GAP;
+		boolean showLocation = plugin.hasLocationForGuidedStep();
+		boolean showWaypoints = plugin.hasMultipleWaypointsForGuidedStep();
+		int totalW = StepNavOverlay.totalWidth(showLocation, showWaypoints);
 		int x = Math.max(0, (width - totalW) / 2);
 		Rectangle prev = new Rectangle(x, y, StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H);
-		Rectangle next = new Rectangle(x + StepNavOverlay.BUTTON_W + StepNavOverlay.BUTTON_GAP, y,
-			StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H);
+		x += StepNavOverlay.BUTTON_W + StepNavOverlay.BUTTON_GAP;
+		Rectangle prevWaypoint = showWaypoints
+			? new Rectangle(x, y, StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H) : null;
+		if (showWaypoints)
+		{
+			x += StepNavOverlay.BUTTON_W + StepNavOverlay.BUTTON_GAP;
+		}
+		Rectangle location = showLocation
+			? new Rectangle(x, y, StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H) : null;
+		if (showLocation)
+		{
+			x += StepNavOverlay.BUTTON_W + StepNavOverlay.BUTTON_GAP;
+		}
+		Rectangle nextWaypoint = showWaypoints
+			? new Rectangle(x, y, StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H) : null;
+		if (showWaypoints)
+		{
+			x += StepNavOverlay.BUTTON_W + StepNavOverlay.BUTTON_GAP;
+		}
+		Rectangle next = new Rectangle(x, y, StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H);
+
 		StepNavOverlay.drawArrowButton(g, prev, false);
+		if (prevWaypoint != null)
+		{
+			StepNavOverlay.drawWaypointButton(g, prevWaypoint, false);
+		}
+		if (location != null)
+		{
+			StepNavOverlay.drawLocationButton(g, location, plugin.isLocationGuideHiddenForGuidedStep());
+		}
+		if (nextWaypoint != null)
+		{
+			StepNavOverlay.drawWaypointButton(g, nextWaypoint, true);
+		}
 		StepNavOverlay.drawArrowButton(g, next, true);
 		prevRect = prev;
+		prevWaypointRect = prevWaypoint;
+		locationRect = location;
+		nextWaypointRect = nextWaypoint;
 		nextRect = next;
+		return y + StepNavOverlay.BUTTON_H;
+	}
+
+	/** Location/waypoint controls remain available when step arrows are disabled. */
+	private int drawLocationOnly(Graphics2D g, int width, int y)
+	{
+		y += STRIP_GAP;
+		boolean showWaypoints = plugin.hasMultipleWaypointsForGuidedStep();
+		int buttons = showWaypoints ? 3 : 1;
+		int total = buttons * StepNavOverlay.BUTTON_W + (buttons - 1) * StepNavOverlay.BUTTON_GAP;
+		int x = Math.max(0, (width - total) / 2);
+		Rectangle prevWaypoint = showWaypoints
+			? new Rectangle(x, y, StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H) : null;
+		if (showWaypoints)
+		{
+			x += StepNavOverlay.BUTTON_W + StepNavOverlay.BUTTON_GAP;
+		}
+		Rectangle location = new Rectangle(x, y, StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H);
+		x += StepNavOverlay.BUTTON_W + StepNavOverlay.BUTTON_GAP;
+		Rectangle nextWaypoint = showWaypoints
+			? new Rectangle(x, y, StepNavOverlay.BUTTON_W, StepNavOverlay.BUTTON_H) : null;
+		if (prevWaypoint != null)
+		{
+			StepNavOverlay.drawWaypointButton(g, prevWaypoint, false);
+		}
+		StepNavOverlay.drawLocationButton(g, location, plugin.isLocationGuideHiddenForGuidedStep());
+		if (nextWaypoint != null)
+		{
+			StepNavOverlay.drawWaypointButton(g, nextWaypoint, true);
+		}
+		prevRect = null;
+		prevWaypointRect = prevWaypoint;
+		locationRect = location;
+		nextWaypointRect = nextWaypoint;
+		nextRect = null;
 		return y + StepNavOverlay.BUTTON_H;
 	}
 
 	private void clearArrowRects()
 	{
 		prevRect = null;
+		prevWaypointRect = null;
+		locationRect = null;
+		nextWaypointRect = null;
 		nextRect = null;
 	}
 
-	/**
-	 * @param screen a click location in screen coordinates
-	 * @return +1 when it hits the attached next-arrow, -1 for previous, 0 for neither
-	 */
 	int hitArrow(Point screen)
 	{
 		return StepNavOverlay.hitArrow(screen, getBounds(), prevRect, nextRect);
+	}
+
+	int hitWaypointArrow(Point screen)
+	{
+		return StepNavOverlay.hitArrow(screen, getBounds(), prevWaypointRect, nextWaypointRect);
+	}
+
+	boolean hitLocationToggle(Point screen)
+	{
+		return StepNavOverlay.hitButton(screen, getBounds(), locationRect);
 	}
 
 	/** The box background: near-black at the configured opacity. */

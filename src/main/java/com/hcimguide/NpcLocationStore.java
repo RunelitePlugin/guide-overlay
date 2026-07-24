@@ -267,6 +267,12 @@ public class NpcLocationStore
 		lookupCache.clear();
 	}
 
+	/** Revision used by cached guide-location plans. Changes whenever location data changes. */
+	int getRevision()
+	{
+		return cacheGen.get();
+	}
+
 	/** All known locations as shareable JSON (name -&gt; [x, y, plane]). */
 	public String exportJson()
 	{

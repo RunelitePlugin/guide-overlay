@@ -1,5 +1,7 @@
 # Guide Overlay
 
+**Current release: 1.5.0**
+
 **OSRS guides as a checklist inside RuneLite — no more alt-tabbing to the wiki.**
 
 Pick a guide, and it appears in your sidebar as a checklist. The plugin
@@ -69,9 +71,33 @@ without a RuneLite account.
 
 ## Finding your way
 
-- Pin a step and its NPC gets the in-game hint arrow and a glowing outline
-- Too far away? A compass arrow points toward them with the tile distance —
-  and with nothing pinned it points at your next step's target automatically
+- Pin a step and its NPC, item spawn, or named destination gets the in-game
+  hint arrow. NPCs also receive a glowing outline when nearby
+- Named places such as Tithe Farm, banks, guilds, towns, minigames, and common
+  quest areas are resolved from an editable location data file; consecutive
+  actions in the same area inherit the last reliable destination
+- Transport shorthand is resolved separately from ordinary place names: fairy-ring
+  codes, jewelry teleports, minigame teleports, minecarts, boats, Quetzals,
+  charters, portals, and similar travel instructions can point at their arrival
+  location without treating every item name or three-letter word as a destination
+- Teleport and transport instructions are cyan in both the sidebar and on-screen
+  HUD by default, with a configurable color and an off switch
+- Too far away? A compass arrow points toward the destination with the tile
+  distance — and with nothing pinned it points at your next step automatically
+- Steps can contain ordered waypoints. The plugin advances automatically after
+  you remain inside the active waypoint's arrival radius for two game ticks,
+  and dedicated previous/next waypoint buttons let you correct an early advance
+- The crosshair button hides or restores the complete location guide. Suppression
+  follows consecutive steps with the same destination only while you remain in
+  that area; after you actually leave, a later return resolves and guides again
+- Use **Location tools** to save the current tile or world-map center as a custom
+  destination, add/reorder/rename/remove waypoints, restore automatic resolution,
+  and import or export profile-scoped custom pins
+- Location source and confidence can be shown in the HUD/sidebar. Low-confidence
+  destinations can be hidden, and display modes can show all guidance, map only,
+  Shortest Path only, nearby markers only, or everything except the compass
+- An unresolved-location audit can be exported as Markdown with the bank, stable
+  step key, reason, extracted candidate, and original instruction
 - Compass looks are configurable: full dial or bare arrow, solid triangle
   or an arrow with a tail
 - The world map marks where your next step wants you to go
@@ -93,6 +119,29 @@ without a RuneLite account.
 - Have the Shortest Path plugin installed? Guide Overlay sends it your
   destination so the walking path is drawn on the ground for you
 
+
+## Recommended plugins and integrations
+
+Guide Overlay works by itself. These plugins are optional and improve specific
+parts of the experience:
+
+| Plugin | Required | Benefit | When absent |
+| --- | ---: | --- | --- |
+| **Shortest Path** | No | Draws a tile-by-tile walking route to Guide Overlay's active destination | Native hint arrows, compass, and world-map markers continue working |
+| **Quest Helper** | No | Provides detailed quest-stage instructions and quest-specific markers alongside the broader guide checklist | Guide Overlay continues using its own locations and targets |
+
+Install optional plugins from RuneLite's Plugin Hub. Shortest Path is the only
+plugin Guide Overlay sends destination messages to directly. Quest Helper remains
+optional; Guide Overlay detects whether it is active through RuneLite's normal
+plugin manager and can suppress duplicate scene highlights on quest-stage steps
+without reading Quest Helper internals. The checklist, map pin, and Shortest Path
+route remain available.
+
+Activity-specific helper plugins mentioned by the source guide (for example,
+Mahogany Homes or Kourend Library helpers) are recommendations from that guide,
+not Guide Overlay dependencies. Their exact Plugin Hub names and availability
+may change independently.
+
 ## Bank help
 
 - Opening your bank shows a tab with just the items your current section needs,
@@ -112,8 +161,9 @@ without a RuneLite account.
   separate "Next steps" box underneath, so it's easy to focus (toggleable)
 - The current step's item pictures can show right in the box (toggleable),
   so you see what to grab without opening the sidebar
-- Shift+right-click the box for quick actions: next step, previous step,
-  pin next target
+- Shift+right-click the box for quick actions: step and waypoint navigation,
+  pinning the current tile, snoozing/restoring guidance, or toggling the current
+  destination's location guide
 - Everything repositions with Alt+drag and has size/font/color settings
 
 ## Getting started

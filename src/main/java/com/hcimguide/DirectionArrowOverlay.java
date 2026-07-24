@@ -82,7 +82,7 @@ public class DirectionArrowOverlay extends Overlay
 				target = next;
 			}
 		}
-		if (target == null)
+		if (target == null || !plugin.allowCompassGuidance(target))
 		{
 			return null;
 		}

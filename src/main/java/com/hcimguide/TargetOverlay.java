@@ -45,6 +45,10 @@ public class TargetOverlay extends Overlay
 	public Dimension render(Graphics2D graphics)
 	{
 		OverlayFonts.apply(graphics, config.overlayFontStyle());
+		if (!plugin.allowSceneGuidance())
+		{
+			return null;
+		}
 		NPC target = plugin.getTargetNpc();
 
 		// step NPCs (skip the pinned target; it gets its own stronger outline below)
