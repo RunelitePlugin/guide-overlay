@@ -52,6 +52,16 @@ public class BankTagIntegration
 	 * orphaned by a crashed session even when no active bank exists yet.
 	 */
 	private volatile String syncedBankId = "!invalidated!";
+	/**
+	 * What the last successful apply actually wrote: the resolved id list
+	 * plus the layout flags in effect. A signature change (e.g. a global
+	 * resolver-revision bump from an UNRELATED section's items resolving)
+	 * often re-resolves to exactly this - then the whole client-thread
+	 * mutation is skipped, most importantly the visible openBankTag re-open
+	 * that would reset the user's bank scroll mid-banking. Null = must
+	 * apply (never applied, invalidated, or the previous apply failed).
+	 */
+	private volatile String lastAppliedState;
 	private volatile boolean tagHasItems;
 
 	@Inject
@@ -122,6 +132,12 @@ public class BankTagIntegration
 				{
 					return;
 				}
+				String stateKey = distinct + "|" + config.bankTagUseLayout()
+					+ "|" + config.bankTagStepOrder();
+				if (stateKey.equals(lastAppliedState))
+				{
+					return; // content-identical - nothing to rewrite or re-open
+				}
 				tagManager.removeTag(TAG);
 				for (int id : distinct)
 				{
@@ -155,6 +171,7 @@ public class BankTagIntegration
 						}
 					}
 				}
+				lastAppliedState = stateKey;
 			}
 			catch (Exception e)
 			{
@@ -167,6 +184,7 @@ public class BankTagIntegration
 					syncedBankId = "!invalidated!";
 					tagHasItems = false;
 				}
+				lastAppliedState = null;
 				log.warn("Bank tag sync failed", e);
 			}
 		});
@@ -209,6 +227,7 @@ public class BankTagIntegration
 	{
 		syncedBankId = null;
 		tagHasItems = false;
+		lastAppliedState = null;
 		clientThread.invokeLater(() ->
 		{
 			try
@@ -231,6 +250,7 @@ public class BankTagIntegration
 	public void invalidate()
 	{
 		syncedBankId = "!invalidated!"; // can never equal a real signature
+		lastAppliedState = null;        // and re-APPLY even identical content
 	}
 
 	/** Remove the generated step-order layout (the tag itself is untouched). */

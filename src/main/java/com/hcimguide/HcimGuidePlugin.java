@@ -1841,7 +1841,7 @@ public class HcimGuidePlugin extends Plugin
 				{
 					// might be a real item whose resolution hasn't finished -
 					// the truth isn't known, so never claim (or sound) ready.
-					// The prefetch path keeps the full scan running, so this
+					// The periodic scan re-kick (game tick) guarantees this
 					// resolves to RESOLVED or UNRESOLVABLE within moments.
 					complete = false;
 					break outer;
@@ -2962,6 +2962,16 @@ public class HcimGuidePlugin extends Plugin
 			syncBankTag();
 			updateRouting();
 			prefetchUpcomingIcons();
+			// names still awaiting the full-database scan: re-kick it. This is
+			// what guarantees trip-ready's PENDING state converges - a scan
+			// that was busy when a name arrived, or aborted (item cache not
+			// loaded), leaves pendingScan non-empty and nothing else retries.
+			// Self-deduping: no-ops when nothing is pending or a scan runs.
+			if (iconResolver.hasPendingScan())
+			{
+				iconResolver.scanFullDatabase(() ->
+					SwingUtilities.invokeLater(() -> panel.reresolveIcons()));
+			}
 		}
 	}
 
@@ -3218,14 +3228,8 @@ public class HcimGuidePlugin extends Plugin
 			if (active)
 			{
 				iconResolver.resolve(reqsCopy);
-				// kick the full-database scan for names the price search
-				// missed even when no panel grid is open - trip-ready's
-				// PENDING state must always converge, sidebar or not
-				if (iconResolver.hasPendingScan())
-				{
-					iconResolver.scanFullDatabase(() ->
-						SwingUtilities.invokeLater(() -> panel.reresolveIcons()));
-				}
+				// names the price search missed land in pendingScan; the
+				// periodic re-kick on the game tick picks them up from there
 			}
 		});
 	}

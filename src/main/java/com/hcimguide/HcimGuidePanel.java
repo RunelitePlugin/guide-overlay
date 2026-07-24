@@ -60,6 +60,8 @@ public class HcimGuidePanel extends PluginPanel
 	 * guide must not construct thousands of Swing rows in one EDT pass.
 	 */
 	private static final int SEARCH_EXPAND_BUDGET = 400;
+	/** True while the status line shows this filter's own broad-search note. */
+	private boolean searchStatusShown;
 	private final JComboBox<GuideRegistry.Entry> guideBox = new JComboBox<>();
 	/** Jump-to-bank dropdown: every bank in the guide, flat - no episode grouping. */
 	private final JComboBox<GuideBank> sectionBox = new JComboBox<>();
@@ -767,15 +769,32 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			boolean expand = budget > 0;
 			int matched = section.filter(q, expand);
-			budget -= matched;
-			if (matched > 0 && !expand)
+			if (matched > 0)
 			{
-				collapsedSome = true;
+				if (expand)
+				{
+					// expansion builds EVERY row of the section, matching or
+					// not - charge the budget what it actually costs, or a
+					// sparse query across many sections would build them all
+					budget -= section.stepCount();
+				}
+				else
+				{
+					collapsedSome = true;
+				}
 			}
 		}
 		if (!q.isEmpty() && collapsedSome)
 		{
 			setStatus("Broad search - later matching sections are shown collapsed");
+			searchStatusShown = true;
+		}
+		else if (searchStatusShown)
+		{
+			// reclaim only a status this filter itself put up - anything else
+			// showing (import warnings etc.) stays
+			setStatus(" ");
+			searchStatusShown = false;
 		}
 		// episode video rows have no steps to match - hide them while filtering
 		for (JPanel row : episodeVideoRows)
@@ -959,6 +978,13 @@ public class HcimGuidePanel extends PluginPanel
 					if (SwingUtilities.isLeftMouseButton(e))
 					{
 						setExpanded(!expanded);
+						// expanding an over-budget section mid-search builds
+						// its rows with default (all-visible) state - re-apply
+						// the filter so they match every other section
+						if (expanded && !searchField.getText().trim().isEmpty())
+						{
+							applyFilter();
+						}
 					}
 				}
 			});
@@ -1027,6 +1053,12 @@ public class HcimGuidePanel extends PluginPanel
 			headerPanel.setBorder(BorderFactory.createCompoundBorder(
 				BorderFactory.createMatteBorder(0, active ? 3 : 0, 0, 0, ColorScheme.BRAND_ORANGE),
 				BorderFactory.createEmptyBorder(5, active ? 3 : 6, 5, 6)));
+		}
+
+		/** Rows an expansion would build - what filtering actually costs. */
+		int stepCount()
+		{
+			return bank.getSteps().size();
 		}
 
 		/**
