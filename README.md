@@ -34,6 +34,25 @@ off in the settings.
 - Separate progress per character — if your hardcore dies, the new one starts fresh
 - Back up your progress to the clipboard and restore it anywhere
 
+### Using the guide on multiple computers
+
+Progress lives in RuneLite's own configuration, so RuneLite's account sync
+carries it between PCs:
+
+1. Sign into your **RuneLite account** (the profiles panel on the client's
+   login screen / sidebar) on each computer
+2. Per-character progress (the default) syncs automatically with the account
+3. For the plugin's settings and shared (non-per-character) progress too,
+   enable cloud sync on your configuration profile (the cloud icon in the
+   profiles panel)
+4. On a new computer the guide **text** still needs its one-click import —
+   guides are never downloaded without your confirmation, so the sidebar
+   simply offers the import button; your synced checkmarks apply the moment
+   it loads
+
+The clipboard progress code (above) remains as a manual fallback that works
+without a RuneLite account.
+
 ## Auto-completion
 
 - Steps check themselves off when the game confirms them: quests

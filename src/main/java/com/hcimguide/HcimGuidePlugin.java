@@ -49,6 +49,7 @@ import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.events.ProfileChanged;
 import net.runelite.client.events.RuneScapeProfileChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
@@ -1234,8 +1235,12 @@ public class HcimGuidePlugin extends Plugin
 	{
 		SwingUtilities.invokeLater(() -> panel.setStatus("Downloading full location database (one time)..."));
 		locationDbDownloader.download(
-			added -> SwingUtilities.invokeLater(() ->
-				panel.setStatus("Full database loaded: " + added + " new locations (your observed positions kept)")),
+			result -> SwingUtilities.invokeLater(() ->
+				panel.setStatus("Full database loaded: " + result.added
+					+ " new locations (your observed positions kept)"
+					+ (result.truncated
+						? " — source exceeded the safety cap and was TRUNCATED"
+						: ""))),
 			error -> SwingUtilities.invokeLater(() -> panel.setStatus(error)));
 	}
 
@@ -1352,12 +1357,14 @@ public class HcimGuidePlugin extends Plugin
 			{
 				return;
 			}
-			Guide guide = guideService.restorePrevious(guideId);
-			if (guide != null && guideId.equals(currentGuideId))
+			GuideService.RestoreResult restored = guideService.restorePrevious(guideId);
+			if (restored != null && guideId.equals(currentGuideId))
 			{
-				applyGuide(guide, "Previous guide snapshot restored");
+				applyGuide(restored.guide, restored.warning != null
+					? restored.warning
+					: "Previous guide snapshot restored");
 			}
-			else if (guide == null)
+			else if (restored == null)
 			{
 				SwingUtilities.invokeLater(() -> panel.setStatus("No previous snapshot to restore"));
 			}
@@ -1728,11 +1735,15 @@ public class HcimGuidePlugin extends Plugin
 			clearHudItems();
 			return;
 		}
-		if (first.getKey().equals(hudItemsKey))
+		// the resolver revision is part of the key: a name that resolves late
+		// (full-database scan) changes the revision, which re-resolves this
+		// same step's icons on the next tick without any explicit invalidation
+		String hudKey = first.getKey() + "@r" + iconResolver.revision();
+		if (hudKey.equals(hudItemsKey))
 		{
 			return;
 		}
-		hudItemsKey = first.getKey();
+		hudItemsKey = hudKey;
 		final List<ItemReq> reqs = stepItems.get(first.getKey());
 		if (reqs == null || reqs.isEmpty())
 		{
@@ -1821,9 +1832,19 @@ public class HcimGuidePlugin extends Plugin
 			itemSteps++;
 			for (ItemReq req : reqs)
 			{
-				if (!iconResolver.isKnownItem(req.getName()))
+				ItemIconResolver.ResolutionState state = iconResolver.stateOf(req.getName());
+				if (state == ItemIconResolver.ResolutionState.UNRESOLVABLE)
 				{
-					continue; // unverifiable free text - ignore
+					continue; // proven free text ("2 Food") - ignore
+				}
+				if (state == ItemIconResolver.ResolutionState.PENDING)
+				{
+					// might be a real item whose resolution hasn't finished -
+					// the truth isn't known, so never claim (or sound) ready.
+					// The prefetch path keeps the full scan running, so this
+					// resolves to RESOLVED or UNRESOLVABLE within moments.
+					complete = false;
+					break outer;
 				}
 				any = true;
 				if (inventory.countOf(req) < req.getQuantity())
@@ -1986,19 +2007,14 @@ public class HcimGuidePlugin extends Plugin
 			int[] ids = iconResolver.resolve(reqs);
 			grid.applyIcons(itemManager, reqs, ids);
 			// names the price search can't see (untradeables like talismans
-			// and quest amulets) get one chunked full-database scan; when it
-			// finds anything, EVERY consumer of resolved ids must refresh -
-			// not just the panel grids: the HUD strip caches by step key and
-			// the managed bank tag caches by signature, and neither key
-			// changes when a name resolves late
+			// and quest amulets) get one chunked full-database scan. The scan
+			// bumps the resolver revision, which the HUD key and bank-tag
+			// signature embed - so those refresh themselves on the next tick;
+			// only the already-built Swing grids need an explicit re-resolve
 			if (iconResolver.hasPendingScan())
 			{
 				iconResolver.scanFullDatabase(() ->
-				{
-					clearHudItems();
-					bankTagIntegration.invalidate();
-					SwingUtilities.invokeLater(() -> panel.reresolveIcons());
-				});
+					SwingUtilities.invokeLater(() -> panel.reresolveIcons()));
 			}
 		});
 	}
@@ -2525,6 +2541,26 @@ public class HcimGuidePlugin extends Plugin
 			lastRsProfileKey = profileKey;
 			autoSuppressed.clear();
 		}
+		SwingUtilities.invokeLater(() -> panel.refreshFromModel());
+	}
+
+	/**
+	 * The active RuneLite CONFIG profile changed underneath us: a profile
+	 * switch in the profile panel, or the cloud-synced profile merging in
+	 * when the user signs into their RuneLite account mid-session (this is
+	 * how progress follows the account across PCs - both regular and
+	 * per-character keys live in synced config). The in-memory progress
+	 * must reload from the new store immediately: keeping stale sets would
+	 * overwrite the freshly synced values on the next persist.
+	 */
+	@Subscribe
+	public void onProfileChanged(ProfileChanged event)
+	{
+		loadCompletedSteps();
+		loadSkippedSteps();
+		sectionNoticeResetPending = true; // store swap, not gameplay progress
+		activeBankDirty = true;
+		stepHighlightsDirty = true;
 		SwingUtilities.invokeLater(() -> panel.refreshFromModel());
 	}
 
@@ -3182,6 +3218,14 @@ public class HcimGuidePlugin extends Plugin
 			if (active)
 			{
 				iconResolver.resolve(reqsCopy);
+				// kick the full-database scan for names the price search
+				// missed even when no panel grid is open - trip-ready's
+				// PENDING state must always converge, sidebar or not
+				if (iconResolver.hasPendingScan())
+				{
+					iconResolver.scanFullDatabase(() ->
+						SwingUtilities.invokeLater(() -> panel.reresolveIcons()));
+				}
 			}
 		});
 	}
@@ -3212,7 +3256,11 @@ public class HcimGuidePlugin extends Plugin
 		final int maxItemSteps = 12;
 		int itemSteps = 0;
 		List<ItemReq> items = new ArrayList<>();
-		StringBuilder signature = new StringBuilder(active.getId());
+		// resolver revision in the signature: items that resolve after the tag
+		// was first built (untradeables found by the full scan) change the
+		// signature, so the managed tag rebuilds with the new ids
+		StringBuilder signature = new StringBuilder(active.getId())
+			.append("@r").append(iconResolver.revision());
 		for (GuideStep step : active.getSteps())
 		{
 			if (isStepDone(step.getKey()))
