@@ -183,41 +183,77 @@ public class GuideService
 		return guide;
 	}
 
+	/** Outcome of {@link #restorePrevious}: what happened, precisely. */
+	public static final class RestoreResult
+	{
+		/** The restored guide; never null in a returned result. */
+		final Guide guide;
+		/** Non-null when the restore itself landed but the swap-back didn't. */
+		final String warning;
+
+		private RestoreResult(Guide guide, String warning)
+		{
+			this.guide = guide;
+			this.warning = warning;
+		}
+	}
+
 	/**
 	 * Swaps a guide's stored snapshot with its previous one, if a backup
-	 * exists. Returns the restored guide, or null when there is nothing to
-	 * restore.
+	 * exists. Returns null only when nothing was restored (no backup, or it
+	 * no longer parses) - the on-disk state is untouched in that case. Both
+	 * replacement files are fully staged as temps BEFORE the first move, and
+	 * the SNAPSHOT is moved first: once it lands the restore has genuinely
+	 * happened, so a failure writing the old text back into the backup slot
+	 * is reported as a warning on a successful restore, never as "nothing
+	 * was restored" while the disk actually changed.
 	 */
-	public Guide restorePrevious(String guideId)
+	public RestoreResult restorePrevious(String guideId)
 	{
+		File snapshot = snapshotFile(guideId);
+		File backup = backupFile(guideId);
+		String backupText;
+		Guide guide;
+		String currentText;
 		try
 		{
-			File snapshot = snapshotFile(guideId);
-			File backup = backupFile(guideId);
 			if (!backup.isFile())
 			{
 				return null;
 			}
-			String backupText = readStoredText(backup);
-			Guide guide = parseGuide(backupText);
+			backupText = readStoredText(backup);
+			guide = parseGuide(backupText);
 			if (guide.isEmpty())
 			{
 				return null;
 			}
-			String currentText = snapshot.isFile()
-				? readStoredText(snapshot)
-				: null;
+			currentText = snapshot.isFile() ? readStoredText(snapshot) : null;
 			atomicWrite(snapshot, backupText.getBytes(StandardCharsets.UTF_8));
-			if (currentText != null)
-			{
-				atomicWrite(backup, currentText.getBytes(StandardCharsets.UTF_8));
-			}
-			return guide;
 		}
 		catch (Exception e)
 		{
+			// nothing moved yet (atomicWrite stages a temp and moves once):
+			// the stored state is intact and reporting "not restored" is true
 			log.warn("Failed to restore previous snapshot for guide {}", guideId, e);
 			return null;
+		}
+		if (currentText == null)
+		{
+			return new RestoreResult(guide, null);
+		}
+		try
+		{
+			atomicWrite(backup, currentText.getBytes(StandardCharsets.UTF_8));
+			return new RestoreResult(guide, null);
+		}
+		catch (Exception e)
+		{
+			// the restore DID land; only the swap-back failed. Say exactly that.
+			log.warn("Restored guide {} but could not write the swap-back backup", guideId, e);
+			return new RestoreResult(guide,
+				"Previous snapshot restored, but the replaced import could not be "
+					+ "kept as the new backup (" + e.getMessage() + ") - restoring "
+					+ "forward again may not be possible");
 		}
 	}
 
@@ -257,9 +293,12 @@ public class GuideService
 			@Override
 			public void onResponse(Call call, Response response)
 			{
+				// separate phases so a failure is reported as what it actually
+				// is - a read error must never surface as "Parse failed"
 				Guide guide = null;
 				String error = null;
 				String storageWarning = null;
+				String bodyText = null;
 				try (ResponseBody body = response.body())
 				{
 					if (!response.isSuccessful() || body == null)
@@ -268,43 +307,67 @@ public class GuideService
 					}
 					else
 					{
-						JsonObject root = gson.fromJson(readBounded(body), JsonObject.class);
-						String wikitext = extractWikiText(root);
+						bodyText = readBounded(body);
+					}
+				}
+				catch (Exception e)
+				{
+					log.warn("Reading wiki response failed", e);
+					error = "Could not read the wiki response: " + e.getMessage();
+				}
+
+				String wikitext = null;
+				if (error == null)
+				{
+					try
+					{
+						JsonObject root = gson.fromJson(bodyText, JsonObject.class);
+						wikitext = extractWikiText(root);
 						if (wikitext == null)
 						{
 							error = root != null && root.has("error")
 								? "Wiki page not found"
 								: "Unexpected wiki API response";
 						}
-						else
-						{
-							guide = parseGuide(wikitext);
-							if (guide.isEmpty())
-							{
-								guide = null;
-								error = "That page has no parseable guide steps";
-							}
-							else
-							{
-								try
-								{
-									saveSnapshot(guideId, wikitext);
-								}
-								catch (IOException e)
-								{
-									log.warn("Snapshot write failed", e);
-									storageWarning = "Guide imported but could NOT be saved to disk ("
-										+ e.getMessage() + ") - check free space/permissions on ~/.runelite; "
-										+ "it will need re-importing after a restart";
-								}
-							}
-						}
+					}
+					catch (Exception e)
+					{
+						log.warn("Wiki response was not valid JSON", e);
+						error = "Wiki response was not valid JSON";
 					}
 				}
-				catch (Exception e)
+
+				if (error == null)
 				{
-					log.warn("Guide parse failed", e);
-					error = "Parse failed: " + e.getMessage();
+					try
+					{
+						guide = parseGuide(wikitext);
+						if (guide.isEmpty())
+						{
+							guide = null;
+							error = "That page has no parseable guide steps";
+						}
+					}
+					catch (Exception e)
+					{
+						log.warn("Guide parse failed", e);
+						error = "Guide could not be parsed: " + e.getMessage();
+					}
+				}
+
+				if (guide != null)
+				{
+					try
+					{
+						saveSnapshot(guideId, wikitext);
+					}
+					catch (Exception e)
+					{
+						log.warn("Snapshot write failed", e);
+						storageWarning = "Guide imported but could NOT be saved to disk ("
+							+ e.getMessage() + ") - check free space/permissions on ~/.runelite; "
+							+ "it will need re-importing after a restart";
+					}
 				}
 
 				// exactly one callback fires, and a throwing consumer can't trigger the
@@ -392,9 +455,11 @@ public class GuideService
 			@Override
 			public void onResponse(Call call, Response response)
 			{
+				// same phase separation as fetch(): read, parse, persist
 				Guide guide = null;
 				String error = null;
 				String storageWarning = null;
+				String text = null;
 				try (ResponseBody body = response.body())
 				{
 					if (!response.isSuccessful() || body == null)
@@ -403,33 +468,46 @@ public class GuideService
 					}
 					else
 					{
-						String text = readBounded(body);
+						text = readBounded(body);
+					}
+				}
+				catch (Exception e)
+				{
+					log.warn("Reading guide response failed", e);
+					error = "Could not read the download: " + e.getMessage();
+				}
+
+				if (error == null)
+				{
+					try
+					{
 						guide = parseGuide(text);
 						if (guide.isEmpty())
 						{
 							guide = null;
 							error = "The downloaded guide has no parseable steps";
 						}
-						else
-						{
-							try
-							{
-								saveSnapshot(guideId, text);
-							}
-							catch (IOException e)
-							{
-								log.warn("Snapshot write failed", e);
-								storageWarning = "Guide imported but could NOT be saved to disk ("
-									+ e.getMessage() + ") - check free space/permissions on ~/.runelite; "
-									+ "it will need re-importing after a restart";
-							}
-						}
+					}
+					catch (Exception e)
+					{
+						log.warn("Guide parse failed", e);
+						error = "Guide could not be parsed: " + e.getMessage();
 					}
 				}
-				catch (Exception e)
+
+				if (guide != null)
 				{
-					log.warn("Guide parse failed", e);
-					error = "Parse failed: " + e.getMessage();
+					try
+					{
+						saveSnapshot(guideId, text);
+					}
+					catch (Exception e)
+					{
+						log.warn("Snapshot write failed", e);
+						storageWarning = "Guide imported but could NOT be saved to disk ("
+							+ e.getMessage() + ") - check free space/permissions on ~/.runelite; "
+							+ "it will need re-importing after a restart";
+					}
 				}
 
 				if (guide != null)
@@ -463,17 +541,51 @@ public class GuideService
 		}
 	}
 
+	/**
+	 * Stores the new snapshot, rotating the old one into the backup slot.
+	 * Both files are fully staged as temps BEFORE either move, so a failure
+	 * while preparing leaves the stored pair untouched. The backup rotates
+	 * first: if the snapshot move then fails, the pair is still consistent
+	 * (backup == the snapshot the user still has) and the thrown message
+	 * says precisely that - the old backup is gone but nothing is corrupt.
+	 */
 	private static void saveSnapshot(String guideId, String wikitext) throws IOException
 	{
 		validateGuideText(wikitext);
 		Files.createDirectories(GUIDES_DIR.toPath());
 		File snapshot = snapshotFile(guideId);
-		// keep the previous snapshot so a bad import can be undone
-		if (snapshot.isFile())
+		File backup = backupFile(guideId);
+		Path dir = GUIDES_DIR.toPath();
+		Path newSnapshot = Files.createTempFile(dir, snapshot.getName(), ".tmp");
+		Path newBackup = null;
+		try
 		{
-			copyAtomically(snapshot, backupFile(guideId));
+			Files.write(newSnapshot, wikitext.getBytes(StandardCharsets.UTF_8));
+			if (snapshot.isFile())
+			{
+				// keep the previous snapshot so a bad import can be undone
+				newBackup = Files.createTempFile(dir, backup.getName(), ".tmp");
+				Files.copy(snapshot.toPath(), newBackup, StandardCopyOption.REPLACE_EXISTING);
+				moveReplacing(newBackup, backup.toPath());
+			}
+			try
+			{
+				moveReplacing(newSnapshot, snapshot.toPath());
+			}
+			catch (IOException e)
+			{
+				throw new IOException("guide not saved (" + e.getMessage()
+					+ "); the backup slot now holds the still-current snapshot", e);
+			}
 		}
-		atomicWrite(snapshot, wikitext.getBytes(StandardCharsets.UTF_8));
+		finally
+		{
+			Files.deleteIfExists(newSnapshot);
+			if (newBackup != null)
+			{
+				Files.deleteIfExists(newBackup);
+			}
+		}
 	}
 
 	private static String readStoredText(File file) throws IOException
@@ -507,22 +619,6 @@ public class GuideService
 		}
 	}
 
-	private static void copyAtomically(File source, File target) throws IOException
-	{
-		Path directory = target.getParentFile().toPath();
-		Files.createDirectories(directory);
-		Path temp = Files.createTempFile(directory, target.getName(), ".tmp");
-		try
-		{
-			Files.copy(source.toPath(), temp, StandardCopyOption.REPLACE_EXISTING);
-			moveReplacing(temp, target.toPath());
-		}
-		finally
-		{
-			Files.deleteIfExists(temp);
-		}
-	}
-
 	private static void atomicWrite(File target, byte[] bytes) throws IOException
 	{
 		Path directory = target.getParentFile().toPath();
@@ -535,6 +631,8 @@ public class GuideService
 		}
 		finally
 		{
+			// after a successful move the temp path no longer exists and this
+			// is a no-op; it only ever deletes a leftover from a FAILED write
 			Files.deleteIfExists(temp);
 		}
 	}

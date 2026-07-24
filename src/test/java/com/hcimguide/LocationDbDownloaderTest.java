@@ -22,7 +22,9 @@ public class LocationDbDownloaderTest
 			+ "{\"name\": \"null\", \"p\": 0, \"x\": 5, \"y\": 5},"
 			+ "{\"name\": \"BadPlane\", \"p\": 9, \"x\": 5, \"y\": 5}"
 			+ "]";
-		Map<String, int[]> out = LocationDbDownloader.parse(new JsonReader(new StringReader(json)));
+		LocationDbDownloader.Parsed parsed =
+			LocationDbDownloader.parse(new JsonReader(new StringReader(json)));
+		Map<String, int[]> out = parsed.locations;
 
 		assertEquals(2, out.size());
 		assertArrayEquals(new int[]{3221, 3218, 0}, out.get("hans"));
@@ -30,11 +32,15 @@ public class LocationDbDownloaderTest
 		assertArrayEquals(new int[]{2696, 2709, 0}, out.get("bird"));
 		assertFalse(out.containsKey("null"));
 		assertFalse(out.containsKey("badplane"));
+		assertFalse(parsed.truncated);
 	}
 
 	@Test
 	public void handlesEmptyArray() throws Exception
 	{
-		assertEquals(0, LocationDbDownloader.parse(new JsonReader(new StringReader("[]"))).size());
+		LocationDbDownloader.Parsed parsed =
+			LocationDbDownloader.parse(new JsonReader(new StringReader("[]")));
+		assertEquals(0, parsed.locations.size());
+		assertFalse(parsed.truncated);
 	}
 }

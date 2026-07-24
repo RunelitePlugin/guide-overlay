@@ -59,14 +59,15 @@ public class LocationDbDownloader
 	}
 
 	/**
-	 * Exactly one of onSuccess (number of NEW locations added) / onError is
-	 * invoked, on an OkHttp worker thread. Parsing runs on that worker thread
-	 * DELIBERATELY: the reader streams straight off the socket (bounded by
-	 * MAX_BODY_BYTES), so the multi-MB file is never buffered whole, and the
-	 * store merge is thread-safe (putIfAbsent on a concurrent map). Nothing
-	 * here touches the client thread or the EDT.
+	 * Exactly one of onSuccess (what was added, and whether the source was
+	 * truncated at the safety cap) / onError is invoked, on an OkHttp worker
+	 * thread. Parsing runs on that worker thread DELIBERATELY: the reader
+	 * streams straight off the socket (bounded by MAX_BODY_BYTES), so the
+	 * multi-MB file is never buffered whole, and the store merge is
+	 * thread-safe (putIfAbsent on a concurrent map). Nothing here touches
+	 * the client thread or the EDT.
 	 */
-	public void download(Consumer<Integer> onSuccess, Consumer<String> onError)
+	public void download(Consumer<DownloadResult> onSuccess, Consumer<String> onError)
 	{
 		Request request = new Request.Builder()
 			.url(SOURCE_URL)
@@ -134,18 +135,18 @@ public class LocationDbDownloader
 							return r;
 						}
 					};
-					Map<String, int[]> parsed = parse(new JsonReader(
+					Parsed parsed = parse(new JsonReader(
 						new java.io.InputStreamReader(bounded, java.nio.charset.StandardCharsets.UTF_8)));
-					if (parsed.isEmpty())
+					if (parsed.locations.isEmpty())
 					{
 						safe(onError, "No usable locations in the dataset");
 						return;
 					}
-					int added = store.addNormalizedIfAbsent(parsed);
+					int added = store.addNormalizedIfAbsent(parsed.locations);
 					store.saveIfDirty();
 					try
 					{
-						onSuccess.accept(added);
+						onSuccess.accept(new DownloadResult(added, parsed.truncated));
 					}
 					catch (Exception e)
 					{
@@ -161,11 +162,39 @@ public class LocationDbDownloader
 		});
 	}
 
+	/** Streamed parse outcome: the entries, plus whether the cap cut the source. */
+	static final class Parsed
+	{
+		final Map<String, int[]> locations;
+		final boolean truncated;
+
+		Parsed(Map<String, int[]> locations, boolean truncated)
+		{
+			this.locations = locations;
+			this.truncated = truncated;
+		}
+	}
+
+	/** What a completed download did: how many entries landed, and honestly. */
+	public static final class DownloadResult
+	{
+		/** New locations actually added to the store. */
+		final int added;
+		/** True when the source held more entries than the safety cap kept. */
+		final boolean truncated;
+
+		DownloadResult(int added, boolean truncated)
+		{
+			this.added = added;
+			this.truncated = truncated;
+		}
+	}
+
 	/**
 	 * Streams the JSON array, keeping name/x/y/p per entry and skipping the
 	 * rest. First occurrence of each (normalized) name wins.
 	 */
-	static Map<String, int[]> parse(JsonReader reader) throws IOException
+	static Parsed parse(JsonReader reader) throws IOException
 	{
 		Map<String, int[]> out = new HashMap<>();
 		reader.beginArray();
@@ -220,7 +249,17 @@ public class LocationDbDownloader
 				}
 			}
 		}
-		return out;
+		// cap hit with entries remaining: skip to the array's actual end so
+		// the stream finishes in a defined state, and report the truncation
+		// instead of presenting a partial database as complete
+		boolean truncated = false;
+		while (reader.hasNext())
+		{
+			truncated = true;
+			reader.skipValue();
+		}
+		reader.endArray();
+		return new Parsed(out, truncated);
 	}
 
 	/** Reads an int, or consumes the value and returns fallback when it isn't one. */

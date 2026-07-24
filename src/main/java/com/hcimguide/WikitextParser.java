@@ -147,6 +147,15 @@ public class WikitextParser
 	 */
 	private static final int MAX_EPISODES = 500;
 	private static final int MAX_BANKS_PER_EPISODE = 500;
+	/**
+	 * Longest bullet line accepted as a step. Real steps are under ~1k chars;
+	 * a pathological megabyte line would otherwise flow through every
+	 * cleanup regex and into item parsing. Oversized lines are SKIPPED (and
+	 * the guide marked truncated), never shortened: a shortened text would
+	 * mint a different step key and silently orphan saved progress if the
+	 * source were ever fixed.
+	 */
+	private static final int MAX_STEP_SOURCE_CHARS = 4096;
 
 	private Guide parseInternal(String wikitext, boolean generic)
 	{
@@ -327,6 +336,11 @@ public class WikitextParser
 			if (b.matches() && episode != null)
 			{
 				if (totalSteps >= MAX_STEPS)
+				{
+					guide.markTruncated();
+					continue;
+				}
+				if (line.length() > MAX_STEP_SOURCE_CHARS)
 				{
 					guide.markTruncated();
 					continue;

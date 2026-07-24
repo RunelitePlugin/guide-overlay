@@ -117,6 +117,27 @@ public class ItemIconResolver
 		new java.util.concurrent.atomic.AtomicBoolean();
 	private static final int SCAN_CHUNK = 2000;
 
+	/**
+	 * Bumped whenever any name changes resolution state (a new id lands in
+	 * the cache, or a completed scan condemns names as unresolvable).
+	 * Consumers that cache resolved ids (HUD item strip, managed bank tag)
+	 * fold this into their cache keys/signatures, so a late resolution
+	 * refreshes them without any explicit invalidation call.
+	 */
+	private final java.util.concurrent.atomic.AtomicInteger revision =
+		new java.util.concurrent.atomic.AtomicInteger();
+
+	/** What the resolver currently knows about a requirement name. */
+	public enum ResolutionState
+	{
+		/** Maps to a real item id (curated, cached, or via alias). */
+		RESOLVED,
+		/** Unknown so far, but a full-database scan is still owed. */
+		PENDING,
+		/** A completed full scan covered this name and found nothing: free text. */
+		UNRESOLVABLE
+	}
+
 	@Inject
 	public ItemIconResolver(ItemManager itemManager, net.runelite.api.Client client,
 		net.runelite.client.callback.ClientThread clientThread)
@@ -175,8 +196,12 @@ public class ItemIconResolver
 		// loaded yet, and re-searching on a later rebuild is cheap
 		if (id > 0)
 		{
-			cache.put(key, id);
-			cache.put(lookupKey, id);
+			boolean inserted = cache.put(key, id) == null;
+			inserted |= cache.put(lookupKey, id) == null;
+			if (inserted)
+			{
+				revision.incrementAndGet();
+			}
 		}
 		else if (!unresolvable.contains(lookupKey))
 		{
@@ -192,30 +217,40 @@ public class ItemIconResolver
 		return !pendingScan.isEmpty();
 	}
 
+	/** Monotonic resolution-state revision - see the field for the contract. */
+	public int revision()
+	{
+		return revision.get();
+	}
+
 	/**
-	 * True when the name maps to a REAL item as far as we can currently tell:
-	 * a curated known id, or a previously resolved cache entry (directly or
-	 * via its colloquial alias). Cheap map lookups only - no searching - so
-	 * it's safe on the client thread every tick. Used to keep unverifiable
-	 * free text ("2 Food") from blocking the trip-ready check.
+	 * The name's current resolution state. Cheap map lookups only - no
+	 * searching - so it's safe on the client thread every tick. Trip-ready
+	 * uses this three ways: RESOLVED counts against the inventory, PENDING
+	 * blocks a "ready" verdict (the truth isn't known yet, so never claim
+	 * or sound it), and UNRESOLVABLE is ignored as free text ("2 Food") -
+	 * but only ever after a completed full scan actually proved it.
 	 */
-	public boolean isKnownItem(String name)
+	public ResolutionState stateOf(String name)
 	{
 		if (name == null)
 		{
-			return false;
+			return ResolutionState.UNRESOLVABLE;
 		}
 		if (byKnownId(name) > 0)
 		{
-			return true;
+			return ResolutionState.RESOLVED;
 		}
 		String key = ItemReq.normalize(name);
-		if (cache.containsKey(key))
-		{
-			return true;
-		}
 		String canonical = ItemAliases.canonical(key);
-		return canonical != null && cache.containsKey(ItemReq.normalize(canonical));
+		String lookupKey = canonical != null ? ItemReq.normalize(canonical) : key;
+		if (cache.containsKey(key) || cache.containsKey(lookupKey))
+		{
+			return ResolutionState.RESOLVED;
+		}
+		return unresolvable.contains(lookupKey)
+			? ResolutionState.UNRESOLVABLE
+			: ResolutionState.PENDING;
 	}
 
 	/**
@@ -315,8 +350,14 @@ public class ItemIconResolver
 		}
 		// done: only names this scan ACTUALLY covered and didn't find are
 		// declared nonexistent; anything added mid-scan stays pending
+		boolean condemnedAny = !targets.isEmpty();
 		unresolvable.addAll(targets);
 		pendingScan.removeAll(targets);
+		if (found || condemnedAny)
+		{
+			// PENDING names moved to RESOLVED or UNRESOLVABLE
+			revision.incrementAndGet();
+		}
 		scanRunning.set(false);
 		if (found && onComplete != null)
 		{

@@ -373,7 +373,9 @@ public class NpcLocationStore
 			return;
 		}
 		// clear BEFORE snapshotting: a learn() landing mid-save re-marks dirty
-		// and gets picked up by the next save instead of being lost
+		// and gets picked up by the next save instead of being lost. (Its
+		// entry may ALSO already be in this save's snapshot - the cost is one
+		// harmless redundant save, never a lost write.)
 		dirty = false;
 		try
 		{

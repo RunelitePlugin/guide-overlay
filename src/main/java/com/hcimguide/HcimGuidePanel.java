@@ -51,6 +51,15 @@ public class HcimGuidePanel extends PluginPanel
 	private final JLabel targetLabel = new JLabel(" ");
 	private final JProgressBar overallProgress = new JProgressBar();
 	private final JTextField searchField = new JTextField();
+	/** One pending filter run per typing burst; restart() supersedes the last. */
+	private final javax.swing.Timer searchDebounce =
+		new javax.swing.Timer(200, e -> applyFilter());
+	/**
+	 * Matching steps beyond this many are shown as visible-but-collapsed
+	 * sections instead of force-built rows: a broad query over a 2,000+ step
+	 * guide must not construct thousands of Swing rows in one EDT pass.
+	 */
+	private static final int SEARCH_EXPAND_BUDGET = 400;
 	private final JComboBox<GuideRegistry.Entry> guideBox = new JComboBox<>();
 	/** Jump-to-bank dropdown: every bank in the guide, flat - no episode grouping. */
 	private final JComboBox<GuideBank> sectionBox = new JComboBox<>();
@@ -67,6 +76,7 @@ public class HcimGuidePanel extends PluginPanel
 		super(false);
 		this.plugin = plugin;
 		this.config = config;
+		searchDebounce.setRepeats(false);
 
 		setLayout(new BorderLayout(0, 0));
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -126,24 +136,26 @@ public class HcimGuidePanel extends PluginPanel
 		header.add(Box.createVerticalStrut(4));
 
 		searchField.setToolTipText("Search steps");
+		// debounced: each keystroke restarts the timer, so only the final
+		// state of a fast-typed query pays the filter/row-build cost
 		searchField.getDocument().addDocumentListener(new DocumentListener()
 		{
 			@Override
 			public void insertUpdate(DocumentEvent e)
 			{
-				applyFilter();
+				searchDebounce.restart();
 			}
 
 			@Override
 			public void removeUpdate(DocumentEvent e)
 			{
-				applyFilter();
+				searchDebounce.restart();
 			}
 
 			@Override
 			public void changedUpdate(DocumentEvent e)
 			{
-				applyFilter();
+				searchDebounce.restart();
 			}
 		});
 		header.add(searchField);
@@ -746,9 +758,24 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			q = "";
 		}
+		// row-building budget: matching sections beyond it stay visible but
+		// collapsed (expandable by hand), so one broad query can't stall the
+		// EDT constructing every row in the guide
+		int budget = SEARCH_EXPAND_BUDGET;
+		boolean collapsedSome = false;
 		for (BankSection section : bankSections)
 		{
-			section.filter(q);
+			boolean expand = budget > 0;
+			int matched = section.filter(q, expand);
+			budget -= matched;
+			if (matched > 0 && !expand)
+			{
+				collapsedSome = true;
+			}
+		}
+		if (!q.isEmpty() && collapsedSome)
+		{
+			setStatus("Broad search - later matching sections are shown collapsed");
 		}
 		// episode video rows have no steps to match - hide them while filtering
 		for (JPanel row : episodeVideoRows)
@@ -1002,7 +1029,15 @@ public class HcimGuidePanel extends PluginPanel
 				BorderFactory.createEmptyBorder(5, active ? 3 : 6, 5, 6)));
 		}
 
-		void filter(String query)
+		/**
+		 * Applies the search query and returns how many steps matched.
+		 * Matching runs against the MODEL, so unbuilt (collapsed) sections
+		 * are searched without constructing their rows; only when
+		 * {@code expand} is true does a matching section actually build and
+		 * show its rows - the panel budgets that across sections, leaving
+		 * the tail of a very broad query visible but collapsed.
+		 */
+		int filter(String query, boolean expand)
 		{
 			if (query.isEmpty())
 			{
@@ -1011,29 +1046,38 @@ public class HcimGuidePanel extends PluginPanel
 				{
 					row.setVisible(true);
 				}
-				return;
+				return 0;
 			}
-			// match against the MODEL so unbuilt (collapsed) sections can be
-			// searched without constructing their rows
-			boolean any = false;
+			int matched = 0;
 			for (GuideStep step : bank.getSteps())
 			{
 				if (step.getText().toLowerCase(Locale.ROOT).contains(query))
 				{
-					any = true;
-					break;
+					matched++;
 				}
 			}
-			setVisible(any);
-			if (!any)
+			setVisible(matched > 0);
+			if (matched == 0)
 			{
-				return;
+				return 0;
 			}
-			setExpanded(true); // builds rows on demand, only for matching sections
-			for (StepRow row : rows)
+			if (expand)
 			{
-				row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
+				setExpanded(true); // builds rows on demand
+				for (StepRow row : rows)
+				{
+					row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
+				}
 			}
+			else if (expanded)
+			{
+				// over budget but the rows already exist: still filter them
+				for (StepRow row : rows)
+				{
+					row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
+				}
+			}
+			return matched;
 		}
 
 		private void bulk(boolean completed)
@@ -1365,9 +1409,12 @@ public class HcimGuidePanel extends PluginPanel
 		return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
 	}
 
+	private static final java.util.regex.Pattern TRAILING_COLON_WS =
+		java.util.regex.Pattern.compile("[:\\s]+$");
+
 	private static String shortTitle(String s)
 	{
-		String t = s.replaceAll("[:\\s]+$", "");
+		String t = TRAILING_COLON_WS.matcher(s).replaceAll("");
 		return t.length() <= 20 ? t : t.substring(0, 19) + "…";
 	}
 }

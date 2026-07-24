@@ -29,6 +29,9 @@ final class DialogSequenceParser
 	private static final Pattern NAME_BEFORE = Pattern.compile(
 		"([A-Z][A-Za-z'’-]*(?:\\s+(?:(?:of|the)\\s+)?[A-Z][A-Za-z'’-]*)*)\\s*$");
 
+	/** The SEQ regex admits at most twelve entries, so this stays tiny. */
+	private static final Pattern COMMA = Pattern.compile(",");
+
 	/** Names max out at 32 chars; 48 leaves room for connectors. */
 	private static final int NAME_WINDOW = 48;
 
@@ -48,7 +51,7 @@ final class DialogSequenceParser
 		{
 			return null;
 		}
-		String[] parts = m.group(1).split(",");
+		String[] parts = COMMA.split(m.group(1));
 		int[] seq = new int[parts.length];
 		for (int i = 0; i < parts.length; i++)
 		{

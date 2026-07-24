@@ -156,7 +156,7 @@ public class GuideRegistry
 						// a tampered/corrupted registry must never yield a path like
 						// "../../x"
 						if (e != null && e.id != null && e.title != null && !e.isBuiltin()
-							&& e.id.matches("[a-z0-9-]{1,64}"))
+							&& GUIDE_ID.matcher(e.id).matches())
 						{
 							e.title = sanitizeTitle(e.title); // defense on read too
 							e.sourceUrl = null; // user entries can never carry a raw URL
@@ -273,9 +273,18 @@ public class GuideRegistry
 		return null;
 	}
 
+	/** Same shape GuideService enforces: ids become file names and config keys. */
+	private static final java.util.regex.Pattern GUIDE_ID =
+		java.util.regex.Pattern.compile("[a-z0-9-]{1,64}");
+	private static final java.util.regex.Pattern NON_SLUG =
+		java.util.regex.Pattern.compile("[^a-z0-9]+");
+	private static final java.util.regex.Pattern SLUG_EDGE_DASH =
+		java.util.regex.Pattern.compile("(^-|-$)");
+
 	private static String slug(String s)
 	{
-		String slug = s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-").replaceAll("(^-|-$)", "");
+		String slug = NON_SLUG.matcher(s.toLowerCase(Locale.ROOT)).replaceAll("-");
+		slug = SLUG_EDGE_DASH.matcher(slug).replaceAll("");
 		return slug.isEmpty() ? "guide" : (slug.length() > 60 ? slug.substring(0, 60) : slug);
 	}
 }
