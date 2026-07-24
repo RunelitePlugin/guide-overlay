@@ -175,11 +175,13 @@ public class HudOverlay extends OverlayPanel
 				.build());
 		}
 
-		String locationSummary = plugin.getActiveLocationSummary();
+		String locationSummary = plugin.getActiveLocationSummarySnapshot();
 		if (locationSummary != null && config.showLocationConfidence())
 		{
+			// ASCII prefix on purpose: U+2316 (⌖) is missing from the
+			// RuneScape physical fonts and would render as a box there
 			panelComponent.getChildren().add(LineComponent.builder()
-				.left("⌖ " + locationSummary)
+				.left("@ " + locationSummary)
 				.leftColor(ROUTE_COLOR)
 				.build());
 		}

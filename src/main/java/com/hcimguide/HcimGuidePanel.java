@@ -421,7 +421,7 @@ public class HcimGuidePanel extends PluginPanel
 
 		JMenuItem exportCustom = new JMenuItem("Export custom pins to file...");
 		exportCustom.addActionListener(e -> saveTextFile("custom-locations.json",
-			plugin.exportCustomLocations()));
+			plugin::exportCustomLocations));
 		menu.add(exportCustom);
 
 		JMenuItem importCustom = new JMenuItem("Import custom pins from clipboard...");
@@ -457,7 +457,7 @@ public class HcimGuidePanel extends PluginPanel
 
 		JMenuItem exportAudit = new JMenuItem("Export unresolved location audit...");
 		exportAudit.addActionListener(e -> saveTextFile("unresolved-location-audit.md",
-			plugin.exportLocationAudit()));
+			plugin::exportLocationAudit));
 		menu.add(exportAudit);
 
 		JMenuItem importProgress = new JMenuItem("Import progress from clipboard...");
@@ -489,7 +489,13 @@ public class HcimGuidePanel extends PluginPanel
 		return menu;
 	}
 
-	private void saveTextFile(String suggestedName, String text)
+	/**
+	 * File chooser on the EDT (fast), then CONTENT GENERATION and the disk
+	 * write on the plugin executor: the audit walks thousands of steps and
+	 * the pin export serializes the whole store - neither may stall Swing,
+	 * so the supplier is only ever evaluated off the EDT.
+	 */
+	private void saveTextFile(String suggestedName, java.util.function.Supplier<String> text)
 	{
 		JFileChooser chooser = new JFileChooser();
 		chooser.setDialogTitle("Save " + suggestedName);
@@ -498,16 +504,31 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			return;
 		}
-		try
+		java.io.File file = chooser.getSelectedFile();
+		setStatus("Saving " + file.getName() + "…");
+		plugin.runOffEdt(() ->
 		{
-			java.nio.file.Files.write(chooser.getSelectedFile().toPath(),
-				text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-			setStatus("Saved " + chooser.getSelectedFile().getName());
-		}
-		catch (java.io.IOException ex)
-		{
-			setStatus("Save failed: " + ex.getMessage());
-		}
+			String content;
+			try
+			{
+				content = text.get();
+			}
+			catch (RuntimeException ex)
+			{
+				SwingUtilities.invokeLater(() -> setStatus("Export failed: " + ex.getMessage()));
+				return;
+			}
+			try
+			{
+				java.nio.file.Files.write(file.toPath(),
+					content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+				SwingUtilities.invokeLater(() -> setStatus("Saved " + file.getName()));
+			}
+			catch (java.io.IOException ex)
+			{
+				SwingUtilities.invokeLater(() -> setStatus("Save failed: " + ex.getMessage()));
+			}
+		});
 	}
 
 	// ---------------------------------------------------------------- API used by plugin
@@ -633,7 +654,9 @@ public class HcimGuidePanel extends PluginPanel
 	void onPinChanged(String newTargetName)
 	{
 		refreshAllPinButtons();
-		String summary = plugin.getActiveLocationSummary();
+		// snapshot, not the live computation - this runs on the EDT and the
+		// live path walks client-thread state
+		String summary = plugin.getActiveLocationSummarySnapshot();
 		setTargetStatus(summary != null ? summary : newTargetName, false);
 	}
 

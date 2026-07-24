@@ -15,11 +15,14 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.config.ConfigManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Profile-scoped user location overrides and active waypoint indexes. */
 @Singleton
 final class CustomLocationStore
 {
+	private static final Logger log = LoggerFactory.getLogger(CustomLocationStore.class);
 	private static final String GROUP = HcimGuideConfig.GROUP;
 	private static final String LOCATION_KEY = "customLocationsV1";
 	private static final String INDEX_KEY = "waypointIndexesV1";
@@ -42,9 +45,52 @@ final class CustomLocationStore
 
 	synchronized StepLocationPlan getPlan(String guideId, String stepKey)
 	{
-		Root root = readRoot();
-		Map<String, StoredStep> guide = root.guides.get(guideId);
-		StoredStep stored = guide == null ? null : guide.get(stepKey);
+		Map<String, StoredStep> guide = readRoot().guides.get(guideId);
+		return toPlan(guideId, stepKey, guide == null ? null : guide.get(stepKey));
+	}
+
+	/**
+	 * Every stored plan for one guide, parsed from config in ONE pass. The
+	 * plan-rebuild path iterates a whole guide (thousands of steps); calling
+	 * {@link #getPlan} per step would deserialize the full stored blob once
+	 * per step, which a large import turns into minutes of client work.
+	 */
+	synchronized Map<String, StepLocationPlan> getPlansForGuide(String guideId)
+	{
+		Map<String, StepLocationPlan> out = new HashMap<>();
+		Map<String, StoredStep> guide = readRoot().guides.get(guideId);
+		if (guide == null)
+		{
+			return out;
+		}
+		for (Map.Entry<String, StoredStep> entry : guide.entrySet())
+		{
+			StepLocationPlan plan = toPlan(guideId, entry.getKey(), entry.getValue());
+			if (plan != null)
+			{
+				out.put(entry.getKey(), plan);
+			}
+		}
+		return out;
+	}
+
+	/** All persisted waypoint indexes for one guide, keyed by step key - one parse. */
+	synchronized Map<String, Integer> getActiveIndexesForGuide(String guideId)
+	{
+		Map<String, Integer> out = new HashMap<>();
+		String prefix = indexKey(guideId, "");
+		for (Map.Entry<String, Integer> entry : readIndexes().entrySet())
+		{
+			if (entry.getKey().startsWith(prefix))
+			{
+				out.put(entry.getKey().substring(prefix.length()), Math.max(0, entry.getValue()));
+			}
+		}
+		return out;
+	}
+
+	private StepLocationPlan toPlan(String guideId, String stepKey, StoredStep stored)
+	{
 		if (stored == null || stored.waypoints == null || stored.waypoints.isEmpty())
 		{
 			return null;
@@ -320,8 +366,16 @@ final class CustomLocationStore
 	private Root readRoot()
 	{
 		String json = readConfig(LOCATION_KEY);
-		if (json == null || json.isEmpty() || json.length() > MAX_JSON_CHARS)
+		if (json == null || json.isEmpty())
 		{
+			return new Root();
+		}
+		if (json.length() > MAX_JSON_CHARS)
+		{
+			// never treat an oversized stored blob as empty silently - the
+			// next write would then WIPE it. Reads degrade to empty (the
+			// data is unusable anyway), but say so in the log.
+			log.warn("Stored custom locations exceed the size cap ({} chars) - ignoring them", json.length());
 			return new Root();
 		}
 		try
@@ -405,7 +459,11 @@ final class CustomLocationStore
 		}
 		else
 		{
-			configManager.setConfiguration(GROUP, key, value);
+			// no character profile yet (login screen): refuse rather than
+			// write into the GLOBAL config, where the pins would bleed into
+			// every character that has no profile-scoped blob of its own
+			throw new IllegalStateException(
+				"Log into a character before editing custom locations");
 		}
 	}
 

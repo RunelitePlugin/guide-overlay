@@ -1,6 +1,6 @@
 # Guide Overlay
 
-**Current release: 1.5.0**
+**Current release: 1.5.2**
 
 **OSRS guides as a checklist inside RuneLite — no more alt-tabbing to the wiki.**
 

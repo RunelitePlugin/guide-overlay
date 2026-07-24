@@ -221,6 +221,12 @@ public class HcimGuidePlugin extends Plugin
 	 * forward for consecutive local actions.
 	 */
 	private volatile Map<String, StepLocationPlan> stepLocationPlans = Collections.emptyMap();
+	/**
+	 * The planner's AUTOMATIC output, before custom-pin overrides. Kept so a
+	 * pin mutation can restore or overlay a single step without re-running
+	 * the whole planner (~1s on a 2,300-step guide) on the client thread.
+	 */
+	private volatile Map<String, StepLocationPlan> baseLocationPlans = Collections.emptyMap();
 	/** Versioned cache metadata; prevents reparsing a loaded guide until a real input changes. */
 	private volatile Guide locationPlanCacheGuide;
 	private volatile String locationPlanCacheGuideId;
@@ -1614,16 +1620,24 @@ public class HcimGuidePlugin extends Plugin
 		}
 		Map<String, StepLocationPlan> built = new HashMap<>(StepLocationPlanner.buildPlans(
 			guide, targets, placeDirectory, transportResolver, locationStore::lookup));
-		for (GuideEpisode episode : guide.getEpisodes())
+		baseLocationPlans = Collections.unmodifiableMap(new HashMap<>(built));
+		// custom overrides: fetched in ONE store parse - per-step getPlan()
+		// would deserialize the whole stored blob once per step
+		Map<String, StepLocationPlan> customPlans =
+			customLocationStore.getPlansForGuide(currentGuideId);
+		if (!customPlans.isEmpty())
 		{
-			for (GuideBank bank : episode.getBanks())
+			for (GuideEpisode episode : guide.getEpisodes())
 			{
-				for (GuideStep step : bank.getSteps())
+				for (GuideBank bank : episode.getBanks())
 				{
-					StepLocationPlan custom = customLocationStore.getPlan(currentGuideId, step.getKey());
-					if (custom != null)
+					for (GuideStep step : bank.getSteps())
 					{
-						built.put(step.getKey(), custom);
+						StepLocationPlan custom = customPlans.get(step.getKey());
+						if (custom != null)
+						{
+							built.put(step.getKey(), custom);
+						}
 					}
 				}
 			}
@@ -1644,12 +1658,14 @@ public class HcimGuidePlugin extends Plugin
 		{
 			return;
 		}
+		// one store parse for the whole guide, not one per plan entry
+		Map<String, Integer> saved = customLocationStore.getActiveIndexesForGuide(currentGuideId);
 		for (Map.Entry<String, StepLocationPlan> entry : plans.entrySet())
 		{
-			int saved = customLocationStore.getActiveIndex(currentGuideId, entry.getKey());
-			if (saved > 0 && saved < entry.getValue().size())
+			Integer index = saved.get(entry.getKey());
+			if (index != null && index > 0 && index < entry.getValue().size())
 			{
-				activeWaypointIndexes.put(entry.getKey(), saved);
+				activeWaypointIndexes.put(entry.getKey(), index);
 			}
 		}
 	}
@@ -2706,7 +2722,15 @@ public class HcimGuidePlugin extends Plugin
 		loadCompletedSteps();
 		loadSkippedSteps();
 		customLocationStore.invalidate();
-		rebuildLocationPlans();
+		// the full rebuild runs the planner (~1s on big guides): never on the
+		// client thread, which this event handler is dispatched on
+		executor.execute(() ->
+		{
+			if (active)
+			{
+				rebuildLocationPlans();
+			}
+		});
 		// only reset the manual-untick suppression when this is really a
 		// DIFFERENT character - relogging the same character must not let
 		// previously unticked steps re-auto-complete ("manual always wins")
@@ -2734,7 +2758,15 @@ public class HcimGuidePlugin extends Plugin
 		loadCompletedSteps();
 		loadSkippedSteps();
 		customLocationStore.invalidate();
-		rebuildLocationPlans();
+		// the full rebuild runs the planner (~1s on big guides): never on the
+		// client thread, which this event handler is dispatched on
+		executor.execute(() ->
+		{
+			if (active)
+			{
+				rebuildLocationPlans();
+			}
+		});
 		sectionNoticeResetPending = true; // store swap, not gameplay progress
 		activeBankDirty = true;
 		stepHighlightsDirty = true;
@@ -3011,7 +3043,12 @@ public class HcimGuidePlugin extends Plugin
 			|| key.startsWith("skippedSteps")
 			|| "selectedGuide".equals(key)
 			|| "guides".equals(key)
-			|| "fullDbPrompted".equals(key))
+			|| "fullDbPrompted".equals(key)
+			// the plugin's own custom-location persistence: waypoint
+			// navigation writes these every advance - don't re-run the
+			// generic config reaction for our own bulk writes
+			|| "customLocationsV1".equals(key)
+			|| "waypointIndexesV1".equals(key))
 		{
 			return;
 		}
@@ -3139,6 +3176,8 @@ public class HcimGuidePlugin extends Plugin
 		updateSectionCompleteNotice();
 		// dialogue-choice guidance: which option to outline right now
 		updateDialogHighlight();
+		// summary snapshot for the EDT/overlays (client-thread state inside)
+		activeLocationSummarySnapshot = getActiveLocationSummary();
 
 		if (tickCounter % EVAL_INTERVAL_TICKS == 0)
 		{
@@ -4213,6 +4252,18 @@ public class HcimGuidePlugin extends Plugin
 		return "Waypoint " + (index + 1) + "/" + plan.size();
 	}
 
+	/**
+	 * Per-tick snapshot of {@link #getActiveLocationSummary()}. The live
+	 * computation walks client-thread state (active bank cache), so the EDT
+	 * and overlay renders read this instead of recomputing.
+	 */
+	private volatile String activeLocationSummarySnapshot;
+
+	String getActiveLocationSummarySnapshot()
+	{
+		return activeLocationSummarySnapshot;
+	}
+
 	String getActiveLocationSummary()
 	{
 		StepLocationHint hint = resolveStepLocation(guidedStepKey());
@@ -4425,7 +4476,7 @@ public class HcimGuidePlugin extends Plugin
 			{
 				customLocationStore.replace(currentGuideId, stepKey, label, point);
 			}
-			rebuildLocationPlans();
+			republishStepPlan(stepKey);
 			StepLocationPlan plan = getStepPlan(stepKey);
 			if (plan != null && append)
 			{
@@ -4471,8 +4522,20 @@ public class HcimGuidePlugin extends Plugin
 			{
 				try
 				{
+					// the index was captured before the dialog blocked - a
+					// reorder or auto-advance meanwhile could have moved it.
+					// Re-validate by label so the rename can't hit a
+					// different waypoint than the one the user was shown.
+					StepLocationPlan livePlan = getStepPlan(key);
+					if (livePlan == null || index >= livePlan.size()
+						|| !livePlan.get(index).getLabel().equals(current))
+					{
+						SwingUtilities.invokeLater(() ->
+							panel.setStatus("Waypoints changed while renaming - try again"));
+						return;
+					}
 					customLocationStore.rename(currentGuideId, key, index, label);
-					rebuildLocationPlans();
+					republishStepPlan(key);
 					SwingUtilities.invokeLater(() -> panel.setStatus("Waypoint renamed"));
 				}
 				catch (RuntimeException ex)
@@ -4497,12 +4560,19 @@ public class HcimGuidePlugin extends Plugin
 			SwingUtilities.invokeLater(() -> panel.setStatus("This step has no custom waypoint to reorder"));
 			return;
 		}
-		int moved = customLocationStore.move(currentGuideId, key, activeWaypointIndex(key, plan), direction);
-		rebuildLocationPlans();
-		activeWaypointIndexes.put(key, moved);
-		clearLocationSuppression();
-		routeDirty = true;
-		SwingUtilities.invokeLater(() -> panel.setStatus("Custom waypoint reordered"));
+		try
+		{
+			int moved = customLocationStore.move(currentGuideId, key, activeWaypointIndex(key, plan), direction);
+			republishStepPlan(key);
+			activeWaypointIndexes.put(key, moved);
+			clearLocationSuppression();
+			routeDirty = true;
+			SwingUtilities.invokeLater(() -> panel.setStatus("Custom waypoint reordered"));
+		}
+		catch (RuntimeException ex)
+		{
+			SwingUtilities.invokeLater(() -> panel.setStatus("Reorder failed: " + ex.getMessage()));
+		}
 	}
 
 	void removeActiveCustomWaypoint()
@@ -4519,12 +4589,19 @@ public class HcimGuidePlugin extends Plugin
 			SwingUtilities.invokeLater(() -> panel.setStatus("This step has no custom waypoint to remove"));
 			return;
 		}
-		int next = customLocationStore.removeWaypoint(currentGuideId, key, activeWaypointIndex(key, plan));
-		rebuildLocationPlans();
-		activeWaypointIndexes.put(key, next);
-		clearLocationSuppression();
-		routeDirty = true;
-		SwingUtilities.invokeLater(() -> panel.setStatus("Custom waypoint removed"));
+		try
+		{
+			int next = customLocationStore.removeWaypoint(currentGuideId, key, activeWaypointIndex(key, plan));
+			republishStepPlan(key);
+			activeWaypointIndexes.put(key, next);
+			clearLocationSuppression();
+			routeDirty = true;
+			SwingUtilities.invokeLater(() -> panel.setStatus("Custom waypoint removed"));
+		}
+		catch (RuntimeException ex)
+		{
+			SwingUtilities.invokeLater(() -> panel.setStatus("Remove failed: " + ex.getMessage()));
+		}
 	}
 
 	void clearCustomPinForCurrentStep()
@@ -4539,10 +4616,29 @@ public class HcimGuidePlugin extends Plugin
 		{
 			return;
 		}
-		customLocationStore.clear(currentGuideId, key);
-		rebuildLocationPlans();
-		clearLocationSuppression();
-		SwingUtilities.invokeLater(() -> panel.setStatus("Automatic destination restored"));
+		try
+		{
+			customLocationStore.clear(currentGuideId, key);
+			republishStepPlan(key);
+			clearLocationSuppression();
+			SwingUtilities.invokeLater(() -> panel.setStatus("Automatic destination restored"));
+		}
+		catch (RuntimeException ex)
+		{
+			SwingUtilities.invokeLater(() -> panel.setStatus("Restore failed: " + ex.getMessage()));
+		}
+	}
+
+	/** Run panel-initiated work on the plugin executor, never the EDT. */
+	void runOffEdt(Runnable work)
+	{
+		executor.execute(() ->
+		{
+			if (active)
+			{
+				work.run();
+			}
+		});
 	}
 
 	String exportCustomLocations()
@@ -4595,7 +4691,62 @@ public class HcimGuidePlugin extends Plugin
 		Map<String, StepLocationPlan> rebuilt = buildStepLocations(guide, stepTargets);
 		stepLocationPlans = rebuilt;
 		loadWaypointIndexes(rebuilt);
-		waypointArrivalTracker.reset();
+		resetWaypointTrackerOnClientThread();
+	}
+
+	/**
+	 * Publish ONE step's plan after a custom-pin mutation. Pin edits never
+	 * change the planner's automatic output, so re-running the full planner
+	 * (a client-thread freeze on big guides) is never needed: copy the
+	 * published map, merge that step's custom plan (or restore its automatic
+	 * one), publish. The plan cache's custom-revision watermark is advanced
+	 * so the next full rebuild check stays coherent.
+	 */
+	private void republishStepPlan(String stepKey)
+	{
+		if (stepKey == null || currentGuide == null)
+		{
+			return;
+		}
+		Map<String, StepLocationPlan> copy = new HashMap<>(stepLocationPlans);
+		StepLocationPlan custom = customLocationStore.getPlan(currentGuideId, stepKey);
+		StepLocationPlan base = baseLocationPlans.get(stepKey);
+		if (custom != null)
+		{
+			copy.put(stepKey, custom);
+		}
+		else if (base != null)
+		{
+			copy.put(stepKey, base);
+		}
+		else
+		{
+			copy.remove(stepKey);
+		}
+		Map<String, StepLocationPlan> published = Collections.unmodifiableMap(copy);
+		stepLocationPlans = published;
+		locationPlanCacheCustomRevision = customLocationStore.getRevision();
+		// the mutated step's saved waypoint index may now be out of range
+		StepLocationPlan plan = published.get(stepKey);
+		Integer index = activeWaypointIndexes.get(stepKey);
+		if (plan == null || (index != null && index >= plan.size()))
+		{
+			activeWaypointIndexes.remove(stepKey);
+		}
+		resetWaypointTrackerOnClientThread();
+	}
+
+	/** The arrival tracker is game-tick state: mutate it on that thread only. */
+	private void resetWaypointTrackerOnClientThread()
+	{
+		if (client.isClientThread())
+		{
+			waypointArrivalTracker.reset();
+		}
+		else
+		{
+			clientThread.invokeLater(waypointArrivalTracker::reset);
+		}
 	}
 
 	/** Pin a step: track its NPC/item/place destination. Pass null to unpin. */

@@ -12,7 +12,9 @@ import net.runelite.api.coords.WorldPoint;
 /** Builds cached single- or multi-waypoint plans for every guide step. */
 final class StepLocationPlanner
 {
-	static final int RESOLVER_VERSION = 2;
+	static final int RESOLVER_VERSION = 3;
+	/** Inherited-context steps beyond this run length are LOW confidence. */
+	private static final int LOW_CONFIDENCE_CHAIN_LENGTH = 5;
 	private static final Pattern WAYPOINT_BREAK = Pattern.compile(
 		"(?i)\\s*(?:->|→|;|\\bthen\\b|\\bafter(?:wards| that)?\\b|\\bnext\\s+(?:go|head|run|walk|travel|teleport|take)\\b|\\bfollowed by\\b)\\s*");
 	private static final Pattern RELATIVE_ONLY = Pattern.compile(
@@ -64,6 +66,7 @@ final class StepLocationPlanner
 			for (GuideBank bank : episode.getBanks())
 			{
 				StepLocationHint context = null;
+				int inheritedRun = 0;
 				for (GuideStep step : bank.getSteps())
 				{
 					String text = step.getText() == null ? "" : step.getText();
@@ -75,16 +78,28 @@ final class StepLocationPlanner
 							resolution.reason, resolution.candidates);
 						out.put(step.getKey(), plan);
 						context = resolution.waypoints.get(resolution.waypoints.size() - 1);
+						inheritedRun = 0;
 					}
 					else if (resolution.breaksContext)
 					{
 						context = null;
+						inheritedRun = 0;
 						out.put(step.getKey(), new StepLocationPlan(step.getKey(), Collections.emptyList(),
 							resolution.reason, resolution.candidates));
 					}
 					else if (context != null)
 					{
+						// the further an inherited destination is carried, the
+						// less likely the player is still headed there - long
+						// chains are honestly LOW confidence, which is what the
+						// hide-low-confidence option and audit table act on
+						inheritedRun++;
 						StepLocationHint inherited = context.inferredCopy();
+						if (inheritedRun > LOW_CONFIDENCE_CHAIN_LENGTH)
+						{
+							inherited = inherited.withSource(
+								LocationSource.INHERITED_CONTEXT, LocationConfidence.LOW);
+						}
 						out.put(step.getKey(), new StepLocationPlan(step.getKey(),
 							Collections.singletonList(inherited)));
 					}

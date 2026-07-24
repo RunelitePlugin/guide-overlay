@@ -69,6 +69,11 @@ final class LocationSuppressionState
 		{
 			return true;
 		}
+		// DELIBERATE ASYMMETRY with hide()/updatePlayer(), which are
+		// horizontal-only: equivalence here still requires the same plane.
+		// A different-identity destination on another storey is treated as a
+		// different place and un-hides; same-identity follow-ups (the common
+		// inherited-context case) match above regardless of plane.
 		StepLocationHint hidden = StepLocationHint.manual(identity,
 			"Suppressed destination", point, Math.max(1, equivalentRadius));
 		return hidden.equivalentTo(hint, equivalentRadius);
