@@ -1,6 +1,6 @@
 # Guide Overlay
 
-**Current release: 1.5.2**
+**Current release: 1.5.3**
 
 **OSRS guides as a checklist inside RuneLite — no more alt-tabbing to the wiki.**
 
@@ -21,7 +21,9 @@ off in the settings.
 - Long guide paragraphs are split into one action per step, so nothing
   gets cut off and every action is its own checkbox
 - Steps that reference a video guide get a ▶ button (and a right-click
-  option) that opens the YouTube/Streamable link in your browser
+  option) that opens the YouTube/Streamable link in your browser; sections
+  with their own video guide show a "▶ Section video guide" link under
+  their steps, plus a ▶ on the section header
 - Progress saves automatically and keeps across sessions
 - Search your guide, or jump straight to your next unchecked step
 - When a finished bank auto-collapses, the next one opens and scrolls into

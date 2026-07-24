@@ -1152,6 +1152,23 @@ public class HcimGuidePanel extends PluginPanel
 				body.add(row, gbc);
 				gbc.gridy++;
 			}
+			// the section's video guide as a visible row under the steps, not
+			// only the small header ▶ - in the wiki the video sits right under
+			// the section's content, so this is where users look for it
+			if (bank.getVideoUrl() != null)
+			{
+				JButton link = new JButton("▶ Section video guide");
+				link.setToolTipText("Open in browser: " + bank.getVideoUrl());
+				link.setHorizontalAlignment(JButton.LEFT);
+				link.setBorderPainted(false);
+				link.setContentAreaFilled(false);
+				link.setFocusPainted(false);
+				link.setForeground(ColorScheme.BRAND_ORANGE);
+				link.setFont(FontManager.getRunescapeSmallFont());
+				link.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+				link.addActionListener(e -> LinkBrowser.browse(bank.getVideoUrl()));
+				body.add(link, gbc);
+			}
 		}
 
 		boolean isComplete()
