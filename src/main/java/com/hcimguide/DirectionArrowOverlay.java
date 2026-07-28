@@ -15,29 +15,22 @@ import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
 
 /**
- * Compass widget shown when the tracked target is known but too far away to
- * be in the loaded scene: an arrow pointing toward the target (relative to
- * the current camera rotation) with an optional tile distance underneath.
- * Points at the pinned step's target; with nothing pinned it falls back to
- * the next unchecked step's known location (config-gated), so the compass
- * is there whenever the guide knows where you're headed. Dial and needle
- * style are configurable (full dial or bare arrow; triangle or tailed).
+ * Compass widget pointing toward the exact destination currently handed to
+ * Shortest Path (relative to the current camera rotation), with an optional
+ * tile distance underneath. This keeps the compass present for every located
+ * step using Shortest Path, even when its destination is inside the loaded
+ * scene. Without an active Shortest Path hand-off it falls back to the tracked
+ * far target, then to the next unchecked step's known location when configured.
+ * Dial and needle style are configurable (full dial or bare arrow; triangle
+ * or tailed).
  *
  * Deliberately unobtrusive: small by default, semi-transparent (opacity
- * configurable), only visible while a far-away target is active, and movable
- * anywhere on screen with Alt+drag like any RuneLite overlay. Cheap: a
- * handful of trig ops and one polygon per frame.
+ * configurable), and movable anywhere on screen with Alt+drag like any
+ * RuneLite overlay. Cheap: a handful of trig ops and one polygon per frame.
  */
 public class DirectionArrowOverlay extends Overlay
 {
 	private static final int TEXT_HEIGHT = 14;
-
-	/**
-	 * The next-step fallback only engages beyond this 2D tile distance:
-	 * within it, an out-of-scene result usually means a plane mismatch
-	 * (target upstairs), where a compass would just point at the floor.
-	 */
-	private static final int MIN_FALLBACK_DISTANCE = 40;
 
 	private final Client client;
 	private final HcimGuidePlugin plugin;
@@ -65,24 +58,28 @@ public class DirectionArrowOverlay extends Overlay
 		{
 			return null; // checked FIRST: the fallback below must not run without a player
 		}
-		WorldPoint target = plugin.getFarTarget();
-		// nothing pinned: fall back to the NEXT unchecked step's known target
-		// (config-gated), but only when it's genuinely far - nearby targets are
-		// already handled by highlights and the hint arrow, and fromWorld also
-		// returns null for a mere PLANE mismatch (target upstairs), where a
-		// "2 tiles north" compass would mislead. Never while something IS
-		// pinned: the next-step point isn't refreshed then.
+		// Prefer the exact tile already accepted by the Shortest Path hand-off.
+		// In particular, do not recompute from a live NPC here: the pathfinder
+		// deliberately applies a movement deadband, and the compass must agree
+		// with the path it actually drew rather than point a tile or two away.
+		WorldPoint target = selectPrimaryTarget(
+			plugin.getShortestPathTarget(), plugin.getFarTarget());
+		// No active path/far target: fall back to the NEXT unchecked step's
+		// known target (config-gated). The fallback remains limited to a target
+		// outside the loaded scene or on another floor so nearby locations are
+		// handled by the scene arrow unless Shortest Path is actively guiding
+		// them.
 		if (target == null && config.compassNextStep() && !plugin.hasPinnedTarget())
 		{
 			WorldPoint next = plugin.getNextStepPoint();
 			if (next != null
-				&& next.distanceTo2D(player.getWorldLocation()) > MIN_FALLBACK_DISTANCE
-				&& net.runelite.api.coords.LocalPoint.fromWorld(client.getTopLevelWorldView(), next) == null)
+				&& (next.getPlane() != player.getWorldLocation().getPlane()
+					|| net.runelite.api.coords.LocalPoint.fromWorld(client.getTopLevelWorldView(), next) == null))
 			{
 				target = next;
 			}
 		}
-		if (target == null)
+		if (target == null || !plugin.allowCompassGuidance(target))
 		{
 			return null;
 		}
@@ -90,6 +87,17 @@ public class DirectionArrowOverlay extends Overlay
 		int dx = target.getX() - me.getX();
 		int dy = target.getY() - me.getY();
 		int distance = (int) Math.round(Math.hypot(dx, dy));
+		// a target on another floor gets an explicit floor cue instead of a
+		// misleading flat bearing to a spot the player may be standing on
+		int planeDelta = target.getPlane() - me.getPlane();
+		// standing ON the destination tile, same floor: there is no bearing to
+		// draw (atan2(0,0) would render an arbitrary north needle over
+		// "0 tiles"), and nothing useful to say - hide until there is one.
+		// Reachable since the compass follows in-scene path targets.
+		if (distance == 0 && planeDelta == 0)
+		{
+			return null;
+		}
 
 		// world bearing (0 = north, clockwise), then rotate into screen space
 		// using the camera yaw. Current clients report yaw in 16384 JAU per
@@ -100,7 +108,7 @@ public class DirectionArrowOverlay extends Overlay
 		double screenAngle = worldAngle + cameraRad;
 
 		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-		OverlayFonts.apply(g, config.overlayFontStyle());
+		OverlayFonts.apply(g, config);
 
 		final int size = config.compassSize();
 		final double opacity = config.compassOpacity() / 100.0;
@@ -109,7 +117,9 @@ public class DirectionArrowOverlay extends Overlay
 		int cx = size / 2;
 		int cy = size / 2;
 		int r = size / 2 - 3;
-		Color accent = withOpacity(config.highlightColor(), opacity);
+		// the compass has its own colour so it can be told apart from the NPC
+		// outline, which is what highlightColor drives
+		Color accent = withOpacity(config.compassColor(), opacity);
 
 		if (config.compassShowRing())
 		{
@@ -142,7 +152,22 @@ public class DirectionArrowOverlay extends Overlay
 
 		if (showDistance)
 		{
-			String label = distance + " tiles";
+			String label;
+			if (planeDelta != 0 && distance == 0)
+			{
+				// standing on the target's tile with the target on another
+				// floor: a "0 tiles" bearing is meaningless - show only the
+				// floor cue
+				label = planeDelta > 0 ? "above" : "below";
+			}
+			else if (planeDelta != 0)
+			{
+				label = distance + " tiles " + (planeDelta > 0 ? "(above)" : "(below)");
+			}
+			else
+			{
+				label = distance + " tiles";
+			}
 			int w = g.getFontMetrics().stringWidth(label);
 			int tx = Math.max(0, (size - w) / 2);
 			g.setColor(withOpacity(Color.BLACK, opacity));
@@ -152,6 +177,12 @@ public class DirectionArrowOverlay extends Overlay
 		}
 
 		return new Dimension(size, size + (showDistance ? TEXT_HEIGHT : 0));
+	}
+
+	/** Prefer the destination actually represented by Shortest Path. */
+	static WorldPoint selectPrimaryTarget(WorldPoint shortestPathTarget, WorldPoint farTarget)
+	{
+		return shortestPathTarget != null ? shortestPathTarget : farTarget;
 	}
 
 	/** Filled triangular arrowhead with its tip at (tipX, tipY). */

@@ -52,7 +52,25 @@ public class BankTagIntegration
 	 * orphaned by a crashed session even when no active bank exists yet.
 	 */
 	private volatile String syncedBankId = "!invalidated!";
+	/**
+	 * What the last successful apply actually wrote: the resolved id list
+	 * plus the layout flags in effect. A signature change (e.g. a global
+	 * resolver-revision bump from an UNRELATED section's items resolving)
+	 * often re-resolves to exactly this - then the whole client-thread
+	 * mutation is skipped, most importantly the visible openBankTag re-open
+	 * that would reset the user's bank scroll mid-banking. Null = must
+	 * apply (never applied, invalidated, or the previous apply failed).
+	 */
+	private volatile String lastAppliedState;
 	private volatile boolean tagHasItems;
+	/**
+	 * Advances on {@link #cleanup()} - the activation boundary (shutdown,
+	 * startup scrub, feature toggled off). A bankId compare alone cannot tell
+	 * an in-flight request from a PREVIOUS activation apart from current work
+	 * when the new activation re-requests the same bank; the epoch can. Work
+	 * stamped with an older epoch declines at every hop.
+	 */
+	private final java.util.concurrent.atomic.AtomicLong epoch = new java.util.concurrent.atomic.AtomicLong();
 
 	@Inject
 	public BankTagIntegration(TagManager tagManager, BankTagsService bankTagsService,
@@ -81,14 +99,16 @@ public class BankTagIntegration
 			return;
 		}
 		syncedBankId = bankId;
+		final long requestEpoch = epoch.get();
 		final List<ItemReq> itemsCopy = items == null ? new ArrayList<>() : new ArrayList<>(items);
-		executor.execute(() -> sync(bankId, itemsCopy));
+		executor.execute(() -> sync(requestEpoch, bankId, itemsCopy));
 	}
 
-	private void sync(String bankId, List<ItemReq> items)
+	private void sync(long requestEpoch, String bankId, List<ItemReq> items)
 	{
-		// somebody re-requested meanwhile; let the newest request win
-		if (!Objects.equals(bankId, syncedBankId))
+		// somebody re-requested meanwhile, or a cleanup ended the activation
+		// this request belongs to; let the newest request win
+		if (requestEpoch != epoch.get() || !Objects.equals(bankId, syncedBankId))
 		{
 			return;
 		}
@@ -99,16 +119,19 @@ public class BankTagIntegration
 		final Set<Integer> distinct = new LinkedHashSet<>();
 		if (bankId != null && !items.isEmpty())
 		{
-			int[] ids = iconResolver.resolve(items);
-			for (int id : ids)
+			for (ItemReq req : items)
 			{
-				if (id > 0)
+				for (int id : iconResolver.resolveAll(req))
 				{
 					distinct.add(id);
 					if (distinct.size() >= maxTagItems)
 					{
 						break;
 					}
+				}
+				if (distinct.size() >= maxTagItems)
+				{
+					break;
 				}
 			}
 		}
@@ -118,9 +141,15 @@ public class BankTagIntegration
 		{
 			try
 			{
-				if (!Objects.equals(bankId, syncedBankId))
+				if (requestEpoch != epoch.get() || !Objects.equals(bankId, syncedBankId))
 				{
 					return;
+				}
+				String stateKey = distinct + "|" + config.bankTagUseLayout()
+					+ "|" + config.bankTagStepOrder();
+				if (stateKey.equals(lastAppliedState))
+				{
+					return; // content-identical - nothing to rewrite or re-open
 				}
 				tagManager.removeTag(TAG);
 				for (int id : distinct)
@@ -155,6 +184,7 @@ public class BankTagIntegration
 						}
 					}
 				}
+				lastAppliedState = stateKey;
 			}
 			catch (Exception e)
 			{
@@ -167,6 +197,7 @@ public class BankTagIntegration
 					syncedBankId = "!invalidated!";
 					tagHasItems = false;
 				}
+				lastAppliedState = null;
 				log.warn("Bank tag sync failed", e);
 			}
 		});
@@ -186,10 +217,15 @@ public class BankTagIntegration
 		// let the built-in Bank Tag Layouts arrange the tab unless the user
 		// disabled it (then force a plain grid via OPTION_NO_LAYOUT)
 		final int options = config.bankTagUseLayout() ? 0 : BankTagsService.OPTION_NO_LAYOUT;
+		final long requestEpoch = epoch.get();
 		clientThread.invokeLater(() ->
 		{
 			try
 			{
+				if (requestEpoch != epoch.get())
+				{
+					return; // a cleanup removed the tag while this was queued
+				}
 				bankTagsService.openBankTag(TAG, options);
 			}
 			catch (Exception e)
@@ -207,8 +243,10 @@ public class BankTagIntegration
 	 */
 	public void cleanup()
 	{
+		epoch.incrementAndGet(); // everything queued before this is now stale
 		syncedBankId = null;
 		tagHasItems = false;
+		lastAppliedState = null;
 		clientThread.invokeLater(() ->
 		{
 			try
@@ -231,6 +269,7 @@ public class BankTagIntegration
 	public void invalidate()
 	{
 		syncedBankId = "!invalidated!"; // can never equal a real signature
+		lastAppliedState = null;        // and re-APPLY even identical content
 	}
 
 	/** Remove the generated step-order layout (the tag itself is untouched). */

@@ -1,0 +1,1121 @@
+[
+  {
+    "name": "Tithe Farm",
+    "aliases": [
+      "tithe farm",
+      "tithe farm minigame"
+    ],
+    "x": 1801,
+    "y": 3505,
+    "plane": 0
+  },
+  {
+    "name": "Lumbridge",
+    "aliases": [
+      "lumbridge",
+      "lumby"
+    ],
+    "x": 3222,
+    "y": 3218,
+    "plane": 0
+  },
+  {
+    "name": "Lumbridge Castle",
+    "aliases": [
+      "lumbridge castle",
+      "lumbridge castle bank",
+      "lumbridge bank"
+    ],
+    "x": 3208,
+    "y": 3218,
+    "plane": 0
+  },
+  {
+    "name": "Lumbridge Swamp",
+    "aliases": [
+      "lumbridge swamp"
+    ],
+    "x": 3202,
+    "y": 3169,
+    "plane": 0
+  },
+  {
+    "name": "Draynor Village",
+    "aliases": [
+      "draynor",
+      "draynor village"
+    ],
+    "x": 3105,
+    "y": 3251,
+    "plane": 0
+  },
+  {
+    "name": "Draynor Village Bank",
+    "aliases": [
+      "draynor bank",
+      "draynor village bank"
+    ],
+    "x": 3092,
+    "y": 3245,
+    "plane": 0
+  },
+  {
+    "name": "Wizards' Tower",
+    "aliases": [
+      "wizard's tower",
+      "wizards' tower",
+      "wizards tower",
+      "wizard tower"
+    ],
+    "x": 3113,
+    "y": 3179,
+    "plane": 0
+  },
+  {
+    "name": "Port Sarim",
+    "aliases": [
+      "port sarim"
+    ],
+    "x": 3047,
+    "y": 3236,
+    "plane": 0
+  },
+  {
+    "name": "Falador",
+    "aliases": [
+      "falador",
+      "fally"
+    ],
+    "x": 2964,
+    "y": 3378,
+    "plane": 0
+  },
+  {
+    "name": "Falador East Bank",
+    "aliases": [
+      "falador east bank",
+      "fally east bank"
+    ],
+    "x": 3012,
+    "y": 3355,
+    "plane": 0
+  },
+  {
+    "name": "Falador West Bank",
+    "aliases": [
+      "falador west bank",
+      "fally west bank"
+    ],
+    "x": 2946,
+    "y": 3369,
+    "plane": 0
+  },
+  {
+    "name": "Falador Park",
+    "aliases": [
+      "falador park",
+      "fally park"
+    ],
+    "x": 2995,
+    "y": 3375,
+    "plane": 0
+  },
+  {
+    "name": "Crafting Guild",
+    "aliases": [
+      "crafting guild"
+    ],
+    "x": 2933,
+    "y": 3295,
+    "plane": 0
+  },
+  {
+    "name": "Taverley",
+    "aliases": [
+      "taverley"
+    ],
+    "x": 2894,
+    "y": 3454,
+    "plane": 0
+  },
+  {
+    "name": "Burthorpe",
+    "aliases": [
+      "burthorpe",
+      "burthorpe games room",
+      "games room"
+    ],
+    "x": 2898,
+    "y": 3553,
+    "plane": 0
+  },
+  {
+    "name": "Warriors' Guild",
+    "aliases": [
+      "warriors' guild",
+      "warriors guild"
+    ],
+    "x": 2882,
+    "y": 3548,
+    "plane": 0
+  },
+  {
+    "name": "Varrock",
+    "aliases": [
+      "varrock"
+    ],
+    "x": 3212,
+    "y": 3424,
+    "plane": 0
+  },
+  {
+    "name": "Varrock East Bank",
+    "aliases": [
+      "varrock east bank",
+      "varrock eastbank",
+      "east varrock bank"
+    ],
+    "x": 3253,
+    "y": 3420,
+    "plane": 0
+  },
+  {
+    "name": "Varrock West Bank",
+    "aliases": [
+      "varrock west bank",
+      "varrock westbank",
+      "west varrock bank"
+    ],
+    "x": 3185,
+    "y": 3441,
+    "plane": 0
+  },
+  {
+    "name": "Varrock Palace",
+    "aliases": [
+      "varrock palace"
+    ],
+    "x": 3210,
+    "y": 3470,
+    "plane": 0
+  },
+  {
+    "name": "Lumber Yard",
+    "aliases": [
+      "lumber yard",
+      "varrock lumber yard"
+    ],
+    "x": 3308,
+    "y": 3491,
+    "plane": 0
+  },
+  {
+    "name": "Champions' Guild",
+    "aliases": [
+      "champions' guild",
+      "champions guild"
+    ],
+    "x": 3191,
+    "y": 3363,
+    "plane": 0
+  },
+  {
+    "name": "Cooks' Guild",
+    "aliases": [
+      "cooks' guild",
+      "cooks guild",
+      "cooking guild"
+    ],
+    "x": 3143,
+    "y": 3444,
+    "plane": 0
+  },
+  {
+    "name": "Edgeville",
+    "aliases": [
+      "edgeville"
+    ],
+    "x": 3087,
+    "y": 3496,
+    "plane": 0
+  },
+  {
+    "name": "Edgeville Monastery",
+    "aliases": [
+      "edgeville monastery"
+    ],
+    "x": 3052,
+    "y": 3488,
+    "plane": 0
+  },
+  {
+    "name": "Grand Exchange",
+    "aliases": [
+      "grand exchange",
+      "the ge"
+    ],
+    "x": 3164,
+    "y": 3487,
+    "plane": 0
+  },
+  {
+    "name": "Al Kharid",
+    "aliases": [
+      "al kharid"
+    ],
+    "x": 3293,
+    "y": 3163,
+    "plane": 0
+  },
+  {
+    "name": "Emir's Arena",
+    "aliases": [
+      "emir's arena",
+      "emirs arena",
+      "duel arena"
+    ],
+    "x": 3316,
+    "y": 3235,
+    "plane": 0
+  },
+  {
+    "name": "Shantay Pass",
+    "aliases": [
+      "shantay pass"
+    ],
+    "x": 3304,
+    "y": 3117,
+    "plane": 0
+  },
+  {
+    "name": "Karamja",
+    "aliases": [
+      "karamja",
+      "musa point"
+    ],
+    "x": 2918,
+    "y": 3176,
+    "plane": 0
+  },
+  {
+    "name": "Brimhaven",
+    "aliases": [
+      "brimhaven"
+    ],
+    "x": 2774,
+    "y": 3177,
+    "plane": 0
+  },
+  {
+    "name": "Catherby",
+    "aliases": [
+      "catherby"
+    ],
+    "x": 2804,
+    "y": 3434,
+    "plane": 0
+  },
+  {
+    "name": "Camelot",
+    "aliases": [
+      "camelot"
+    ],
+    "x": 2757,
+    "y": 3479,
+    "plane": 0
+  },
+  {
+    "name": "Seers' Village",
+    "aliases": [
+      "seers' village",
+      "seers village"
+    ],
+    "x": 2725,
+    "y": 3491,
+    "plane": 0
+  },
+  {
+    "name": "Fishing Guild",
+    "aliases": [
+      "fishing guild"
+    ],
+    "x": 2611,
+    "y": 3390,
+    "plane": 0
+  },
+  {
+    "name": "Barbarian Outpost",
+    "aliases": [
+      "barbarian outpost",
+      "barbarian assault"
+    ],
+    "x": 2520,
+    "y": 3571,
+    "plane": 0
+  },
+  {
+    "name": "Tree Gnome Stronghold",
+    "aliases": [
+      "tree gnome stronghold",
+      "gnome stronghold",
+      "grand tree"
+    ],
+    "x": 2465,
+    "y": 3495,
+    "plane": 0
+  },
+  {
+    "name": "Tree Gnome Village",
+    "aliases": [
+      "tree gnome village",
+      "gnome village"
+    ],
+    "x": 2528,
+    "y": 3167,
+    "plane": 0
+  },
+  {
+    "name": "Castle Wars",
+    "aliases": [
+      "castle wars"
+    ],
+    "x": 2440,
+    "y": 3089,
+    "plane": 0
+  },
+  {
+    "name": "The Outpost",
+    "aliases": [
+      "the outpost",
+      "kandarin outpost"
+    ],
+    "x": 2430,
+    "y": 3348,
+    "plane": 0
+  },
+  {
+    "name": "Ardougne",
+    "aliases": [
+      "ardougne",
+      "east ardougne",
+      "ardy"
+    ],
+    "x": 2661,
+    "y": 3300,
+    "plane": 0
+  },
+  {
+    "name": "Ardougne North Bank",
+    "aliases": [
+      "ardougne north bank",
+      "ardy north bank",
+      "north ardougne bank"
+    ],
+    "x": 2616,
+    "y": 3332,
+    "plane": 0
+  },
+  {
+    "name": "Ardougne South Bank",
+    "aliases": [
+      "ardougne south bank",
+      "ardy south bank",
+      "south ardougne bank"
+    ],
+    "x": 2652,
+    "y": 3283,
+    "plane": 0
+  },
+  {
+    "name": "Ardougne Zoo",
+    "aliases": [
+      "ardougne zoo",
+      "ardy zoo"
+    ],
+    "x": 2611,
+    "y": 3277,
+    "plane": 0
+  },
+  {
+    "name": "Ardougne Monastery",
+    "aliases": [
+      "ardougne monastery",
+      "ardy monastery",
+      "kandarin monastery"
+    ],
+    "x": 2606,
+    "y": 3210,
+    "plane": 0
+  },
+  {
+    "name": "Hemenster",
+    "aliases": [
+      "hemenster"
+    ],
+    "x": 2635,
+    "y": 3437,
+    "plane": 0
+  },
+  {
+    "name": "McGrubor's Wood",
+    "aliases": [
+      "mcgrubor's wood",
+      "mcgrubors wood"
+    ],
+    "x": 2658,
+    "y": 3488,
+    "plane": 0
+  },
+  {
+    "name": "Waterfall",
+    "aliases": [
+      "waterfall quest area",
+      "baxtorian waterfall",
+      "waterfall quest"
+    ],
+    "x": 2512,
+    "y": 3493,
+    "plane": 0
+  },
+  {
+    "name": "Hosidius",
+    "aliases": [
+      "hosidius",
+      "hosidius square"
+    ],
+    "x": 1744,
+    "y": 3597,
+    "plane": 0
+  },
+  {
+    "name": "Hosidius South",
+    "aliases": [
+      "hosidius south",
+      "hosidius south minecart"
+    ],
+    "x": 1808,
+    "y": 3478,
+    "plane": 0
+  },
+  {
+    "name": "Woodcutting Guild",
+    "aliases": [
+      "woodcutting guild",
+      "wc guild"
+    ],
+    "x": 1662,
+    "y": 3505,
+    "plane": 0
+  },
+  {
+    "name": "Kourend Castle",
+    "aliases": [
+      "kourend castle"
+    ],
+    "x": 1643,
+    "y": 3673,
+    "plane": 0
+  },
+  {
+    "name": "Port Piscarilius",
+    "aliases": [
+      "port piscarilius",
+      "piscarilius",
+      "piscarillius"
+    ],
+    "x": 1804,
+    "y": 3739,
+    "plane": 0
+  },
+  {
+    "name": "Lovakengj",
+    "aliases": [
+      "lovakengj"
+    ],
+    "x": 1504,
+    "y": 3816,
+    "plane": 0
+  },
+  {
+    "name": "Arceuus",
+    "aliases": [
+      "arceuus"
+    ],
+    "x": 1680,
+    "y": 3744,
+    "plane": 0
+  },
+  {
+    "name": "Shayzien",
+    "aliases": [
+      "shayzien",
+      "shayzien encampment"
+    ],
+    "x": 1480,
+    "y": 3635,
+    "plane": 0
+  },
+  {
+    "name": "Land's End",
+    "aliases": [
+      "land's end",
+      "lands end"
+    ],
+    "x": 1504,
+    "y": 3415,
+    "plane": 0
+  },
+  {
+    "name": "Farming Guild",
+    "aliases": [
+      "farming guild"
+    ],
+    "x": 1248,
+    "y": 3726,
+    "plane": 0
+  },
+  {
+    "name": "Wintertodt Camp",
+    "aliases": [
+      "wintertodt",
+      "wintertodt camp"
+    ],
+    "x": 1624,
+    "y": 3938,
+    "plane": 0
+  },
+  {
+    "name": "Ferox Enclave",
+    "aliases": [
+      "ferox enclave",
+      "ferox"
+    ],
+    "x": 3151,
+    "y": 3635,
+    "plane": 0
+  },
+  {
+    "name": "Fossil Island",
+    "aliases": [
+      "fossil island"
+    ],
+    "x": 3740,
+    "y": 3808,
+    "plane": 0
+  },
+  {
+    "name": "Digsite",
+    "aliases": [
+      "digsite",
+      "the dig site"
+    ],
+    "x": 3345,
+    "y": 3445,
+    "plane": 0
+  },
+  {
+    "name": "Fossil Island Mushroom Meadow",
+    "aliases": [
+      "mushroom meadow"
+    ],
+    "x": 3674,
+    "y": 3856,
+    "plane": 0
+  },
+  {
+    "name": "Fossil Island Verdant Valley",
+    "aliases": [
+      "verdant valley"
+    ],
+    "x": 3764,
+    "y": 3755,
+    "plane": 0
+  },
+  {
+    "name": "Zanaris",
+    "aliases": [
+      "zanaris"
+    ],
+    "x": 2412,
+    "y": 4434,
+    "plane": 0
+  },
+  {
+    "name": "Port Phasmatys",
+    "aliases": [
+      "port phasmatys"
+    ],
+    "x": 3660,
+    "y": 3524,
+    "plane": 0
+  },
+  {
+    "name": "Canifis",
+    "aliases": [
+      "canifis"
+    ],
+    "x": 3496,
+    "y": 3487,
+    "plane": 0
+  },
+  {
+    "name": "Morytania Slayer Tower",
+    "aliases": [
+      "slayer tower",
+      "morytania slayer tower"
+    ],
+    "x": 3428,
+    "y": 3535,
+    "plane": 0
+  },
+  {
+    "name": "Mort'ton",
+    "aliases": [
+      "mort'ton",
+      "morton"
+    ],
+    "x": 3488,
+    "y": 3289,
+    "plane": 0
+  },
+  {
+    "name": "Nardah",
+    "aliases": [
+      "nardah"
+    ],
+    "x": 3424,
+    "y": 2918,
+    "plane": 0
+  },
+  {
+    "name": "Pollnivneach",
+    "aliases": [
+      "pollnivneach"
+    ],
+    "x": 3359,
+    "y": 2970,
+    "plane": 0
+  },
+  {
+    "name": "Quarry",
+    "aliases": [
+      "desert quarry",
+      "sandstone quarry"
+    ],
+    "x": 3166,
+    "y": 2912,
+    "plane": 0
+  },
+  {
+    "name": "Rogues' Den",
+    "aliases": [
+      "rogues' den",
+      "rogues den"
+    ],
+    "x": 3046,
+    "y": 4972,
+    "plane": 1
+  },
+  {
+    "name": "H.A.M. Hideout",
+    "aliases": [
+      "ham hideout",
+      "h a m hideout"
+    ],
+    "x": 3166,
+    "y": 3251,
+    "plane": 0
+  },
+  {
+    "name": "Giants' Foundry",
+    "aliases": [
+      "giants' foundry",
+      "giants foundry"
+    ],
+    "x": 3361,
+    "y": 3148,
+    "plane": 0
+  },
+  {
+    "name": "Hunter Guild",
+    "aliases": [
+      "hunter guild",
+      "hunters guild"
+    ],
+    "x": 1557,
+    "y": 3048,
+    "plane": 0
+  },
+  {
+    "name": "Sunset Coast",
+    "aliases": [
+      "sunset coast"
+    ],
+    "x": 1446,
+    "y": 2988,
+    "plane": 0
+  },
+  {
+    "name": "Aldarin",
+    "aliases": [
+      "aldarin"
+    ],
+    "x": 1392,
+    "y": 2940,
+    "plane": 0
+  },
+  {
+    "name": "Civitas illa Fortis",
+    "aliases": [
+      "civitas illa fortis",
+      "civitas",
+      "fortis",
+      "varlamore"
+    ],
+    "x": 1686,
+    "y": 3113,
+    "plane": 0
+  },
+  {
+    "name": "Quetzacalli Gorge",
+    "aliases": [
+      "quetzacalli gorge",
+      "quetzacalli"
+    ],
+    "x": 1516,
+    "y": 3228,
+    "plane": 0
+  },
+  {
+    "name": "Cam Torum",
+    "aliases": [
+      "cam torum"
+    ],
+    "x": 1435,
+    "y": 9596,
+    "plane": 0
+  },
+  {
+    "name": "Keldagrim",
+    "aliases": [
+      "keldagrim"
+    ],
+    "x": 2838,
+    "y": 10197,
+    "plane": 0
+  },
+  {
+    "name": "Arceuus Library",
+    "aliases": [
+      "arceuus library",
+      "library of arceuus"
+    ],
+    "x": 1632,
+    "y": 3838,
+    "plane": 0
+  },
+  {
+    "name": "Draynor Manor",
+    "aliases": [
+      "draynor manor"
+    ],
+    "x": 3108,
+    "y": 3352,
+    "plane": 0
+  },
+  {
+    "name": "Ranging Guild",
+    "aliases": [
+      "ranging guild",
+      "ranged guild"
+    ],
+    "x": 2654,
+    "y": 3441,
+    "plane": 0
+  },
+  {
+    "name": "Port Khazard",
+    "aliases": [
+      "port khazard",
+      "khazard port"
+    ],
+    "x": 2653,
+    "y": 3166,
+    "plane": 0
+  },
+  {
+    "name": "Temple of Ikov",
+    "aliases": [
+      "temple of ikov"
+    ],
+    "x": 2676,
+    "y": 3404,
+    "plane": 0
+  },
+  {
+    "name": "Varrock Sewers",
+    "aliases": [
+      "varrock sewers",
+      "varrock sewer"
+    ],
+    "x": 3236,
+    "y": 3458,
+    "plane": 0
+  },
+  {
+    "name": "Smoke Dungeon",
+    "aliases": [
+      "smoke dungeon",
+      "smokey well",
+      "smoky well"
+    ],
+    "x": 3309,
+    "y": 2962,
+    "plane": 0
+  },
+  {
+    "name": "Harmony Island",
+    "aliases": [
+      "harmony island"
+    ],
+    "x": 3797,
+    "y": 2866,
+    "plane": 0
+  },
+  {
+    "name": "Lletya",
+    "aliases": [
+      "lletya",
+      "lletya bank"
+    ],
+    "x": 2330,
+    "y": 3172,
+    "plane": 0
+  },
+  {
+    "name": "Mos Le'Harmless",
+    "aliases": [
+      "mos le'harmless",
+      "mos le harmless"
+    ],
+    "x": 3682,
+    "y": 2951,
+    "plane": 0
+  },
+  {
+    "name": "Rellekka",
+    "aliases": [
+      "rellekka",
+      "relleka"
+    ],
+    "x": 2639,
+    "y": 3710,
+    "plane": 0
+  },
+  {
+    "name": "Jatizso",
+    "aliases": [
+      "jatizso",
+      "jatiso"
+    ],
+    "x": 2420,
+    "y": 3780,
+    "plane": 0
+  },
+  {
+    "name": "Trollheim",
+    "aliases": [
+      "trollheim"
+    ],
+    "x": 2891,
+    "y": 3678,
+    "plane": 0
+  },
+  {
+    "name": "Theatre of Blood",
+    "aliases": [
+      "theatre of blood",
+      "theater of blood"
+    ],
+    "x": 3676,
+    "y": 3219,
+    "plane": 0
+  },
+  {
+    "name": "Tombs of Amascut",
+    "aliases": [
+      "tombs of amascut"
+    ],
+    "x": 3357,
+    "y": 2711,
+    "plane": 0
+  },
+  {
+    "name": "Mage Training Arena",
+    "aliases": [
+      "mage training arena",
+      "magic training arena"
+    ],
+    "x": 3363,
+    "y": 3317,
+    "plane": 0
+  },
+  {
+    "name": "Tempoross Cove",
+    "aliases": [
+      "tempoross",
+      "tempoross cove"
+    ],
+    "x": 3137,
+    "y": 2840,
+    "plane": 0
+  },
+  {
+    "name": "Soul Wars",
+    "aliases": [
+      "soul wars",
+      "soul wars lobby"
+    ],
+    "x": 2210,
+    "y": 2857,
+    "plane": 0
+  },
+  {
+    "name": "Last Man Standing",
+    "aliases": [
+      "last man standing",
+      "lms lobby"
+    ],
+    "x": 3151,
+    "y": 3635,
+    "plane": 0
+  },
+  {
+    "name": "Blast Furnace",
+    "aliases": [
+      "blast furnace"
+    ],
+    "x": 1940,
+    "y": 4963,
+    "plane": 0
+  },
+  {
+    "name": "Barbarian Village",
+    "aliases": [
+      "barbarian village",
+      "gunnarsgrunn"
+    ],
+    "x": 3082,
+    "y": 3421,
+    "plane": 0
+  },
+  {
+    "name": "Melzar's Maze",
+    "aliases": [
+      "melzar's maze",
+      "melzars maze"
+    ],
+    "x": 2931,
+    "y": 3251,
+    "plane": 0
+  },
+  {
+    "name": "Bandit Camp",
+    "aliases": [
+      "bandit camp",
+      "desert bandit camp"
+    ],
+    "x": 3173,
+    "y": 2982,
+    "plane": 0
+  },
+  {
+    "name": "Nature Grotto",
+    "aliases": [
+      "nature grotto"
+    ],
+    "x": 3441,
+    "y": 3337,
+    "plane": 0
+  },
+  {
+    "name": "Haunted Mine",
+    "aliases": [
+      "haunted mine"
+    ],
+    "x": 3440,
+    "y": 3232,
+    "plane": 0
+  },
+  {
+    "name": "Dwarven Mine",
+    "aliases": [
+      "dwarven mine"
+    ],
+    "x": 3019,
+    "y": 3450,
+    "plane": 0
+  },
+  {
+    "name": "Chambers of Xeric",
+    "aliases": [
+      "chambers of xeric"
+    ],
+    "x": 1254,
+    "y": 3565,
+    "plane": 0
+  },
+  {
+    "name": "Fortis Colosseum",
+    "aliases": [
+      "fortis colosseum",
+      "fortis colloseum",
+      "colosseum entrance"
+    ],
+    "x": 1799,
+    "y": 3108,
+    "plane": 0
+  },
+  {
+    "name": "Port Tyras",
+    "aliases": [
+      "port tyras"
+    ],
+    "x": 2142,
+    "y": 3122,
+    "plane": 0
+  },
+  {
+    "name": "Royal Titans",
+    "aliases": [
+      "royal titans",
+      "royal titan entrance"
+    ],
+    "x": 2995,
+    "y": 3112,
+    "plane": 0
+  },
+  {
+    "name": "Yama / Chasm of Fire",
+    "aliases": [
+      "yama",
+      "yama's domain",
+      "yamas domain",
+      "chasm of fire"
+    ],
+    "x": 1452,
+    "y": 3659,
+    "plane": 0
+  },
+  {
+    "name": "Moons of Peril",
+    "aliases": [
+      "moons of peril",
+      "perilous moons",
+      "neypotzli"
+    ],
+    "x": 1435,
+    "y": 9596,
+    "plane": 0
+  }
+]

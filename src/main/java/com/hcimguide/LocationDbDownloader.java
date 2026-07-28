@@ -31,15 +31,72 @@ import org.slf4j.LoggerFactory;
 @Singleton
 public class LocationDbDownloader
 {
+	/**
+	 * Calls that have been handed to OkHttp and have not settled yet. Tracked so
+	 * shutdown can cancel them: a guarded callback stops stale state from being
+	 * applied, but the request itself would otherwise keep running, holding its
+	 * callback and buffers alive past disable.
+	 */
+	private final java.util.Set<Call> activeCalls =
+		java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+	/**
+	 * Submit a call and keep track of it until it settles, so
+	 * {@link #cancelInFlight()} can stop it.
+	 */
+	private void enqueueTracked(Request request, Callback callback)
+	{
+		Call tracked = okHttpClient.newCall(request);
+		activeCalls.add(tracked);
+		tracked.enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				try
+				{
+					callback.onFailure(call, e);
+				}
+				finally
+				{
+					activeCalls.remove(call);
+				}
+			}
+
+			@Override
+			public void onResponse(Call call, Response response) throws IOException
+			{
+				// removed only after the callback has finished reading the body
+				// and parsing: removing on headers meant a shutdown midway
+				// through parsing could not cancel the call
+				try
+				{
+					callback.onResponse(call, response);
+				}
+				finally
+				{
+					activeCalls.remove(call);
+				}
+			}
+		});
+	}
+
+	/** Cancel everything still in flight. Called from the plugin's shutDown. */
+	void cancelInFlight()
+	{
+		for (Call call : activeCalls)
+		{
+			call.cancel();
+		}
+		activeCalls.clear();
+	}
+
 	private static final Logger log = LoggerFactory.getLogger(LocationDbDownloader.class);
 
 	/**
-	 * PINNED to a commit SHA so the download is reproducible and
-	 * review-friendly. To update the dataset for a future release, replace
-	 * the hash with the current one:
-	 * {@code git ls-remote https://github.com/mejrs/data_osrs refs/heads/master}
-	 * (tools/submit.sh re-pins automatically if this is ever set back to
-	 * "master").
+	 * PINNED to a reviewed commit SHA so the download is reproducible. Future
+	 * releases must update this literal explicitly; moving branches are rejected
+	 * by the repository audit.
 	 */
 	static final String SOURCE_URL =
 		"https://raw.githubusercontent.com/mejrs/data_osrs/6a3ca6f19d65c5609434b51cac8dee9d4af97c02/NPCList_OSRS.json";
@@ -54,47 +111,79 @@ public class LocationDbDownloader
 	@Inject
 	public LocationDbDownloader(okhttp3.OkHttpClient okHttpClient, NpcLocationStore store)
 	{
-		this.okHttpClient = okHttpClient;
+		// hard wall-clock ceiling per call (generous: the one-time dataset is
+		// a few MB and slow home connections are legitimate). The byte cap
+		// bounds size; this bounds a server trickling bytes forever.
+		this.okHttpClient = okHttpClient.newBuilder()
+			.callTimeout(java.time.Duration.ofMinutes(5))
+			.build();
 		this.store = store;
 	}
 
 	/**
-	 * Exactly one of onSuccess (number of NEW locations added) / onError is
-	 * invoked, on an OkHttp worker thread. Parsing runs on that worker thread
-	 * DELIBERATELY: the reader streams straight off the socket (bounded by
-	 * MAX_BODY_BYTES), so the multi-MB file is never buffered whole, and the
-	 * store merge is thread-safe (putIfAbsent on a concurrent map). Nothing
-	 * here touches the client thread or the EDT.
+	 * Exactly one of onSuccess (what was added, and whether the source was
+	 * truncated at the safety cap) / onError is invoked, on an OkHttp worker
+	 * thread. Parsing runs on that worker thread DELIBERATELY: the reader
+	 * streams straight off the socket (bounded by MAX_BODY_BYTES), so the
+	 * multi-MB file is never buffered whole, and the store merge is
+	 * thread-safe (putIfAbsent on a concurrent map). Nothing here touches
+	 * the client thread or the EDT.
 	 */
-	public void download(Consumer<Integer> onSuccess, Consumer<String> onError)
+	public void download(java.util.function.BooleanSupplier requestCurrent,
+		Consumer<DownloadResult> onSuccess, Consumer<String> onError)
 	{
 		Request request = new Request.Builder()
 			.url(SOURCE_URL)
 			.header("User-Agent", "guide-overlay RuneLite plugin")
 			.build();
 
-		okHttpClient.newCall(request).enqueue(new Callback()
+		// Enforces the exactly-one-callback contract above. Without it, a throw
+		// from the store merge (which runs after onSuccess's inputs are ready)
+		// would fall into the outer catch and fire onError for a call that had
+		// already partially succeeded.
+		final java.util.concurrent.atomic.AtomicBoolean settled =
+			new java.util.concurrent.atomic.AtomicBoolean();
+
+		enqueueTracked(request, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
+				if (requestStopped(call, requestCurrent))
+				{
+					return;
+				}
 				log.warn("Location database download failed", e);
-				safe(onError, "Download failed: " + e.getMessage());
+				safe(settled, onError, "Download failed: " + e.getMessage());
 			}
 
 			@Override
 			public void onResponse(Call call, Response response)
 			{
+				if (requestStopped(call, requestCurrent))
+				{
+					response.close();
+					return;
+				}
 				try (ResponseBody body = response.body())
 				{
+					// A pinned https URL only bounds where the request STARTS.
+					// OkHttp follows redirects by default, so the host is checked
+					// again on the response that actually arrived.
+					okhttp3.HttpUrl finalUrl = response.request().url();
+					if (!finalUrl.isHttps() || !"raw.githubusercontent.com".equals(finalUrl.host()))
+					{
+						safe(settled, onError, "Unexpected final download host: " + finalUrl.host());
+						return;
+					}
 					if (!response.isSuccessful() || body == null)
 					{
-						safe(onError, "Source returned HTTP " + response.code());
+						safe(settled, onError, "Source returned HTTP " + response.code());
 						return;
 					}
 					if (body.contentLength() > MAX_BODY_BYTES)
 					{
-						safe(onError, "Response implausibly large - aborted");
+						safe(settled, onError, "Response implausibly large - aborted");
 						return;
 					}
 					// hard byte cap that also covers chunked responses (where
@@ -134,38 +223,100 @@ public class LocationDbDownloader
 							return r;
 						}
 					};
-					Map<String, int[]> parsed = parse(new JsonReader(
+					Parsed parsed = parse(new JsonReader(
 						new java.io.InputStreamReader(bounded, java.nio.charset.StandardCharsets.UTF_8)));
-					if (parsed.isEmpty())
+					if (parsed.locations.isEmpty())
 					{
-						safe(onError, "No usable locations in the dataset");
+						safe(settled, onError, "No usable locations in the dataset");
 						return;
 					}
-					int added = store.addNormalizedIfAbsent(parsed);
-					store.saveIfDirty();
+					// Parsing is side-effect free. Cross one lifecycle commit gate
+					// before mutating or saving the shared location store.
+					if (requestStopped(call, requestCurrent))
+					{
+						return;
+					}
+					int added;
 					try
 					{
-						onSuccess.accept(added);
+						added = store.addNormalizedIfAbsent(parsed.locations);
+						store.saveIfDirty();
 					}
 					catch (Exception e)
 					{
-						log.warn("Download success handler failed", e);
+						// distinct from the parse path below: the data was read
+						// fine, storing it is what failed
+						log.warn("Location database merge failed", e);
+						safe(settled, onError, "Merge failed: " + e.getMessage());
+						return;
+					}
+					if (!requestStopped(call, requestCurrent)
+						&& settled.compareAndSet(false, true))
+					{
+						try
+						{
+							onSuccess.accept(new DownloadResult(added, parsed.truncated));
+						}
+						catch (Exception e)
+						{
+							log.warn("Download success handler failed", e);
+						}
 					}
 				}
 				catch (Exception e)
 				{
+					if (requestStopped(call, requestCurrent))
+					{
+						return;
+					}
 					log.warn("Location database parse failed", e);
-					safe(onError, "Parse failed: " + e.getMessage());
+					safe(settled, onError, "Parse failed: " + e.getMessage());
 				}
 			}
 		});
+	}
+
+	/** True when shutdown/cycling invalidated the request before its commit. */
+	private static boolean requestStopped(Call call,
+		java.util.function.BooleanSupplier requestCurrent)
+	{
+		return call.isCanceled() || requestCurrent == null || !requestCurrent.getAsBoolean();
+	}
+
+
+	/** Streamed parse outcome: the entries, plus whether the cap cut the source. */
+	static final class Parsed
+	{
+		final Map<String, int[]> locations;
+		final boolean truncated;
+
+		Parsed(Map<String, int[]> locations, boolean truncated)
+		{
+			this.locations = locations;
+			this.truncated = truncated;
+		}
+	}
+
+	/** What a completed download did: how many entries landed, and honestly. */
+	public static final class DownloadResult
+	{
+		/** New locations actually added to the store. */
+		final int added;
+		/** True when the source held more entries than the safety cap kept. */
+		final boolean truncated;
+
+		DownloadResult(int added, boolean truncated)
+		{
+			this.added = added;
+			this.truncated = truncated;
+		}
 	}
 
 	/**
 	 * Streams the JSON array, keeping name/x/y/p per entry and skipping the
 	 * rest. First occurrence of each (normalized) name wins.
 	 */
-	static Map<String, int[]> parse(JsonReader reader) throws IOException
+	static Parsed parse(JsonReader reader) throws IOException
 	{
 		Map<String, int[]> out = new HashMap<>();
 		reader.beginArray();
@@ -220,7 +371,17 @@ public class LocationDbDownloader
 				}
 			}
 		}
-		return out;
+		// cap hit with entries remaining: skip to the array's actual end so
+		// the stream finishes in a defined state, and report the truncation
+		// instead of presenting a partial database as complete
+		boolean truncated = false;
+		while (reader.hasNext())
+		{
+			truncated = true;
+			reader.skipValue();
+		}
+		reader.endArray();
+		return new Parsed(out, truncated);
 	}
 
 	/** Reads an int, or consumes the value and returns fallback when it isn't one. */
@@ -236,8 +397,14 @@ public class LocationDbDownloader
 		return i == d ? i : fallback;
 	}
 
-	private static void safe(Consumer<String> onError, String message)
+	/** Fires onError at most once per call, per the download() contract. */
+	private static void safe(java.util.concurrent.atomic.AtomicBoolean settled,
+		Consumer<String> onError, String message)
 	{
+		if (!settled.compareAndSet(false, true))
+		{
+			return;
+		}
 		try
 		{
 			onError.accept(message);

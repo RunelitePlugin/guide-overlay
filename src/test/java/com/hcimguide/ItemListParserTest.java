@@ -56,4 +56,56 @@ public class ItemListParserTest
 		assertTrue(ItemReq.namesEquivalent("Jugs of wine", "Jug of wine"));
 		assertFalse(ItemReq.namesEquivalent("Bread", "Bones"));
 	}
+	@Test
+	public void bareTeleportRunesBecomeLawRuneBeforeInstructionFiltering()
+	{
+		List<ItemReq> bare = ItemListParser.parse("Withdraw: Teleport Runes");
+		assertEquals(1, bare.size());
+		assertEquals("Law rune", bare.get(0).getName());
+
+		List<ItemReq> bank102 = ItemListParser.parse(
+			"Withdraw: Teleport Runes, Tinderbox, Cat, 2 Waterskins");
+		assertEquals("Law rune", bank102.get(0).getName());
+		assertEquals("Tinderbox", bank102.get(1).getName());
+		assertEquals(2, bank102.get(3).getQuantity());
+
+		List<ItemReq> bank105 = ItemListParser.parse(
+			"Withdraw: Coins, Teleport Runes, Hammer, 3 Planks, 90 Steel Nails, "
+				+ "Rune Sword, 2 Compost, Maze Key, Ring of Charos");
+		assertEquals("Coins", bank105.get(0).getName());
+		assertEquals("Law rune", bank105.get(1).getName());
+
+		List<ItemReq> bank111 = ItemListParser.parse(
+			"Withdraw: Teleport Runes, Coins, Death Runes, Antipoison, "
+				+ "Super Antipoison, Scrying Orb If 56/57/58 Magic; Wizard Mind Bomb, "
+				+ "(9/10 Inventory Slots) + Food");
+		assertEquals("Law rune", bank111.get(0).getName());
+		assertEquals("Death rune", bank111.get(2).getName());
+
+		assertNull(ItemListParser.parse("Teleport out"));
+	}
+
+	@Test
+	public void inventoryFillDisplaysFullCountButUsesHalfThresholdWithOtherItems()
+	{
+		List<ItemReq> only = ItemListParser.parse("Withdraw: Inventory of Lobsters");
+		assertEquals(1, only.size());
+		assertTrue(only.get(0).isInventoryFill());
+		assertEquals(28, only.get(0).getQuantity());
+		assertEquals(28, only.get(0).getCompletionQuantity());
+
+		List<ItemReq> mixed = ItemListParser.parse(
+			"Withdraw: Inventory of Lobsters, Rope, Knife");
+		assertEquals(3, mixed.size());
+		assertEquals(28, mixed.get(0).getQuantity());
+		assertEquals(14, mixed.get(0).getCompletionQuantity());
+		assertEquals("28x Lobsters", mixed.get(0).toString());
+		assertEquals(1, mixed.get(1).getCompletionQuantity());
+
+		List<ItemReq> doubled = ItemListParser.parse(
+			"Withdraw: 2x Inventory of Lobsters, Rope");
+		assertEquals(56, doubled.get(0).getQuantity());
+		assertEquals(28, doubled.get(0).getCompletionQuantity());
+	}
+
 }

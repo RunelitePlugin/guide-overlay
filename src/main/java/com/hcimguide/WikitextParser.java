@@ -139,6 +139,23 @@ public class WikitextParser
 
 	/** Hard cap on steps per guide - a runaway page can't OOM the client or freeze Swing. */
 	private static final int MAX_STEPS = 25_000;
+	/**
+	 * Structural caps (the step cap alone doesn't bound the MODEL: a file of
+	 * nothing but headings creates episodes/banks without ever adding a
+	 * step). Real guides: 20 episodes, ~230 banks - these are pure safety
+	 * margins, and hitting one marks the guide truncated.
+	 */
+	private static final int MAX_EPISODES = 500;
+	private static final int MAX_BANKS_PER_EPISODE = 500;
+	/**
+	 * Longest bullet line accepted as a step. Real steps are under ~1k chars;
+	 * a pathological megabyte line would otherwise flow through every
+	 * cleanup regex and into item parsing. Oversized lines are SKIPPED (and
+	 * the guide marked truncated), never shortened: a shortened text would
+	 * mint a different step key and silently orphan saved progress if the
+	 * source were ever fixed.
+	 */
+	private static final int MAX_STEP_SOURCE_CHARS = 4096;
 
 	private Guide parseInternal(String wikitext, boolean generic)
 	{
@@ -176,7 +193,16 @@ public class WikitextParser
 			Matcher h = HEADING.matcher(line);
 			if (h.matches())
 			{
-				String title = cleanInline(h.group(2));
+				// same source cap as step lines: cleanInline runs a dozen
+				// linear passes, and headings were the one line kind fed to it
+				// unbounded - a pathological multi-megabyte heading must not
+				// buy CPU the step lines already refuse
+				String headingSource = h.group(2);
+				if (headingSource.length() > MAX_STEP_SOURCE_CHARS)
+				{
+					headingSource = headingSource.substring(0, MAX_STEP_SOURCE_CHARS);
+				}
+				String title = cleanInline(headingSource);
 				int level = h.group(1).length();
 
 				boolean isChapter;
@@ -207,6 +233,13 @@ public class WikitextParser
 						ep.matches();
 						number = Integer.parseInt(ep.group(1));
 					}
+					if (guide.getEpisodes().size() >= MAX_EPISODES)
+					{
+						// heading spam: stop growing the model - later steps
+						// keep pooling into the current episode
+						guide.markTruncated();
+						continue;
+					}
 					episode = new GuideEpisode(number, title);
 					guide.getEpisodes().add(episode);
 					bank = null;
@@ -228,7 +261,7 @@ public class WikitextParser
 					{
 						id = "E" + episode.getNumber() + "-" + slug(title);
 					}
-					bank = findOrCreateBank(episode, banksById, id, title);
+					bank = findOrCreateBank(guide, episode, banksById, id, title);
 				}
 				else
 				{
@@ -261,7 +294,7 @@ public class WikitextParser
 				{
 					if (pendingBank != null)
 					{
-						bank = findOrCreateBank(episode, banksById,
+						bank = findOrCreateBank(guide, episode, banksById,
 							"E" + episode.getNumber() + ".B" + pendingBank, "Bank " + pendingBank);
 						pendingBank = null;
 					}
@@ -274,7 +307,7 @@ public class WikitextParser
 							String id = tb.matches()
 								? "E" + episode.getNumber() + ".B" + tb.group(1).toUpperCase(Locale.ROOT)
 								: "E" + episode.getNumber() + "-" + slug(title);
-							bank = findOrCreateBank(episode, banksById, id, title);
+							bank = findOrCreateBank(guide, episode, banksById, id, title);
 						}
 						// empty/computed title: continuation of the current section
 					}
@@ -303,7 +336,7 @@ public class WikitextParser
 					//noinspection ResultOfMethodCallIgnored
 					bk.matches();
 					String id = "E" + episode.getNumber() + ".B" + bk.group(1).toUpperCase(Locale.ROOT);
-					bank = findOrCreateBank(episode, banksById, id, bankLabel);
+					bank = findOrCreateBank(guide, episode, banksById, id, bankLabel);
 					continue;
 				}
 			}
@@ -313,6 +346,12 @@ public class WikitextParser
 			{
 				if (totalSteps >= MAX_STEPS)
 				{
+					guide.markTruncated();
+					continue;
+				}
+				if (line.length() > MAX_STEP_SOURCE_CHARS)
+				{
+					guide.markTruncated();
 					continue;
 				}
 				String text = cleanInline(b.group(2));
@@ -324,7 +363,7 @@ public class WikitextParser
 				if (bank == null)
 				{
 					String id = "E" + episode.getNumber() + "-notes";
-					bank = findOrCreateBank(episode, banksById, id, "Notes");
+					bank = findOrCreateBank(guide, episode, banksById, id, "Notes");
 				}
 				int depth = Math.max(0, b.group(1).length() - 1);
 				String occKey = bank.getId() + " " + text;
@@ -379,13 +418,20 @@ public class WikitextParser
 		return guide;
 	}
 
-	private static GuideBank findOrCreateBank(GuideEpisode episode, Map<String, GuideBank> banksById,
-		String id, String title)
+	private static GuideBank findOrCreateBank(Guide guide, GuideEpisode episode,
+		Map<String, GuideBank> banksById, String id, String title)
 	{
 		GuideBank existing = banksById.get(id);
 		if (existing != null)
 		{
 			return existing;
+		}
+		if (banksById.size() >= MAX_BANKS_PER_EPISODE && !episode.getBanks().isEmpty())
+		{
+			// bank-marker spam: stop growing the model - further steps pool
+			// into the episode's last bank instead of new structures
+			guide.markTruncated();
+			return episode.getBanks().get(episode.getBanks().size() - 1);
 		}
 		GuideBank created = new GuideBank(id, title, episode.getNumber());
 		banksById.put(id, created);

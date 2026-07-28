@@ -40,6 +40,8 @@ public class ItemGridPanel extends JPanel
 	private static final int COLUMNS = 4;
 	private static final int SLOT = 36;
 	private static final int SLOT_H = 32;
+	/** Stack-count yellow, matching the client's own quantity text. */
+	private static final Color QTY_LABEL = new Color(255, 255, 0);
 	private static final Color PRESENT = new Color(0, 200, 120, 170);
 	private static final Color MISSING = new Color(190, 60, 60, 170);
 
@@ -59,6 +61,12 @@ public class ItemGridPanel extends JPanel
 	static void setInventoryBackground(BufferedImage img)
 	{
 		inventoryBackground = img;
+	}
+
+	/** Release the one shared background image when the plugin is disabled. */
+	static void clearInventoryBackground()
+	{
+		inventoryBackground = null;
 	}
 
 	private final List<Slot> slots = new ArrayList<>();
@@ -104,7 +112,12 @@ public class ItemGridPanel extends JPanel
 			label.setVerticalAlignment(SwingConstants.CENTER);
 			label.setPreferredSize(new Dimension(SLOT, SLOT_H));
 			label.setOpaque(false); // items sit directly on the inventory brown
-			label.setToolTipText(req.toString());
+			String tooltip = req.toString();
+			if (req.getCompletionQuantity() < req.getQuantity())
+			{
+				tooltip += " (ready at " + req.getCompletionQuantity() + ")";
+			}
+			label.setToolTipText(tooltip);
 			label.setFont(FontManager.getRunescapeSmallFont());
 			// text fallback until (or unless) an icon resolves
 			label.setText(abbreviate(req.getName()));
@@ -128,14 +141,26 @@ public class ItemGridPanel extends JPanel
 
 	/**
 	 * Resolve icons via the item manager. Call from any thread; icon updates
-	 * hop to the EDT when each image loads. Slots are also REORDERED so real,
-	 * recognized items come first and anything without an item behind it
-	 * ("2 Food", "Combat Gear") sinks to the end of the grid - stable order
-	 * within each group, idempotent across re-resolution passes.
+	 * hop to the EDT when each image loads. Slots are also REORDERED so
+	 * anything with a picture - real items AND sprite-backed concepts like
+	 * "Combat Gear" - comes first, and only textual chips ("2 Food") sink to
+	 * the end of the grid; stable order within each group, idempotent across
+	 * re-resolution passes.
 	 *
 	 * @param ids one resolved item id per slot, -1 for unresolved
 	 */
 	void applyIcons(ItemManager itemManager, List<ItemReq> reqs, int[] ids)
+	{
+		applyIcons(itemManager, null, reqs, ids);
+	}
+
+	/**
+	 * @param spriteManager supplies icons for sprite-backed slots ("Combat
+	 *     Gear"), which have no item id. May be null, in which case those
+	 *     slots stay empty.
+	 */
+	void applyIcons(ItemManager itemManager, net.runelite.client.game.SpriteManager spriteManager,
+		List<ItemReq> reqs, int[] ids)
 	{
 		// pair ids to slots by REQUIREMENT IDENTITY, not position: a reorder
 		// scheduled by an earlier pass may land between the caller's resolve()
@@ -164,7 +189,7 @@ public class ItemGridPanel extends JPanel
 			List<Slot> unresolved = new ArrayList<>();
 			for (Slot s : snapshot)
 			{
-				(s.itemId > 0 ? resolved : unresolved).add(s);
+				(s.itemId > 0 || ItemIconResolver.isSpriteId(s.itemId) ? resolved : unresolved).add(s);
 			}
 			if (!resolved.isEmpty() && !unresolved.isEmpty())
 			{
@@ -216,12 +241,21 @@ public class ItemGridPanel extends JPanel
 
 		for (Slot slot : snapshot)
 		{
-			if (slot.itemId <= 0)
+			if (slot.itemId <= 0 && !ItemIconResolver.isSpriteId(slot.itemId))
 			{
 				continue;
 			}
 			int qty = slot.req.getQuantity();
-			AsyncBufferedImage img = itemManager.getImage(slot.itemId, qty, qty > 1);
+			// open quantities ("all", "100+") get a drawn label instead of the
+			// sprite's baked-in stack number, which can only render digits
+			boolean openQty = slot.req.hasQuantityLabel();
+			if (ItemIconResolver.isSpriteId(slot.itemId))
+			{
+				setConceptBorder(slot);
+				applySpriteSlot(spriteManager, slot);
+				continue;
+			}
+			AsyncBufferedImage img = itemManager.getImage(slot.itemId, qty, !openQty && qty > 1);
 			final Slot finalSlot = slot;
 			Runnable apply = () ->
 			{
@@ -229,7 +263,18 @@ public class ItemGridPanel extends JPanel
 				{
 					return;
 				}
-				finalSlot.label.setText(null);
+				if (openQty)
+				{
+					finalSlot.label.setText(finalSlot.req.getQuantityLabel());
+					finalSlot.label.setForeground(QTY_LABEL);
+					finalSlot.label.setFont(finalSlot.label.getFont().deriveFont(10f));
+					finalSlot.label.setHorizontalTextPosition(SwingConstants.LEFT);
+					finalSlot.label.setVerticalTextPosition(SwingConstants.TOP);
+				}
+				else
+				{
+					finalSlot.label.setText(null);
+				}
 				// item sprites are 36x32 natively - exactly the slot size, so
 				// they render crisp and unscaled; only oversized images shrink
 				if (img.getWidth() > SLOT)
@@ -249,6 +294,29 @@ public class ItemGridPanel extends JPanel
 		}
 	}
 
+
+	/** Fills a sprite-backed slot once the client sprite loads. */
+	private void applySpriteSlot(net.runelite.client.game.SpriteManager spriteManager, Slot slot)
+	{
+		if (spriteManager == null)
+		{
+			return;
+		}
+		final Slot target = slot;
+		spriteManager.getSpriteAsync(ItemIconResolver.spriteIdOf(slot.itemId), 0, img ->
+			SwingUtilities.invokeLater(() ->
+			{
+				if (disposed || img == null)
+				{
+					return;
+				}
+				target.label.setText(null);
+				target.label.setIcon(new ImageIcon(img));
+				target.label.revalidate();
+				target.label.repaint();
+			}));
+	}
+
 	/** Update presence borders from the current inventory snapshot (O(1) per slot). */
 	void updatePresence(InventorySnapshot snapshot)
 	{
@@ -259,7 +327,13 @@ public class ItemGridPanel extends JPanel
 		}
 		for (Slot slot : copy)
 		{
-			boolean present = snapshot.countOf(slot.req) >= slot.req.getQuantity();
+			// a concept slot ("Combat Gear") names no concrete item, so a
+			// presence check would always fail and paint a permanent red border
+			if (ConceptItems.isConcept(slot.req.getName()))
+			{
+				continue;
+			}
+			boolean present = snapshot.countOf(slot.req) >= slot.req.getCompletionQuantity();
 			if (present != slot.present)
 			{
 				slot.present = present;
@@ -312,6 +386,12 @@ public class ItemGridPanel extends JPanel
 	void dispose()
 	{
 		disposed = true;
+	}
+
+	private void setConceptBorder(Slot slot)
+	{
+		slot.present = true;
+		slot.label.setBorder(BorderFactory.createEmptyBorder(1, 1, 1, 1));
 	}
 
 	private void setSlotBorder(Slot slot, boolean present)

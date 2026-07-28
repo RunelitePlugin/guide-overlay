@@ -32,7 +32,8 @@ public final class ProgressCodec
 	private static final int MAX_KEYS = 50_000;
 	/** Parsed step keys are compact hashes; this leaves ample forward-compatible room. */
 	private static final int MAX_KEY_CHARS = 512;
-	private static final String GUIDE_ID_PATTERN = "[a-z0-9-]{1,64}";
+	private static final java.util.regex.Pattern GUIDE_ID_PATTERN =
+		java.util.regex.Pattern.compile("[a-z0-9-]{1,64}");
 
 	private ProgressCodec()
 	{
@@ -61,7 +62,7 @@ public final class ProgressCodec
 		{
 			throw new IllegalArgumentException("Progress has too many entries");
 		}
-		if (guideId != null && !guideId.isEmpty() && !guideId.matches(GUIDE_ID_PATTERN))
+		if (guideId != null && !guideId.isEmpty() && !GUIDE_ID_PATTERN.matcher(guideId).matches())
 		{
 			throw new IllegalArgumentException("Guide id is invalid");
 		}
@@ -140,7 +141,7 @@ public final class ProgressCodec
 					if (line.startsWith("#guide:"))
 					{
 						String candidate = line.substring("#guide:".length()).trim();
-						if (!candidate.matches(GUIDE_ID_PATTERN))
+						if (!GUIDE_ID_PATTERN.matcher(candidate).matches())
 						{
 							throw new IllegalArgumentException("Progress code contains an invalid guide id");
 						}

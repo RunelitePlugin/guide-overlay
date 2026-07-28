@@ -9,6 +9,8 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Rectangle;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.ArrayList;
@@ -24,6 +26,7 @@ import javax.swing.JComboBox;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JList;
+import javax.swing.JMenu;
 import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
@@ -37,7 +40,6 @@ import javax.swing.event.DocumentListener;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
-import net.runelite.client.util.LinkBrowser;
 
 public class HcimGuidePanel extends PluginPanel
 {
@@ -51,6 +53,17 @@ public class HcimGuidePanel extends PluginPanel
 	private final JLabel targetLabel = new JLabel(" ");
 	private final JProgressBar overallProgress = new JProgressBar();
 	private final JTextField searchField = new JTextField();
+	/** One pending filter run per typing burst; restart() supersedes the last. */
+	private final javax.swing.Timer searchDebounce =
+		new javax.swing.Timer(200, e -> applyFilter());
+	/**
+	 * Matching steps beyond this many are shown as visible-but-collapsed
+	 * sections instead of force-built rows: a broad query over a 2,000+ step
+	 * guide must not construct thousands of Swing rows in one EDT pass.
+	 */
+	private static final int SEARCH_EXPAND_BUDGET = 400;
+	/** True while the status line shows this filter's own broad-search note. */
+	private boolean searchStatusShown;
 	private final JComboBox<GuideRegistry.Entry> guideBox = new JComboBox<>();
 	/** Jump-to-bank dropdown: every bank in the guide, flat - no episode grouping. */
 	private final JComboBox<GuideBank> sectionBox = new JComboBox<>();
@@ -61,26 +74,50 @@ public class HcimGuidePanel extends PluginPanel
 	/** Optional "episode video guide" link rows; hidden while a search filter is active. */
 	private final List<JPanel> episodeVideoRows = new ArrayList<>();
 	private boolean rebuilding;
+	/** The checklist scroll pane; centering jumps position its viewport directly. */
+	private JScrollPane checklistScroll;
+
+	/**
+	 * Same fixed-width trick as RuneLite's own settings panel: the content
+	 * always lays out at {@code PluginPanel.PANEL_WIDTH}, and the panel's
+	 * outer width ({@code PANEL_WIDTH + SCROLLBAR_WIDTH}) leaves the vertical
+	 * scrollbar its own dedicated column - the bar can never sit on top of
+	 * content, so nothing needs to reserve or subtract its width.
+	 */
+	private static class FixedWidthPanel extends JPanel
+	{
+		@Override
+		public java.awt.Dimension getPreferredSize()
+		{
+			return new java.awt.Dimension(net.runelite.client.ui.PluginPanel.PANEL_WIDTH,
+				super.getPreferredSize().height);
+		}
+	}
 
 	HcimGuidePanel(HcimGuidePlugin plugin, HcimGuideConfig config)
 	{
 		super(false);
 		this.plugin = plugin;
 		this.config = config;
+		searchDebounce.setRepeats(false);
 
 		setLayout(new BorderLayout(0, 0));
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
-		setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+		// no outer side padding: margins live on the header and the scrollable
+		// content (RuneLite settings-panel pattern), so the scroll pane spans
+		// the full panel and the scrollbar gets its own column at the edge
+		setBorder(BorderFactory.createEmptyBorder());
 
 		// ---------------- header ----------------
 		JPanel header = new JPanel();
 		header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
 		header.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		header.setBorder(BorderFactory.createEmptyBorder(8, PanelLayout.CONTENT_MARGIN_LEFT,
+			0, PanelLayout.CONTENT_MARGIN_RIGHT));
 
 		JPanel titleRow = new JPanel(new BorderLayout());
 		titleRow.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		JLabel title = new JLabel("Guide Overlay");
-		title.setFont(FontManager.getRunescapeBoldFont());
 		title.setForeground(Color.WHITE);
 		titleRow.add(title, BorderLayout.WEST);
 
@@ -109,11 +146,9 @@ public class HcimGuidePanel extends PluginPanel
 		});
 		header.add(guideBox);
 
-		statusLabel.setFont(FontManager.getRunescapeSmallFont());
 		statusLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		header.add(statusLabel);
 
-		targetLabel.setFont(FontManager.getRunescapeSmallFont());
 		targetLabel.setForeground(ColorScheme.BRAND_ORANGE);
 		header.add(targetLabel);
 
@@ -126,24 +161,26 @@ public class HcimGuidePanel extends PluginPanel
 		header.add(Box.createVerticalStrut(4));
 
 		searchField.setToolTipText("Search steps");
+		// debounced: each keystroke restarts the timer, so only the final
+		// state of a fast-typed query pays the filter/row-build cost
 		searchField.getDocument().addDocumentListener(new DocumentListener()
 		{
 			@Override
 			public void insertUpdate(DocumentEvent e)
 			{
-				applyFilter();
+				searchDebounce.restart();
 			}
 
 			@Override
 			public void removeUpdate(DocumentEvent e)
 			{
-				applyFilter();
+				searchDebounce.restart();
 			}
 
 			@Override
 			public void changedUpdate(DocumentEvent e)
 			{
-				applyFilter();
+				searchDebounce.restart();
 			}
 		});
 		header.add(searchField);
@@ -178,18 +215,71 @@ public class HcimGuidePanel extends PluginPanel
 		add(header, BorderLayout.NORTH);
 
 		// ---------------- bank list ----------------
+		// RuneLite ConfigPanel's own working container pattern: a fixed-width
+		// content panel with the settings panel's standard margins, inside a
+		// fixed-width north-aligned wrapper, inside a plain scroll pane whose
+		// vertical bar appears only when needed - in its own column, never
+		// over the content
 		banksContainer.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		JPanel wrapper = new JPanel(new BorderLayout());
+		JPanel content = new FixedWidthPanel();
+		content.setLayout(new BorderLayout());
+		content.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		content.setBorder(BorderFactory.createEmptyBorder(PanelLayout.CONTENT_MARGIN_TOP,
+			PanelLayout.CONTENT_MARGIN_LEFT, PanelLayout.CONTENT_MARGIN_BOTTOM,
+			PanelLayout.CONTENT_MARGIN_RIGHT));
+		content.add(banksContainer, BorderLayout.CENTER);
+
+		JPanel wrapper = new FixedWidthPanel();
+		wrapper.setLayout(new BorderLayout());
 		wrapper.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		wrapper.add(banksContainer, BorderLayout.NORTH);
+		wrapper.add(content, BorderLayout.NORTH);
 
-		JScrollPane scrollPane = new JScrollPane(wrapper);
-		scrollPane.setBorder(null);
-		scrollPane.getVerticalScrollBar().setUnitIncrement(16);
-		scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-		add(scrollPane, BorderLayout.CENTER);
+		checklistScroll = new JScrollPane(wrapper);
+		checklistScroll.setBorder(null);
+		checklistScroll.getVerticalScrollBar().setUnitIncrement(16);
+		checklistScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+		add(checklistScroll, BorderLayout.CENTER);
 
+		applyPanelFont();
 		setStatus("Loading guide...");
+	}
+
+	/** The one configured side-panel font, shared by every component. */
+	private java.awt.Font panelFont()
+	{
+		// CLIENT_DEFAULT fallback: the regular RuneScape face, matching what
+		// baseline step text used
+		return PanelFonts.resolve(FontManager.getRunescapeFont(), config);
+	}
+
+	/**
+	 * Apply the configured side-panel font to EVERY text-bearing component the
+	 * panel owns - title, buttons, selectors, status lines, progress bar,
+	 * search field, headers, rows, links, badges - so a font change never
+	 * leaves a component behind on a hard-coded font.
+	 */
+	private void applyPanelFont()
+	{
+		applyFontRecursively(this, panelFont());
+		repaint();
+	}
+
+	private static void applyFontRecursively(Component component, java.awt.Font font)
+	{
+		if (component instanceof ItemGridPanel)
+		{
+			// the grid's fixed 36x32 slots size their own quantity/fallback
+			// text to fit; the panel font would overflow the slot bounds
+			return;
+		}
+		component.setFont(font);
+		if (component instanceof java.awt.Container)
+		{
+			for (Component child : ((java.awt.Container) component).getComponents())
+			{
+				applyFontRecursively(child, font);
+			}
+		}
 	}
 
 	/**
@@ -200,6 +290,12 @@ public class HcimGuidePanel extends PluginPanel
 	private JPopupMenu buildImportMenu()
 	{
 		JPopupMenu menu = new JPopupMenu();
+
+		// Diagnostics and data plumbing live in their own submenu. They are only
+		// useful when investigating a problem, and in the main menu they crowded
+		// out the actions players actually reach for.
+		JMenu devTools = new JMenu("Developer tools");
+		devTools.setToolTipText("Diagnostics and data export. Not needed for normal play.");
 
 		JMenuItem addFromLink = new JMenuItem("Add guide from wiki link...");
 		addFromLink.addActionListener(e ->
@@ -330,7 +426,7 @@ public class HcimGuidePanel extends PluginPanel
 
 		JMenuItem exportLocations = new JMenuItem("Export NPC locations to clipboard");
 		exportLocations.addActionListener(e -> plugin.exportLocations());
-		menu.add(exportLocations);
+		devTools.add(exportLocations);
 
 		JMenuItem importLocations = new JMenuItem("Import NPC locations from clipboard...");
 		importLocations.addActionListener(e ->
@@ -344,20 +440,140 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				return;
 			}
-			String json;
-			try
+			// clipboard is read off the EDT - a stalled clipboard owner (X11)
+			// must never freeze the client UI
+			setStatus("Reading clipboard…");
+			plugin.readClipboardText(json ->
 			{
-				json = (String) java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
-					.getData(java.awt.datatransfer.DataFlavor.stringFlavor);
+				if (json == null)
+				{
+					SwingUtilities.invokeLater(() -> setStatus("Clipboard does not contain text"));
+					return;
+				}
+				plugin.importLocations(json);
+			});
+		});
+		devTools.add(importLocations);
+
+		menu.addSeparator();
+
+		JMenuItem setTilePin = new JMenuItem("Set current tile as step destination");
+		setTilePin.addActionListener(e -> plugin.setCurrentTileAsCustomPin(false));
+		menu.add(setTilePin);
+
+		JMenuItem addTileWaypoint = new JMenuItem("Add current tile as waypoint");
+		addTileWaypoint.addActionListener(e -> plugin.setCurrentTileAsCustomPin(true));
+		menu.add(addTileWaypoint);
+
+		JMenuItem setMapPin = new JMenuItem("Set world-map center as destination");
+		setMapPin.addActionListener(e -> plugin.setWorldMapCenterAsCustomPin(false));
+		menu.add(setMapPin);
+
+		JMenuItem addMapWaypoint = new JMenuItem("Add world-map center as waypoint");
+		addMapWaypoint.addActionListener(e -> plugin.setWorldMapCenterAsCustomPin(true));
+		menu.add(addMapWaypoint);
+
+		JMenuItem renameWaypoint = new JMenuItem("Rename active custom waypoint...");
+		renameWaypoint.addActionListener(e -> plugin.renameActiveCustomWaypoint());
+		menu.add(renameWaypoint);
+
+		JMenuItem moveWaypointEarlier = new JMenuItem("Move active custom waypoint earlier");
+		moveWaypointEarlier.addActionListener(e -> plugin.moveActiveCustomWaypoint(-1));
+		menu.add(moveWaypointEarlier);
+
+		JMenuItem moveWaypointLater = new JMenuItem("Move active custom waypoint later");
+		moveWaypointLater.addActionListener(e -> plugin.moveActiveCustomWaypoint(1));
+		menu.add(moveWaypointLater);
+
+		JMenuItem removeWaypoint = new JMenuItem("Remove active custom waypoint");
+		removeWaypoint.addActionListener(e -> plugin.removeActiveCustomWaypoint());
+		menu.add(removeWaypoint);
+
+		JMenuItem clearPin = new JMenuItem("Restore automatic destination for step");
+		clearPin.addActionListener(e -> plugin.clearCustomPinForCurrentStep());
+		menu.add(clearPin);
+
+		JMenuItem resetDamaged = new JMenuItem("Reset damaged custom pins...");
+		resetDamaged.setToolTipText("Only needed if pin saves fail because the stored data is unreadable");
+		resetDamaged.addActionListener(e ->
+		{
+			int choice = JOptionPane.showConfirmDialog(this,
+				"Discard the stored custom pin data?\n\n"
+					+ "Only do this if pin saves are failing because the stored\n"
+					+ "data is unreadable. All custom pins will be lost.",
+				"Reset damaged custom pins", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+			if (choice == JOptionPane.OK_OPTION)
+			{
+				plugin.resetDamagedPinStore();
 			}
-			catch (Exception ex)
+		});
+		devTools.add(resetDamaged);
+
+		JMenuItem snoozeLocation = new JMenuItem("Snooze all location guidance for 5 minutes");
+		snoozeLocation.addActionListener(e -> plugin.snoozeLocationGuide());
+		menu.add(snoozeLocation);
+
+		JMenuItem restoreLocation = new JMenuItem("Restore all location guidance");
+		restoreLocation.addActionListener(e -> plugin.restoreLocationGuide());
+		menu.add(restoreLocation);
+
+		JMenuItem exportCustom = new JMenuItem("Export custom pins to file...");
+		exportCustom.addActionListener(e -> saveTextFile("custom-locations.json",
+			plugin::exportCustomLocations));
+		menu.add(exportCustom);
+
+		JMenuItem importCustom = new JMenuItem("Import custom pins from clipboard...");
+		importCustom.addActionListener(e ->
+		{
+			int choice = JOptionPane.showConfirmDialog(this,
+				"Merge custom pins for the currently selected guide from the JSON on your clipboard?",
+				"Import custom pins", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+			if (choice != JOptionPane.OK_OPTION)
 			{
-				setStatus("Clipboard does not contain text");
 				return;
 			}
-			plugin.importLocations(json);
+			setStatus("Reading clipboard…");
+			plugin.readClipboardText(json ->
+			{
+				if (json == null)
+				{
+					SwingUtilities.invokeLater(() -> setStatus("Clipboard does not contain text"));
+					return;
+				}
+				try
+				{
+					int imported = plugin.importCustomLocations(json);
+					SwingUtilities.invokeLater(() -> setStatus("Imported " + imported + " custom step locations"));
+				}
+				catch (RuntimeException ex)
+				{
+					SwingUtilities.invokeLater(() -> setStatus("Custom pin import failed: " + ex.getMessage()));
+				}
+			});
 		});
-		menu.add(importLocations);
+		menu.add(importCustom);
+
+		JMenuItem exportAudit = new JMenuItem("Export unresolved location audit...");
+		exportAudit.addActionListener(e -> saveTextFile("unresolved-location-audit.md",
+			plugin::exportLocationAudit));
+		devTools.add(exportAudit);
+
+		JMenuItem preload = new JMenuItem("Preload all guide items");
+		preload.setToolTipText(
+			"Resolves every item in the guide up front. Run this before exporting the "
+				+ "item audit, or the report will be incomplete.");
+		preload.addActionListener(e -> plugin.preloadGuideItems());
+		devTools.add(preload);
+
+		JMenuItem exportItems = new JMenuItem("Export item resolution audit...");
+		exportItems.setToolTipText(
+			"Lists every requirement in the guide that shows as text instead of an item picture");
+		exportItems.addActionListener(e -> saveTextFile("item-resolution-audit.md",
+			plugin::exportItemAudit));
+		devTools.add(exportItems);
+
+		menu.addSeparator();
+		menu.add(devTools);
 
 		JMenuItem importProgress = new JMenuItem("Import progress from clipboard...");
 		importProgress.addActionListener(e ->
@@ -370,26 +586,94 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				return;
 			}
-			// clipboard only touched after the user confirms
-			String code;
-			try
+			// clipboard only touched after the user confirms, and read off the
+			// EDT so a stalled clipboard owner can't freeze the client UI
+			setStatus("Reading clipboard…");
+			plugin.readClipboardText(code ->
 			{
-				code = (String) java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
-					.getData(java.awt.datatransfer.DataFlavor.stringFlavor);
-			}
-			catch (Exception ex)
-			{
-				setStatus("Clipboard does not contain text");
-				return;
-			}
-			plugin.importProgress(code);
+				if (code == null)
+				{
+					SwingUtilities.invokeLater(() -> setStatus("Clipboard does not contain text"));
+					return;
+				}
+				plugin.importProgress(code);
+			});
 		});
 		menu.add(importProgress);
 
 		return menu;
 	}
 
+	/**
+	 * File chooser on the EDT (fast), then CONTENT GENERATION and the disk
+	 * write on the plugin executor: the audit walks thousands of steps and
+	 * the pin export serializes the whole store - neither may stall Swing,
+	 * so the supplier is only ever evaluated off the EDT.
+	 */
+	private void saveTextFile(String suggestedName, java.util.function.Supplier<String> text)
+	{
+		JFileChooser chooser = new JFileChooser();
+		chooser.setDialogTitle("Save " + suggestedName);
+		chooser.setSelectedFile(new java.io.File(suggestedName));
+		if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION)
+		{
+			return;
+		}
+		java.io.File file = chooser.getSelectedFile();
+		setStatus("Saving " + file.getName() + "…");
+		plugin.runOffEdt(() ->
+		{
+			String content;
+			try
+			{
+				content = text.get();
+			}
+			catch (RuntimeException ex)
+			{
+				SwingUtilities.invokeLater(() -> setStatus("Export failed: " + ex.getMessage()));
+				return;
+			}
+			try
+			{
+				java.nio.file.Files.write(file.toPath(),
+					content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+				SwingUtilities.invokeLater(() -> setStatus("Saved " + file.getName()));
+			}
+			catch (java.io.IOException ex)
+			{
+				SwingUtilities.invokeLater(() -> setStatus("Save failed: " + ex.getMessage()));
+			}
+		});
+	}
+
 	// ---------------------------------------------------------------- API used by plugin
+
+	/**
+	 * Single cleanup point for anything the panel owns that could outlive it.
+	 * Called from the plugin's shutDown before the panel reference is dropped,
+	 * so a pending debounce cannot briefly retain the panel after disable.
+	 */
+	void dispose()
+	{
+		searchDebounce.stop();
+		// detach every grid's async icon callbacks: an image that finishes
+		// loading after disable must not resurrect (or retain) the dead tree
+		disposeGrids();
+	}
+
+	private void disposeGrids()
+	{
+		for (BankSection section : bankSections)
+		{
+			for (StepRow row : section.rows)
+			{
+				if (row.grid != null)
+				{
+					row.grid.dispose();
+				}
+			}
+		}
+	}
 
 	void setStatus(String text)
 	{
@@ -399,6 +683,7 @@ public class HcimGuidePanel extends PluginPanel
 	/** Populate the guide dropdown (EDT only). */
 	void setGuides(java.util.List<GuideRegistry.Entry> entries, String selectedId)
 	{
+		importedCache.clear();
 		rebuilding = true;
 		guideBox.removeAllItems();
 		GuideRegistry.Entry toSelect = null;
@@ -420,7 +705,21 @@ public class HcimGuidePanel extends PluginPanel
 	/** Repaint dropdown labels after an import changes a guide's "(not imported)" state. */
 	void refreshGuideListLabels()
 	{
+		importedCache.clear();
 		guideBox.repaint();
+	}
+
+	/**
+	 * Imported-state answers for the dropdown renderer. The underlying check
+	 * is a disk stat, and a cell renderer runs per visible cell per paint -
+	 * uncached, a slow home directory stutters the EDT every popup. Cleared
+	 * whenever an import/removal could change an answer.
+	 */
+	private final java.util.Map<String, Boolean> importedCache = new java.util.HashMap<>();
+
+	private boolean isGuideImportedCached(String guideId)
+	{
+		return importedCache.computeIfAbsent(guideId, plugin::isGuideImported);
 	}
 
 	/** Empty the panel when the selected guide has no snapshot yet (EDT only). */
@@ -430,6 +729,7 @@ public class HcimGuidePanel extends PluginPanel
 		rebuilding = true;
 		sectionBox.removeAllItems();
 		rebuilding = false;
+		disposeGrids(); // late icon loads must not touch the discarded rows
 		banksContainer.removeAll();
 		bankSections.clear();
 		episodeVideoRows.clear();
@@ -477,10 +777,11 @@ public class HcimGuidePanel extends PluginPanel
 		public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus)
 		{
 			Component c = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+			setFont(panelFont());
 			if (value instanceof GuideRegistry.Entry)
 			{
 				GuideRegistry.Entry e = (GuideRegistry.Entry) value;
-				String suffix = plugin.isGuideImported(e.getId()) ? "" : "  (not imported)";
+				String suffix = isGuideImportedCached(e.getId()) ? "" : "  (not imported)";
 				setText(e.getTitle() + suffix);
 			}
 			return c;
@@ -512,12 +813,23 @@ public class HcimGuidePanel extends PluginPanel
 	void onPinChanged(String newTargetName)
 	{
 		refreshAllPinButtons();
-		setTargetStatus(newTargetName, false);
+		// snapshot, not the live computation - this runs on the EDT and the
+		// live path walks client-thread state
+		String summary = plugin.getActiveLocationSummarySnapshot();
+		// the waypoint counter is exposed separately so the overlay can colour
+		// it; the sidebar has no per-fragment colour here, so append it plainly
+		String waypoint = plugin.getWaypointStatusSnapshot();
+		if (summary != null && waypoint != null)
+		{
+			summary = summary + " · " + waypoint;
+		}
+		setTargetStatus(summary != null ? summary : newTargetName, false);
 	}
 
-	/** Re-create rows so config toggles (item grids, dimming) apply immediately. */
+	/** Re-create rows so config toggles (item grids, dimming, fonts) apply immediately. */
 	void onConfigChanged()
 	{
+		// rebuildBanks re-applies the configured font to the whole panel tree
 		rebuildBanks();
 	}
 
@@ -626,16 +938,7 @@ public class HcimGuidePanel extends PluginPanel
 	{
 		// detach async icon callbacks of the old generation so discarded
 		// component trees can't be resurrected by late image loads
-		for (BankSection section : bankSections)
-		{
-			for (StepRow row : section.rows)
-			{
-				if (row.grid != null)
-				{
-					row.grid.dispose();
-				}
-			}
-		}
+		disposeGrids();
 		banksContainer.removeAll();
 		bankSections.clear();
 		episodeVideoRows.clear();
@@ -680,6 +983,7 @@ public class HcimGuidePanel extends PluginPanel
 
 		applyFilter();
 		updateProgress();
+		applyPanelFont();
 		banksContainer.revalidate();
 		banksContainer.repaint();
 	}
@@ -738,6 +1042,89 @@ public class HcimGuidePanel extends PluginPanel
 		}
 	}
 
+	/**
+	 * Expand the bank that holds the given step and CENTER that step's row in
+	 * the checklist viewport - not just the minimum scroll that makes it
+	 * visible. Expanding lazily builds the rows, so the centering is deferred
+	 * until the relayout settles. Falls back to the bank header if the row
+	 * cannot be located.
+	 */
+	private void scrollToStep(String bankId, String stepKey)
+	{
+		for (BankSection section : bankSections)
+		{
+			boolean isTarget = section.bank.getId().equals(bankId);
+			section.setExpanded(isTarget);
+			if (!isTarget)
+			{
+				continue;
+			}
+			SwingUtilities.invokeLater(() ->
+			{
+				StepRow target = null;
+				for (StepRow row : section.rows)
+				{
+					if (row.step.getKey().equals(stepKey))
+					{
+						target = row;
+						break;
+					}
+				}
+				if (target != null)
+				{
+					final StepRow r = target;
+					// a second defer: the row's own bounds are only valid once
+					// the section body has laid out its freshly built children
+					SwingUtilities.invokeLater(() -> centerRowInViewport(r));
+				}
+				else
+				{
+					section.scrollRectToVisible(
+						new Rectangle(0, 0, section.getWidth(), section.getHeight()));
+				}
+			});
+		}
+	}
+
+	/**
+	 * Place a step row's vertical center at the checklist viewport's center,
+	 * clamped at both ends of the scrollable range; a row taller than the
+	 * viewport aligns its top instead so its start is always readable.
+	 * Scrolling only - never any completion, pin, phase, or waypoint change.
+	 */
+	private void centerRowInViewport(StepRow row)
+	{
+		// Freshly built rows reflow once their wrap labels learn their real
+		// width, and those resize events arrive asynchronously - so center,
+		// then re-center after the queue drains, until the position is stable
+		// (bounded, so an endlessly-animating layout can't loop forever).
+		centerRowInViewport(row, 3);
+	}
+
+	private void centerRowInViewport(StepRow row, int settlePasses)
+	{
+		javax.swing.JViewport viewport = checklistScroll.getViewport();
+		Component view = viewport.getView();
+		if (view == null || row.getParent() == null || !row.isShowing())
+		{
+			return;
+		}
+		// finish any reflow already requested (wrap-height second pass) so the
+		// bounds being centered on are the settled ones
+		checklistScroll.validate();
+		Rectangle bounds = SwingUtilities.convertRectangle(
+			row.getParent(), row.getBounds(), view);
+		int y = PanelLayout.centeredViewPosition(bounds.y, bounds.height,
+			viewport.getExtentSize().height, view.getHeight());
+		boolean moved = y != viewport.getViewPosition().y;
+		viewport.setViewPosition(new java.awt.Point(viewport.getViewPosition().x, y));
+		if (settlePasses > 0 && (moved || settlePasses == 3))
+		{
+			// wrap-height corrections may still be queued behind this pass
+			SwingUtilities.invokeLater(() -> centerRowInViewport(row, settlePasses - 1));
+		}
+	}
+
 	private void applyFilter()
 	{
 		String q = searchField.getText().trim().toLowerCase(Locale.ROOT);
@@ -747,9 +1134,41 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			q = "";
 		}
+		// row-building budget: matching sections beyond it stay visible but
+		// collapsed (expandable by hand), so one broad query can't stall the
+		// EDT constructing every row in the guide
+		int budget = SEARCH_EXPAND_BUDGET;
+		boolean collapsedSome = false;
 		for (BankSection section : bankSections)
 		{
-			section.filter(q);
+			boolean expand = budget > 0;
+			int matched = section.filter(q, expand);
+			if (matched > 0)
+			{
+				if (expand)
+				{
+					// expansion builds EVERY row of the section, matching or
+					// not - charge the budget what it actually costs, or a
+					// sparse query across many sections would build them all
+					budget -= section.stepCount();
+				}
+				else
+				{
+					collapsedSome = true;
+				}
+			}
+		}
+		if (!q.isEmpty() && collapsedSome)
+		{
+			setStatus("Broad search - later matching sections are shown collapsed");
+			searchStatusShown = true;
+		}
+		else if (searchStatusShown)
+		{
+			// reclaim only a status this filter itself put up - anything else
+			// showing (import warnings etc.) stays
+			setStatus(" ");
+			searchStatusShown = false;
 		}
 		// episode video rows have no steps to match - hide them while filtering
 		for (JPanel row : episodeVideoRows)
@@ -772,10 +1191,10 @@ public class HcimGuidePanel extends PluginPanel
 		link.setContentAreaFilled(false);
 		link.setFocusPainted(false);
 		link.setForeground(ColorScheme.BRAND_ORANGE);
-		link.setFont(FontManager.getRunescapeSmallFont());
+		link.setFont(panelFont());
 		link.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 		link.setMargin(new Insets(1, 4, 1, 4));
-		link.addActionListener(e -> LinkBrowser.browse(ep.getVideoUrl()));
+		link.addActionListener(e -> plugin.openVideoUrl(ep.getVideoUrl()));
 		row.add(link, BorderLayout.WEST);
 		return row;
 	}
@@ -822,12 +1241,20 @@ public class HcimGuidePanel extends PluginPanel
 				{
 					if (!plugin.isStepDone(step.getKey()))
 					{
+						// clear an active search NOW: setText only restarts the
+						// 200ms debounce, and centering against a half-filtered
+						// layout either finds the row hidden or centers on
+						// bounds the deferred filter pass then shifts
 						searchField.setText("");
+						searchDebounce.stop();
+						applyFilter();
 						// keep the dropdown in sync without re-triggering a jump
 						rebuilding = true;
 						sectionBox.setSelectedItem(bank);
 						rebuilding = false;
-						SwingUtilities.invokeLater(() -> scrollToBank(bank.getId()));
+						final String stepKey = step.getKey();
+						final String bankId = bank.getId();
+						SwingUtilities.invokeLater(() -> scrollToStep(bankId, stepKey));
 						return;
 					}
 				}
@@ -842,6 +1269,7 @@ public class HcimGuidePanel extends PluginPanel
 		public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus)
 		{
 			Component c = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+			setFont(panelFont());
 			if (value instanceof GuideBank)
 			{
 				GuideBank bank = (GuideBank) value;
@@ -884,11 +1312,13 @@ public class HcimGuidePanel extends PluginPanel
 			headerPanel.add(chevron, BorderLayout.WEST);
 
 			headerTitle.setText(bank.getTitle());
-			headerTitle.setFont(FontManager.getRunescapeBoldFont());
+			// no forced bold: the configured font governs; headers keep their
+			// hierarchy through the white-vs-gray foreground below
+			headerTitle.setFont(panelFont());
 			headerTitle.setForeground(Color.WHITE);
 			headerPanel.add(headerTitle, BorderLayout.CENTER);
 
-			headerCount.setFont(FontManager.getRunescapeSmallFont());
+			headerCount.setFont(panelFont());
 			headerCount.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 			JPanel headerEast = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
 			headerEast.setOpaque(false);
@@ -900,7 +1330,7 @@ public class HcimGuidePanel extends PluginPanel
 				videoButton.setFocusPainted(false);
 				// keep the header's right-click menu reachable over the button
 				videoButton.setInheritsPopupMenu(true);
-				videoButton.addActionListener(e -> LinkBrowser.browse(bank.getVideoUrl()));
+				videoButton.addActionListener(e -> plugin.openVideoUrl(bank.getVideoUrl()));
 				headerEast.add(videoButton);
 			}
 			headerEast.add(headerCount);
@@ -920,7 +1350,7 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				JMenuItem watchVideo = new JMenuItem("Watch section video guide");
 				watchVideo.setToolTipText(bank.getVideoUrl());
-				watchVideo.addActionListener(e -> LinkBrowser.browse(bank.getVideoUrl()));
+				watchVideo.addActionListener(e -> plugin.openVideoUrl(bank.getVideoUrl()));
 				menu.add(watchVideo);
 			}
 			headerPanel.setComponentPopupMenu(menu);
@@ -933,6 +1363,13 @@ public class HcimGuidePanel extends PluginPanel
 					if (SwingUtilities.isLeftMouseButton(e))
 					{
 						setExpanded(!expanded);
+						// expanding an over-budget section mid-search builds
+						// its rows with default (all-visible) state - re-apply
+						// the filter so they match every other section
+						if (expanded && !searchField.getText().trim().isEmpty())
+						{
+							applyFilter();
+						}
 					}
 				}
 			});
@@ -968,6 +1405,26 @@ public class HcimGuidePanel extends PluginPanel
 				body.add(row, gbc);
 				gbc.gridy++;
 			}
+			// the section's video guide as a visible row under the steps, not
+			// only the small header ▶ - in the wiki the video sits right under
+			// the section's content, so this is where users look for it
+			if (bank.getVideoUrl() != null)
+			{
+				JButton link = new JButton("▶ Section video guide");
+				link.setToolTipText("Open in browser: " + bank.getVideoUrl());
+				link.setHorizontalAlignment(JButton.LEFT);
+				link.setBorderPainted(false);
+				link.setContentAreaFilled(false);
+				link.setFocusPainted(false);
+				link.setForeground(ColorScheme.BRAND_ORANGE);
+				link.setFont(panelFont());
+				link.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+				link.addActionListener(e -> plugin.openVideoUrl(bank.getVideoUrl()));
+				body.add(link, gbc);
+			}
+			// rows are built lazily, after the panel-wide font pass - bring
+			// every component of this fresh section body onto the configured font
+			applyFontRecursively(body, panelFont());
 		}
 
 		boolean isComplete()
@@ -1003,7 +1460,21 @@ public class HcimGuidePanel extends PluginPanel
 				BorderFactory.createEmptyBorder(5, active ? 3 : 6, 5, 6)));
 		}
 
-		void filter(String query)
+		/** Rows an expansion would build - what filtering actually costs. */
+		int stepCount()
+		{
+			return bank.getSteps().size();
+		}
+
+		/**
+		 * Applies the search query and returns how many steps matched.
+		 * Matching runs against the MODEL, so unbuilt (collapsed) sections
+		 * are searched without constructing their rows; only when
+		 * {@code expand} is true does a matching section actually build and
+		 * show its rows - the panel budgets that across sections, leaving
+		 * the tail of a very broad query visible but collapsed.
+		 */
+		int filter(String query, boolean expand)
 		{
 			if (query.isEmpty())
 			{
@@ -1012,29 +1483,38 @@ public class HcimGuidePanel extends PluginPanel
 				{
 					row.setVisible(true);
 				}
-				return;
+				return 0;
 			}
-			// match against the MODEL so unbuilt (collapsed) sections can be
-			// searched without constructing their rows
-			boolean any = false;
+			int matched = 0;
 			for (GuideStep step : bank.getSteps())
 			{
 				if (step.getText().toLowerCase(Locale.ROOT).contains(query))
 				{
-					any = true;
-					break;
+					matched++;
 				}
 			}
-			setVisible(any);
-			if (!any)
+			setVisible(matched > 0);
+			if (matched == 0)
 			{
-				return;
+				return 0;
 			}
-			setExpanded(true); // builds rows on demand, only for matching sections
-			for (StepRow row : rows)
+			if (expand)
 			{
-				row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
+				setExpanded(true); // builds rows on demand
+				for (StepRow row : rows)
+				{
+					row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
+				}
 			}
+			else if (expanded)
+			{
+				// over budget but the rows already exist: still filter them
+				for (StepRow row : rows)
+				{
+					row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
+				}
+			}
+			return matched;
 		}
 
 		private void bulk(boolean completed)
@@ -1105,13 +1585,72 @@ public class HcimGuidePanel extends PluginPanel
 
 	// ---------------------------------------------------------------- step row
 
+	/**
+	 * A wrapping HTML label that is authoritative about its own geometry: the
+	 * Swing HTML {@code View} is sized to the width the layout actually
+	 * allocated, and the preferred height is computed from the view's own
+	 * Y-axis span at that width. No CSS {@code width} styling, no
+	 * reconstruction of the available width from panel constants - the two
+	 * approaches that repeatedly wrapped at the wrong point and ran text
+	 * under the scrollbar.
+	 */
+	private static final class WrappingTextLabel extends JLabel
+	{
+		@Override
+		public void setBounds(int x, int y, int width, int height)
+		{
+			super.setBounds(x, y, width, height);
+			javax.swing.text.View view =
+				(javax.swing.text.View) getClientProperty(javax.swing.plaf.basic.BasicHTML.propertyKey);
+			if (view != null && width > 0)
+			{
+				java.awt.Insets in = getInsets();
+				view.setSize(Math.max(1, width - in.left - in.right), 0);
+			}
+		}
+
+		@Override
+		public java.awt.Dimension getPreferredSize()
+		{
+			javax.swing.text.View view =
+				(javax.swing.text.View) getClientProperty(javax.swing.plaf.basic.BasicHTML.propertyKey);
+			if (view == null)
+			{
+				return super.getPreferredSize();
+			}
+			java.awt.Insets in = getInsets();
+			int width = getWidth();
+			if (width <= 0)
+			{
+				// first pass, before any layout: a conservative estimate keeps
+				// the initial height close; the real allocated width (via
+				// setBounds and the row's resize listener) settles it
+				width = PanelLayout.preLayoutTextWidth();
+			}
+			float span = Math.max(1, width - in.left - in.right);
+			view.setSize(span, 0);
+			int h = (int) Math.ceil(view.getPreferredSpan(javax.swing.text.View.Y_AXIS));
+			return new java.awt.Dimension(width, h + in.top + in.bottom);
+		}
+	}
+
 	private class StepRow extends JPanel
 	{
 		private final GuideStep step;
+		/** Icon-only selection control; the text lives in {@link #textLabel}. */
 		private final JCheckBox checkBox = new JCheckBox();
+		/**
+		 * Dedicated wrapping text component. Splitting it from the checkbox
+		 * lets BorderLayout hand it EXACTLY the width left after indentation,
+		 * the checkbox and the east controls; the label itself wraps its HTML
+		 * view to that allocated width.
+		 */
+		private final WrappingTextLabel textLabel = new WrappingTextLabel();
 		private final BankSection section;
 		private final JButton pinButton;
+		private final JPanel eastColumn = new JPanel();
 		private final ItemGridPanel grid;
+		private int lastWrapWidth = -1;
 		/** Last rendered state: -1 never, 0 plain, 1 completed, 2 skipped. */
 		private int lastRenderedState = -1;
 
@@ -1129,8 +1668,6 @@ public class HcimGuidePanel extends PluginPanel
 			checkBox.setSelected(plugin.isCompleted(step.getKey()));
 			checkBox.setBackground(getBackground());
 			checkBox.setFocusPainted(false);
-			checkBox.setVerticalTextPosition(JCheckBox.TOP);
-			refreshText();
 			checkBox.addActionListener(e ->
 			{
 				plugin.setCompleted(step.getKey(), checkBox.isSelected());
@@ -1143,7 +1680,36 @@ public class HcimGuidePanel extends PluginPanel
 					expandNextAfterAutoCollapse(section);
 				}
 			});
-			add(checkBox, BorderLayout.CENTER);
+
+			// the checklist content already keeps RuneLite's standard 10px right
+			// margin; this small internal gap tops it up to a 12px visible
+			// clearance between the wrap boundary and the divider/scrollbar
+			textLabel.setBorder(BorderFactory.createEmptyBorder(2, 0, 0,
+				PanelLayout.TEXT_RIGHT_SAFETY));
+			textLabel.setVerticalAlignment(JLabel.TOP);
+			// clicking the text toggles the row, as it did when the checkbox
+			// owned the text
+			textLabel.addMouseListener(new java.awt.event.MouseAdapter()
+			{
+				@Override
+				public void mouseClicked(java.awt.event.MouseEvent e)
+				{
+					if (javax.swing.SwingUtilities.isLeftMouseButton(e) && checkBox.isEnabled())
+					{
+						checkBox.doClick();
+					}
+				}
+			});
+
+			JPanel content = new JPanel(new BorderLayout());
+			content.setOpaque(false);
+			// NORTH-anchored so the box aligns with the FIRST line of wrapped text
+			JPanel checkHolder = new JPanel(new BorderLayout());
+			checkHolder.setOpaque(false);
+			checkHolder.add(checkBox, BorderLayout.NORTH);
+			content.add(checkHolder, BorderLayout.WEST);
+			content.add(textLabel, BorderLayout.CENTER);
+			add(content, BorderLayout.CENTER);
 
 			// catch-up on ANY step of ANY guide, even ones without bank sections
 			JPopupMenu rowMenu = new JPopupMenu();
@@ -1203,7 +1769,7 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				JMenuItem watchVideo = new JMenuItem("Watch video in browser");
 				watchVideo.setToolTipText(step.getVideoUrl());
-				watchVideo.addActionListener(e -> LinkBrowser.browse(step.getVideoUrl()));
+				watchVideo.addActionListener(e -> plugin.openVideoUrl(step.getVideoUrl()));
 				rowMenu.add(watchVideo);
 			}
 			rowMenu.addPopupMenuListener(new javax.swing.event.PopupMenuListener()
@@ -1226,18 +1792,18 @@ public class HcimGuidePanel extends PluginPanel
 				}
 			});
 			checkBox.setComponentPopupMenu(rowMenu);
+			textLabel.setComponentPopupMenu(rowMenu);
 
 			StepCondition cond = plugin.getCondition(step.getKey());
 			String target = plugin.getStepTarget(step.getKey());
 
 			// east column: pin button and/or auto-complete badge
-			JPanel east = new JPanel();
-			east.setLayout(new BoxLayout(east, BoxLayout.Y_AXIS));
-			east.setBackground(getBackground());
+			eastColumn.setLayout(new BoxLayout(eastColumn, BoxLayout.Y_AXIS));
+			eastColumn.setBackground(getBackground());
 			if (target != null)
 			{
 				pinButton = new JButton("⌖"); // ⌖
-				pinButton.setToolTipText("Track \"" + target + "\" - hint arrow + highlight when nearby");
+				pinButton.setToolTipText("Track \"" + target + "\" - colored arrow + highlight when nearby");
 				pinButton.setMargin(new Insets(0, 4, 0, 4));
 				pinButton.setFocusPainted(false);
 				pinButton.addActionListener(e ->
@@ -1247,7 +1813,7 @@ public class HcimGuidePanel extends PluginPanel
 					setTargetStatus(alreadyPinned ? null : target, false);
 					refreshAllPinButtons();
 				});
-				east.add(pinButton);
+				eastColumn.add(pinButton);
 			}
 			else
 			{
@@ -1259,8 +1825,8 @@ public class HcimGuidePanel extends PluginPanel
 				videoButton.setToolTipText("Watch video guide: " + step.getVideoUrl());
 				videoButton.setMargin(new Insets(0, 4, 0, 4));
 				videoButton.setFocusPainted(false);
-				videoButton.addActionListener(e -> LinkBrowser.browse(step.getVideoUrl()));
-				east.add(videoButton);
+				videoButton.addActionListener(e -> plugin.openVideoUrl(step.getVideoUrl()));
+				eastColumn.add(videoButton);
 			}
 			if (cond != null)
 			{
@@ -1268,12 +1834,31 @@ public class HcimGuidePanel extends PluginPanel
 				badge.setToolTipText(cond.describe());
 				badge.setForeground(new Color(255, 200, 60));
 				badge.setBorder(BorderFactory.createEmptyBorder(2, 4, 0, 4));
-				east.add(badge);
+				eastColumn.add(badge);
 			}
-			if (east.getComponentCount() > 0)
+			if (eastColumn.getComponentCount() > 0)
 			{
-				add(east, BorderLayout.EAST);
+				add(eastColumn, BorderLayout.EAST);
 			}
+			// listen on the TEXT LABEL, not the row: the row's resize event
+			// fires before BorderLayout has laid out its children, so the
+			// label width read there is one validation cycle stale (0 on the
+			// first pass) - the label's own resize fires after its reshape,
+			// when getWidth() is current. A changed width changes the wrap
+			// point, so the label's preferred HEIGHT must be re-asked.
+			textLabel.addComponentListener(new ComponentAdapter()
+			{
+				@Override
+				public void componentResized(ComponentEvent event)
+				{
+					int width = textLabel.getWidth();
+					if (width > 0 && width != lastWrapWidth)
+					{
+						lastWrapWidth = width;
+						textLabel.revalidate();
+					}
+				}
+			});
 
 			// item icon grid for steps with item lists (withdraw/collect
 			// conditions AND JSON guides' display-only "(Items: ...)" lists) -
@@ -1323,7 +1908,14 @@ public class HcimGuidePanel extends PluginPanel
 			boolean done = checkBox.isSelected();
 			boolean skipped = plugin.isSkipped(step.getKey());
 			lastRenderedState = skipped ? 2 : (done ? 1 : 0);
-			String style = "width:140px;font-size:" + config.panelTextSize().getPx() + "px";
+			// no width styling: the label itself wraps its HTML view to the
+			// width BorderLayout allocated it (WrappingTextLabel), so the wrap
+			// point tracks the real layout instead of a reconstructed number
+			java.awt.Font panelFont = panelFont();
+			textLabel.setFont(panelFont);
+			String family = panelFont.getFamily().replace("'", "");
+			String style = "font-size:" + panelFont.getSize()
+				+ "px;font-family:'" + family + "'";
 			String body;
 			if (skipped)
 			{
@@ -1335,9 +1927,30 @@ public class HcimGuidePanel extends PluginPanel
 			}
 			else
 			{
-				body = escaped;
+				Color semanticColor = semanticStepColor();
+				body = semanticColor == null
+					? escaped
+					: "<span style='color:" + htmlColor(semanticColor) + "'>" + escaped + "</span>";
 			}
-			checkBox.setText("<html><body style='" + style + "'>" + body + "</body></html>");
+			textLabel.setText("<html><body style='" + style + "'>" + body + "</body></html>");
+			// a rebuilt HTML view starts unsized - re-ask for the preferred
+			// height at the label's current width
+			textLabel.revalidate();
+		}
+
+		private Color semanticStepColor()
+		{
+			switch (StepTextSemantic.classify(step.getText()))
+			{
+				case DANGER:
+					return config.colorDangerSteps() ? config.dangerStepColor() : null;
+				case PREPARATION:
+					return config.colorPreparationSteps() ? config.preparationStepColor() : null;
+				case TRANSPORT:
+					return config.colorTransportSteps() ? config.transportStepColor() : null;
+				default:
+					return null;
+			}
 		}
 
 		void syncPinVisual()
@@ -1361,14 +1974,23 @@ public class HcimGuidePanel extends PluginPanel
 		}
 	}
 
+	private static String htmlColor(Color color)
+	{
+		Color safe = color == null ? new Color(80, 220, 255) : color;
+		return String.format("#%02x%02x%02x", safe.getRed(), safe.getGreen(), safe.getBlue());
+	}
+
 	private static String escapeHtml(String s)
 	{
 		return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
 	}
 
+	private static final java.util.regex.Pattern TRAILING_COLON_WS =
+		java.util.regex.Pattern.compile("[:\\s]+$");
+
 	private static String shortTitle(String s)
 	{
-		String t = s.replaceAll("[:\\s]+$", "");
+		String t = TRAILING_COLON_WS.matcher(s).replaceAll("");
 		return t.length() <= 20 ? t : t.substring(0, 19) + "…";
 	}
 }

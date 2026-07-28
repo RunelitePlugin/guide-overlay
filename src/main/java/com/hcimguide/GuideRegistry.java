@@ -1,8 +1,6 @@
 package com.hcimguide;
 
 import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
-import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -23,9 +21,8 @@ public class GuideRegistry
 	static final String BUILTIN_ID = "b0aty-hcim-v3";
 	static final String BRUHSAILER_ID = "bruhsailer";
 	private static final String REGISTRY_KEY = "guides";
-	private static final Type ENTRY_LIST = new TypeToken<List<Entry>>()
-	{
-	}.getType();
+	private static final int MAX_REGISTRY_CHARS = 64 * 1024;
+	private static final int MAX_USER_GUIDES = 64;
 	private static final Logger log = LoggerFactory.getLogger(GuideRegistry.class);
 
 	/**
@@ -39,10 +36,9 @@ public class GuideRegistry
 	static
 	{
 		BUILTINS.add(new Entry(BUILTIN_ID, "B0aty HCIM Guide V3", "Guide:B0aty_HCIM_Guide_V3", null));
-		// PINNED to a commit SHA for reproducible downloads. To pick up a
-		// newer BRUHsailer guide in a future release, replace the hash:
-		//   git ls-remote https://github.com/umkyzn/BRUHsailer refs/heads/main
-		// (tools/submit.sh re-pins automatically if set back to "main")
+		// PINNED to a commit SHA for reproducible downloads. A future release
+		// must update the reviewed commit explicitly; moving branch names are not
+		// accepted here.
 		BUILTINS.add(new Entry(BRUHSAILER_ID, "BRUHsailer Ironman Guide", null,
 			"https://raw.githubusercontent.com/umkyzn/BRUHsailer/ec20b7e843da2cca69bf2343734dd2c25fef913f/data/guide_data.json"));
 	}
@@ -138,33 +134,46 @@ public class GuideRegistry
 	{
 		List<Entry> entries = new ArrayList<>();
 		String json = configManager.getConfiguration(HcimGuideConfig.GROUP, REGISTRY_KEY);
-		if (json != null && !json.isEmpty())
+		if (json != null && !json.isEmpty() && json.length() <= MAX_REGISTRY_CHARS)
 		{
 			try
 			{
-				List<Entry> saved = gson.fromJson(json, ENTRY_LIST);
+				Entry[] saved = gson.fromJson(json, Entry[].class);
 				if (saved != null)
 				{
+					// keyed by id, FIRST valid entry wins: a tampered registry
+					// with duplicate ids must yield one stable dropdown entry,
+					// not several that byId()/remove can disagree about
+					java.util.Map<String, Entry> byId = new java.util.LinkedHashMap<>();
 					for (Entry e : saved)
 					{
+						if (byId.size() >= MAX_USER_GUIDES)
+						{
+							break;
+						}
 						// re-validate ids on READ, not just on creation: ids become
 						// file names (guides/<id>.txt) and config-key fragments, so
 						// a tampered/corrupted registry must never yield a path like
 						// "../../x"
 						if (e != null && e.id != null && e.title != null && !e.isBuiltin()
-							&& e.id.matches("[a-z0-9-]{1,64}"))
+							&& GUIDE_ID.matcher(e.id).matches() && validWikiPage(e.wikiPage))
 						{
 							e.title = sanitizeTitle(e.title); // defense on read too
 							e.sourceUrl = null; // user entries can never carry a raw URL
-							entries.add(e);
+							byId.putIfAbsent(e.id, e);
 						}
 					}
+					entries.addAll(byId.values());
 				}
 			}
 			catch (Exception e)
 			{
 				log.warn("Could not parse guide registry", e);
 			}
+		}
+		else if (json != null && json.length() > MAX_REGISTRY_CHARS)
+		{
+			log.warn("Guide registry exceeds the safety cap and was ignored");
 		}
 		// built-ins first, in declared order
 		for (int i = BUILTINS.size() - 1; i >= 0; i--)
@@ -191,6 +200,22 @@ public class GuideRegistry
 	 * Titles render in Swing labels, where text starting with "&lt;html&gt;"
 	 * becomes live HTML - never let angle brackets through, at creation OR read.
 	 */
+	private static boolean validWikiPage(String wikiPage)
+	{
+		if (wikiPage == null)
+		{
+			return true; // file-only guide
+		}
+		try
+		{
+			return WikiUrl.pageTitle(wikiPage).equals(wikiPage);
+		}
+		catch (IllegalArgumentException ex)
+		{
+			return false;
+		}
+	}
+
 	private static String sanitizeTitle(String title)
 	{
 		String t = title == null ? "" : title.replace("<", "").replace(">", "").trim();
@@ -206,12 +231,21 @@ public class GuideRegistry
 	{
 		title = sanitizeTitle(title);
 		List<Entry> entries = list();
+		int userCount = 0;
 		for (Entry e : entries)
 		{
+			if (!e.isBuiltin())
+			{
+				userCount++;
+			}
 			if (wikiPage != null && wikiPage.equals(e.wikiPage))
 			{
 				return e;
 			}
+		}
+		if (userCount >= MAX_USER_GUIDES)
+		{
+			throw new IllegalStateException("At most " + MAX_USER_GUIDES + " user guides can be registered");
 		}
 		String base = slug(title);
 		String id = base;
@@ -248,7 +282,7 @@ public class GuideRegistry
 		List<Entry> userEntries = new ArrayList<>();
 		for (Entry e : entries)
 		{
-			if (!e.isBuiltin())
+			if (!e.isBuiltin() && userEntries.size() < MAX_USER_GUIDES)
 			{
 				userEntries.add(e);
 			}
@@ -268,9 +302,18 @@ public class GuideRegistry
 		return null;
 	}
 
+	/** Same shape GuideService enforces: ids become file names and config keys. */
+	private static final java.util.regex.Pattern GUIDE_ID =
+		java.util.regex.Pattern.compile("[a-z0-9-]{1,64}");
+	private static final java.util.regex.Pattern NON_SLUG =
+		java.util.regex.Pattern.compile("[^a-z0-9]+");
+	private static final java.util.regex.Pattern SLUG_EDGE_DASH =
+		java.util.regex.Pattern.compile("(^-|-$)");
+
 	private static String slug(String s)
 	{
-		String slug = s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-").replaceAll("(^-|-$)", "");
+		String slug = NON_SLUG.matcher(s.toLowerCase(Locale.ROOT)).replaceAll("-");
+		slug = SLUG_EDGE_DASH.matcher(slug).replaceAll("");
 		return slug.isEmpty() ? "guide" : (slug.length() > 60 ? slug.substring(0, 60) : slug);
 	}
 }

@@ -34,15 +34,33 @@ public class PathfinderIntegration
 	/** Namespace/payload contract published by the Shortest Path plugin. */
 	static final String NAMESPACE = "shortestpath";
 
-	private final EventBus eventBus;
+	@FunctionalInterface
+	interface MessageSink
+	{
+		void post(PluginMessage message);
+	}
+
+	private final MessageSink messageSink;
 
 	private WorldPoint lastSent; // client thread only
 	private long lastSentAtNanos;
+	/**
+	 * Exact destination represented by the last successful Shortest Path
+	 * hand-off. Overlay rendering is not guaranteed to run on the client
+	 * thread, so publish this separately from the client-thread dedup state.
+	 */
+	private volatile WorldPoint activeTarget;
 
 	@Inject
 	public PathfinderIntegration(EventBus eventBus)
 	{
-		this.eventBus = eventBus;
+		this(eventBus::post);
+	}
+
+	/** Package-private seam for deterministic lifecycle/failure tests. */
+	PathfinderIntegration(MessageSink messageSink)
+	{
+		this.messageSink = messageSink;
 	}
 
 	/**
@@ -57,6 +75,30 @@ public class PathfinderIntegration
 	 * starts after this plugin, reloads, or clears its path internally.
 	 */
 	private static final long KEEPALIVE_NANOS = 15_000_000_000L;
+
+	/**
+	 * Force the next {@link #setTarget} to resend even if the destination has
+	 * not changed.
+	 *
+	 * <p>Shortest Path only trims the walked tail when it receives a target and
+	 * recomputes from the player's CURRENT position. Without a resend the drawn
+	 * path keeps its stale head all the way to the destination.</p>
+	 */
+	public void forceResend()
+	{
+		lastSentAtNanos = 0L;
+		lastSent = null;
+	}
+
+	/**
+	 * Destination currently represented by Shortest Path, or {@code null}
+	 * after a clear. The compass consumes this snapshot so both displays point
+	 * at the same tile, including while that tile is inside the loaded scene.
+	 */
+	WorldPoint getActiveTarget()
+	{
+		return activeTarget;
+	}
 
 	/** Send a path target (client thread). Null clears. */
 	public void setTarget(WorldPoint target)
@@ -93,10 +135,11 @@ public class PathfinderIntegration
 		{
 			Map<String, Object> data = new HashMap<>();
 			data.put("target", target);
-			eventBus.post(new PluginMessage(NAMESPACE, "path", data));
+			messageSink.post(new PluginMessage(NAMESPACE, "path", data));
 			// Commit dedup state only after the message was posted successfully.
 			lastSent = target;
 			lastSentAtNanos = now;
+			activeTarget = target;
 		}
 		catch (Exception e)
 		{
@@ -108,15 +151,16 @@ public class PathfinderIntegration
 	/** Remove the drawn path, if any was requested (client thread). */
 	public void clear()
 	{
-		if (lastSent == null)
+		if (lastSent == null && activeTarget == null)
 		{
 			return;
 		}
 		try
 		{
-			eventBus.post(new PluginMessage(NAMESPACE, "clear"));
+			messageSink.post(new PluginMessage(NAMESPACE, "clear"));
 			lastSent = null;
 			lastSentAtNanos = 0L;
+			activeTarget = null;
 		}
 		catch (Exception e)
 		{

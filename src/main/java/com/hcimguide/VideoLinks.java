@@ -93,9 +93,31 @@ final class VideoLinks
 	}
 
 	/**
+	 * A whitelisted URL normalized for presentation, or null. Recognized
+	 * hosts are always opened over HTTPS - an http:// link in remote guide
+	 * text must not hand the user's browser a downgraded connection.
+	 */
+	static String accepted(String url)
+	{
+		if (!isVideoUrl(url))
+		{
+			return null;
+		}
+		String u = url.trim();
+		if (u.regionMatches(true, 0, "http://", 0, 7))
+		{
+			return "https://" + u.substring(7);
+		}
+		return u;
+	}
+
+	/**
 	 * First whitelisted video URL embedded in plain step text (the wikitext
 	 * guide pastes bare URLs), with trailing prose punctuation stripped.
-	 * Returns the URL in its ORIGINAL case - video ids are case-sensitive.
+	 * Returns the URL in its ORIGINAL case except the scheme - video ids are
+	 * case-sensitive; the scheme is normalized to https. Scanning looks for
+	 * a lowercase "http" on purpose: guides paste plain lowercase URLs, and
+	 * an exotic mixed-case scheme simply isn't discovered (fails closed).
 	 */
 	static String firstVideoUrl(String text)
 	{
@@ -120,10 +142,10 @@ final class VideoLinks
 			}
 			if (trimEnd - idx <= MAX_URL)
 			{
-				String candidate = text.substring(idx, trimEnd);
-				if (isVideoUrl(candidate))
+				String ok = accepted(text.substring(idx, trimEnd));
+				if (ok != null)
 				{
-					return candidate;
+					return ok;
 				}
 			}
 			idx = end + 1;

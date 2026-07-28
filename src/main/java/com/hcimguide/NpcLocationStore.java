@@ -1,19 +1,22 @@
 package com.hcimguide;
 
 import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.lang.reflect.Type;
+import java.io.Reader;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -41,10 +44,6 @@ public class NpcLocationStore
 	private static final Logger log = LoggerFactory.getLogger(NpcLocationStore.class);
 	private static final File STORE_FILE =
 		new File(new File(RuneLite.RUNELITE_DIR, "hcim-guide"), "npc-locations.json");
-	private static final Type MAP_TYPE = new TypeToken<Map<String, int[]>>()
-	{
-	}.getType();
-
 	/** Import size guard: covers full-game spawn dumps with generous headroom. */
 	private static final int MAX_IMPORT_ENTRIES = 50_000;
 	private static final int MAX_IMPORT_CHARS = 16 * 1024 * 1024;
@@ -60,11 +59,30 @@ public class NpcLocationStore
 	 * lookup() runs every game tick while a pinned target is out of scene, and
 	 * its loose-match fallback scans the whole map on a miss - trivial for the
 	 * seed, but a bundled full-game database makes that tens of thousands of
-	 * comparisons per tick. Memoize the last query (including misses) and
-	 * invalidate whenever the map changes.
+	 * comparisons per tick. Memoize recent queries INCLUDING misses (an empty
+	 * Optional), so alternating between two unknown targets never rescans, and
+	 * invalidate whenever the map changes. Access-order LRU, synchronized;
+	 * clear() replaces the old two-field cache whose separate writes could
+	 * briefly pair a query with the wrong result.
 	 */
-	private volatile String cachedQuery;
-	private volatile WorldPoint cachedResult;
+	private static final int LOOKUP_CACHE_SIZE = 16;
+	private final Map<String, Optional<WorldPoint>> lookupCache =
+		Collections.synchronizedMap(new LinkedHashMap<String, Optional<WorldPoint>>(32, 0.75f, true)
+		{
+			@Override
+			protected boolean removeEldestEntry(Map.Entry<String, Optional<WorldPoint>> eldest)
+			{
+				return size() > LOOKUP_CACHE_SIZE;
+			}
+		});
+	/**
+	 * Guards against a lookup that STRADDLES an invalidation: it read the old
+	 * map, the importer put new data and cleared the cache, and only then
+	 * would the lookup cache its stale result - which nothing would ever
+	 * invalidate again. Snapshot before reading, only cache when unchanged.
+	 */
+	private final java.util.concurrent.atomic.AtomicInteger cacheGen =
+		new java.util.concurrent.atomic.AtomicInteger();
 
 	@Inject
 	public NpcLocationStore(Gson gson)
@@ -88,7 +106,7 @@ public class NpcLocationStore
 			try
 			{
 				String json = readStoreText();
-				mergeIfAbsent(gson.fromJson(json, MAP_TYPE));
+				mergeIfAbsent(readLocationMap(new StringReader(json), MAX_IMPORT_ENTRIES));
 			}
 			catch (Exception e)
 			{
@@ -117,12 +135,60 @@ public class NpcLocationStore
 		}
 		try (InputStreamReader reader = new InputStreamReader(in, StandardCharsets.UTF_8))
 		{
-			mergeIfAbsent(gson.fromJson(reader, MAP_TYPE));
+			mergeIfAbsent(readLocationMap(reader, MAX_IMPORT_ENTRIES));
 		}
 		catch (Exception e)
 		{
 			log.warn("Could not read npc locations ({})", label, e);
 		}
+	}
+
+	/** Bounded streaming parser avoids reflective generic metadata and whole-tree allocation. */
+	private static Map<String, int[]> readLocationMap(Reader input, int maxEntries)
+		throws IOException
+	{
+		Map<String, int[]> out = new HashMap<>();
+		try (com.google.gson.stream.JsonReader reader = new com.google.gson.stream.JsonReader(input))
+		{
+			reader.beginObject();
+			while (reader.hasNext())
+			{
+				String name = reader.nextName();
+				if (out.size() >= maxEntries)
+				{
+					reader.skipValue();
+					continue;
+				}
+				if (reader.peek() != com.google.gson.stream.JsonToken.BEGIN_ARRAY)
+				{
+					reader.skipValue();
+					continue;
+				}
+				reader.beginArray();
+				int[] values = new int[3];
+				int count = 0;
+				boolean valid = true;
+				while (reader.hasNext())
+				{
+					if (count < values.length && reader.peek() == com.google.gson.stream.JsonToken.NUMBER)
+					{
+						values[count++] = reader.nextInt();
+					}
+					else
+					{
+						valid = false;
+						reader.skipValue();
+					}
+				}
+				reader.endArray();
+				if (valid && count == values.length)
+				{
+					out.put(name, values);
+				}
+			}
+			reader.endObject();
+		}
+		return out;
 	}
 
 	private void mergeIfAbsent(Map<String, int[]> raw)
@@ -179,33 +245,76 @@ public class NpcLocationStore
 		{
 			return null;
 		}
-		if (norm.equals(cachedQuery))
+		Optional<WorldPoint> cached = lookupCache.get(norm);
+		if (cached != null)
 		{
-			return cachedResult;
+			return cached.orElse(null);
 		}
+		int gen = cacheGen.get();
 		int[] v = locations.get(norm);
 		if (v == null)
 		{
-			// loose fallback for prefix-style matches ("Veos" vs "Veos the captain")
-			for (Map.Entry<String, int[]> e : locations.entrySet())
-			{
-				if (Names.matchNormalized(norm, e.getKey()))
-				{
-					v = e.getValue();
-					break;
-				}
-			}
+			v = looseMatch(norm);
 		}
 		WorldPoint result = v == null ? null : new WorldPoint(v[0], v[1], v[2]);
-		cachedResult = result;
-		cachedQuery = norm;
+		if (cacheGen.get() == gen)
+		{
+			lookupCache.put(norm, Optional.ofNullable(result));
+		}
 		return result;
+	}
+
+	/**
+	 * Deterministic loose fallback for prefix-style matches ("Veos" vs "Veos
+	 * the captain"), used only after an exact miss. Prefix matching is only
+	 * attempted when both names have at least four normalized characters -
+	 * a two-letter query would loose-match half of a full-game database.
+	 * Among the candidates the closest length wins, ties broken
+	 * lexicographically, so the same query resolves to the same entry
+	 * regardless of map iteration order or capacity.
+	 */
+	private int[] looseMatch(String norm)
+	{
+		if (norm.length() < 4)
+		{
+			return null;
+		}
+		String bestKey = null;
+		int[] best = null;
+		for (Map.Entry<String, int[]> e : locations.entrySet())
+		{
+			String key = e.getKey();
+			if (key.length() < 4 || !Names.matchNormalized(norm, key))
+			{
+				continue;
+			}
+			if (bestKey == null || closerTo(norm, key, bestKey))
+			{
+				bestKey = key;
+				best = e.getValue();
+			}
+		}
+		return best;
+	}
+
+	/** True when candidate is a strictly better match for query than incumbent. */
+	private static boolean closerTo(String query, String candidate, String incumbent)
+	{
+		int c = Math.abs(candidate.length() - query.length());
+		int i = Math.abs(incumbent.length() - query.length());
+		return c != i ? c < i : candidate.compareTo(incumbent) < 0;
 	}
 
 	private void invalidateLookupCache()
 	{
-		cachedQuery = null;
-		cachedResult = null;
+		cacheGen.incrementAndGet();
+		lookupCache.clear();
+	}
+
+	/** Revision used by cached guide-location plans. Changes whenever location data changes. */
+	int getRevision()
+	{
+		return cacheGen.get();
 	}
 
 	/** All known locations as shareable JSON (name -&gt; [x, y, plane]). */
@@ -239,7 +348,7 @@ public class NpcLocationStore
 		Map<String, int[]> raw;
 		try
 		{
-			raw = gson.fromJson(json, MAP_TYPE);
+			raw = readLocationMap(new StringReader(json), MAX_IMPORT_ENTRIES + 1);
 		}
 		catch (Exception e)
 		{
@@ -314,7 +423,9 @@ public class NpcLocationStore
 			return;
 		}
 		// clear BEFORE snapshotting: a learn() landing mid-save re-marks dirty
-		// and gets picked up by the next save instead of being lost
+		// and gets picked up by the next save instead of being lost. (Its
+		// entry may ALSO already be in this save's snapshot - the cost is one
+		// harmless redundant save, never a lost write.)
 		dirty = false;
 		try
 		{

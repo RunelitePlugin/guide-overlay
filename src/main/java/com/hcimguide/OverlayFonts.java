@@ -2,52 +2,147 @@ package com.hcimguide;
 
 import java.awt.Font;
 import java.awt.Graphics2D;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
 import net.runelite.client.ui.FontManager;
 
-/**
- * Applies the user's overlay font choice consistently across all of this
- * plugin's overlays. CLIENT_DEFAULT leaves the font RuneLite already set,
- * so the plugin follows the client-wide overlay font setting. The SANS_*
- * styles use the JVM's logical sans-serif font (always present on every
- * platform) for a plainer, more readable look than the RuneScape faces.
- */
+/** Resolves bounded, configurable fonts for every text-bearing plugin overlay. */
 final class OverlayFonts
 {
-	// cached: apply() runs on the render path every frame
-	private static final Font SANS_SMALL_FONT = new Font(Font.SANS_SERIF, Font.PLAIN, 11);
-	private static final Font SANS_FONT = new Font(Font.SANS_SERIF, Font.PLAIN, 12);
-	private static final Font SANS_LARGE_FONT = new Font(Font.SANS_SERIF, Font.PLAIN, 14);
+	private static final int MAX_CACHED_FONTS = 128;
+	private static final int MAX_CUSTOM_FAMILY_LENGTH = 80;
+
+	/**
+	 * Access-order LRU: users can explore installed fonts and sizes without
+	 * retaining every combination for the lifetime of the RuneLite client.
+	 */
+	private static final Map<String, Font> CACHE = new LinkedHashMap<String, Font>(32, 0.75f, true)
+	{
+		@Override
+		protected boolean removeEldestEntry(Map.Entry<String, Font> eldest)
+		{
+			return size() > MAX_CACHED_FONTS;
+		}
+	};
 
 	private OverlayFonts()
 	{
 	}
 
-	static void apply(Graphics2D g, HcimGuideConfig.FontStyle style)
+	static void apply(Graphics2D graphics, HcimGuideConfig config)
 	{
-		switch (style)
+		graphics.setFont(resolve(graphics.getFont(), config.overlayFontFamily(),
+			config.customOverlayFontFamily(), config.overlayFontWeight(), config.overlayFontSize()));
+	}
+
+	static Font resolve(Font fallback, HcimGuideConfig.OverlayFontFamily family,
+		String customFamily, HcimGuideConfig.OverlayFontWeight weight, int requestedSize)
+	{
+		HcimGuideConfig.OverlayFontFamily safeFamily = family == null
+			? HcimGuideConfig.OverlayFontFamily.SANS_SERIF : family;
+		HcimGuideConfig.OverlayFontWeight safeWeight = weight == null
+			? HcimGuideConfig.OverlayFontWeight.FAMILY_DEFAULT : weight;
+		int size = Math.max(8, Math.min(40, requestedSize));
+		String custom = sanitizeCustomFamily(customFamily);
+		String fallbackKey = fallback == null ? "null"
+			: fallback.getName() + ':' + fallback.getStyle();
+		String key = safeFamily.name() + ':' + custom.toLowerCase(Locale.ROOT)
+			+ ':' + safeWeight.name() + ':' + size + ':' + fallbackKey;
+		synchronized (CACHE)
 		{
-			case SMALL:
-				g.setFont(FontManager.getRunescapeSmallFont());
-				break;
-			case REGULAR:
-				g.setFont(FontManager.getRunescapeFont());
-				break;
-			case BOLD:
-				g.setFont(FontManager.getRunescapeBoldFont());
-				break;
-			case SANS_SMALL:
-				g.setFont(SANS_SMALL_FONT);
-				break;
-			case SANS:
-				g.setFont(SANS_FONT);
-				break;
-			case SANS_LARGE:
-				g.setFont(SANS_LARGE_FONT);
-				break;
-			case CLIENT_DEFAULT:
-			default:
-				// keep whatever RuneLite set
-				break;
+			Font cached = CACHE.get(key);
+			if (cached != null)
+			{
+				return cached;
+			}
+			Font created = create(fallback, safeFamily, custom, safeWeight, size);
+			CACHE.put(key, created);
+			return created;
+		}
+	}
+
+	private static Font create(Font fallback, HcimGuideConfig.OverlayFontFamily family,
+		String customFamily, HcimGuideConfig.OverlayFontWeight weight, int size)
+	{
+		Font base;
+		if (family == HcimGuideConfig.OverlayFontFamily.CLIENT_DEFAULT)
+		{
+			base = fallback != null ? fallback : FontManager.getRunescapeFont();
+		}
+		else if (family.isRuneScape())
+		{
+			switch (family)
+			{
+				case SMALL:
+					base = FontManager.getRunescapeSmallFont();
+					break;
+				case BOLD:
+					base = FontManager.getRunescapeBoldFont();
+					break;
+				case RUNESCAPE:
+				case REGULAR:
+				default:
+					base = FontManager.getRunescapeFont();
+					break;
+			}
+		}
+		else
+		{
+			int physicalStyle = weight == HcimGuideConfig.OverlayFontWeight.FAMILY_DEFAULT
+				? family.getDefaultStyle() : weight.resolveStyle(family);
+			String requestedName = family == HcimGuideConfig.OverlayFontFamily.CUSTOM
+				? customFamily : family.getAwtName();
+			if (requestedName == null || requestedName.isEmpty())
+			{
+				requestedName = Font.SANS_SERIF;
+			}
+			base = installedOrFallback(requestedName, physicalStyle, size);
+		}
+		int style = weight == HcimGuideConfig.OverlayFontWeight.FAMILY_DEFAULT
+			? base.getStyle() : weight.resolveStyle(family);
+		return base.deriveFont(style, (float) size);
+	}
+
+	/** Java silently maps unknown physical names to Dialog; make the fallback explicit. */
+	private static Font installedOrFallback(String requestedName, int style, int size)
+	{
+		Font candidate = new Font(requestedName, style, size);
+		String resolved = candidate.getFamily(Locale.ROOT);
+		if (!Font.DIALOG.equalsIgnoreCase(requestedName)
+			&& Font.DIALOG.equalsIgnoreCase(resolved)
+			&& !requestedName.equalsIgnoreCase(resolved))
+		{
+			return new Font(Font.SANS_SERIF, style, size);
+		}
+		return candidate;
+	}
+
+	private static String sanitizeCustomFamily(String family)
+	{
+		if (family == null)
+		{
+			return "";
+		}
+		String trimmed = family.trim();
+		return trimmed.length() <= MAX_CUSTOM_FAMILY_LENGTH
+			? trimmed : trimmed.substring(0, MAX_CUSTOM_FAMILY_LENGTH);
+	}
+
+	/** Drop cached native font objects when the plugin is disabled. */
+	static void clear()
+	{
+		synchronized (CACHE)
+		{
+			CACHE.clear();
+		}
+	}
+
+	static int cacheSizeForTesting()
+	{
+		synchronized (CACHE)
+		{
+			return CACHE.size();
 		}
 	}
 }

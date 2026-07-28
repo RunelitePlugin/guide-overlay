@@ -1,8 +1,6 @@
 package com.hcimguide;
 
 import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
-import java.lang.reflect.Type;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -34,9 +32,6 @@ public class BankStockTracker
 {
 	private static final Logger log = LoggerFactory.getLogger(BankStockTracker.class);
 	private static final String STOCK_KEY = "teleportBankStock";
-	private static final Type PERSIST_TYPE = new TypeToken<Map<String, int[]>>()
-	{
-	}.getType();
 
 	static final int SRC_INVENTORY = 0;
 	static final int SRC_EQUIPMENT = 1;
@@ -113,10 +108,10 @@ public class BankStockTracker
 					if (low.startsWith(part))
 					{
 						int[] row = counts.computeIfAbsent(part, k -> new int[SOURCES * 2]);
-						row[source * 2] += item.getQuantity();
+						row[source * 2] = addSaturated(row[source * 2], item.getQuantity());
 						if (hasChargeSuffix(low))
 						{
-							row[source * 2 + 1] += item.getQuantity();
+							row[source * 2 + 1] = addSaturated(row[source * 2 + 1], item.getQuantity());
 						}
 					}
 				}
@@ -205,18 +200,31 @@ public class BankStockTracker
 		{
 			return; // absent, or implausibly large for ~15 tracked prefixes
 		}
-		Map<String, int[]> bank;
+		Map<String, int[]> bank = new HashMap<>();
 		try
 		{
-			bank = gson.fromJson(json, PERSIST_TYPE);
+			com.google.gson.JsonElement parsed = new com.google.gson.JsonParser().parse(json);
+			if (!parsed.isJsonObject())
+			{
+				return;
+			}
+			for (Map.Entry<String, com.google.gson.JsonElement> entry
+				: parsed.getAsJsonObject().entrySet())
+			{
+				if (!parts.contains(entry.getKey()) || !entry.getValue().isJsonArray())
+				{
+					continue;
+				}
+				com.google.gson.JsonArray values = entry.getValue().getAsJsonArray();
+				if (values.size() == 2)
+				{
+					bank.put(entry.getKey(), new int[]{values.get(0).getAsInt(), values.get(1).getAsInt()});
+				}
+			}
 		}
 		catch (Exception e)
 		{
 			log.warn("Could not parse persisted teleport bank stock", e);
-			return;
-		}
-		if (bank == null)
-		{
 			return;
 		}
 		synchronized (this)
@@ -238,8 +246,11 @@ public class BankStockTracker
 					row[SRC_BANK * 2 + 1] = v[1];
 				}
 			}
+			// inside the lock: an unsynchronized ++ racing update()'s locked
+			// one can lose an increment, and a lost revision leaves the route
+			// suggestion cache convinced nothing changed
+			revision++;
 		}
-		revision++;
 	}
 
 	/** Forget everything (plugin shutdown; the persisted bank column remains). */
@@ -248,5 +259,16 @@ public class BankStockTracker
 		counts.clear();
 		bankSeenLive = false;
 		revision++;
+	}
+
+	/**
+	 * Prefix-matched variants can pool into one counter, so the live sum can
+	 * theoretically exceed int range - clamp instead of wrapping negative
+	 * (a negative count would corrupt route decisions).
+	 */
+	private static int addSaturated(int a, int b)
+	{
+		long sum = (long) a + b;
+		return sum > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
 	}
 }

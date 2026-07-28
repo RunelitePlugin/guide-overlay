@@ -21,6 +21,10 @@ final class ItemAliases
 {
 	private static final Map<String, String> ALIASES = new HashMap<>();
 
+	/** "Waterskin(4)", "Prayer potion(3)": a name with a trailing dose count. */
+	private static final java.util.regex.Pattern DOSE_SUFFIX =
+		java.util.regex.Pattern.compile("^(.*?[a-z])(\\(\\d+\\))$");
+
 	private static void a(String colloquial, String canonical)
 	{
 		ALIASES.put(ItemReq.normalize(colloquial), canonical);
@@ -29,8 +33,8 @@ final class ItemAliases
 	static
 	{
 		// ---- diary gear / jewelry (charged names differ from bare mentions)
-		a("Ardy Cloak", "Ardougne cloak 1");
-		a("Ardougne Cloak", "Ardougne cloak 1");
+
+
 		a("Dueling Ring", "Ring of dueling(8)");
 		a("Duelling Ring", "Ring of dueling(8)");
 		a("Ring of Duelling", "Ring of dueling(8)");
@@ -167,6 +171,162 @@ final class ItemAliases
 		a("Nulodion Notes", "Nulodion's notes");
 		a("Tobans stolen Gold", "Toban's gold");
 		a("t'd Crunchies", "Toad crunchies");
+			// ---- 1.5.4d: BRUHsailer confirmed items (verified names)
+			a("Goldsmith Gauntlets", "Goldsmith gauntlets");
+			a("Gold Gauntlets", "Goldsmith gauntlets");
+			a("Costume Needle", "Costume needle");
+			a("Lead Ore", "Lead ore");
+			a("Broad Arrowtip Packs", "Broad arrowhead pack");
+			a("Broad Arrowhead Pack", "Broad arrowhead pack");
+			a("Energy Potions", "Energy potion(4)");
+			a("Chronicle Cards", "Teleport card");
+			a("Bucket Packs", "Empty bucket pack");
+			a("Broad Arrowtips", "Broad arrowtips");
+			a("Trollweiss", "Trollweiss");
+			a("Trollweis", "Trollweiss");
+			a("Berserker Helmet", "Berserker helm");
+
+			// Deliberately NO bare "Earth"/"Water"/"Mind" -> rune aliases:
+			// neither guide ever puts those words in an item position, and a
+			// context-free alias would turn a step like "Collect water" into
+			// a hard rune requirement that blocks trip-ready. Re-add only
+			// with a quantity-context rule if a guide ever needs it.
+			a("Earth Staff", "Staff of earth");
+
+			// ---- 1.5.4e: Sailing items (names confirmed from Shipbuilding wiki)
+			a("Linen Sails", "Wooden mast and linen sails");
+			a("Oak Mast", "Oak mast and linen sails");
+			a("Salvaging Station", "Salvaging station (facility)");
+			a("Salvaging Hooks", "Mithril salvaging hook");
+			a("Mithril Salvaging Hooks", "Mithril salvaging hook");
+			a("Kegs", "Keg (facility)");
+			a("Keg", "Keg (facility)");
+
+			// ---- 1.5.4f: confirmed quest/Sailing items (verified from wiki)
+			a("Crate of Looty", "Crate of looty");
+			a("Vile Vigour", "Vile Vigour");
+
+			// ---- 1.8.1: proved unresolved by a live-client audit of both guides
+			a("Air Staff", "Staff of air");
+			a("Fire Staff", "Staff of fire");
+
+			a("Adrigal", "Ardrigal");
+			a("Karamja Rum", "Karamjan rum");
+			a("Raw Rat", "Raw rat meat");
+			a("Raw Sea Bass", "Raw bass");
+			a("Red Eclipse", "Eclipse red");
+			a("Kitten", "Pet kitten");
+
+			a("Black Full Helmet", "Black full helm");
+			a("Mithril Full Helmet", "Mithril full helm");
+			a("Runite Spear", "Rune spear");
+			a("Silver Tiara", "Tiara");
+			a("Crab Meat", "Crab meat");
+			a("Doctor Hat", "Doctor's hat");
+			a("Druidic Pouch", "Druid pouch");
+			a("Duelling Ring (8)", "Ring of dueling(8)");
+			a("Defence (4)", "Defence potion(4)");
+			a("Guthix Rest", "Guthix rest(4)");
+			a("Elemental Bars", "Elemental metal");
+			a("Regular Log", "Logs");
+			a("regular Logs", "Logs");
+			a("Unlit Candle", "Candle");
+			a("Slime", "Bucket of slime");
+			a("bait", "Fishing bait");
+			a("mindbombs", "Wizard\u0027s mind bomb");
+			a("Willow Branches", "Willow branch");
+			a("willow branches", "Willow branch");
+			a("his bones", "Bones");
+			a("NOTED: Ashes", "Ashes");
+			a("Remaining Dragon Bones", "Dragon bones");
+			a("extra Steel warhammer", "Steel warhammer");
+			a("Goutweed with Protect", "Goutweed");
+			a("pack of empty buckets", "Empty bucket pack");
+			a("Invent of Planks", "Plank");
+			a("Butterfly Magic Net", "Butterfly net");
+			a("Barcrawl", "Barcrawl card");
+			a("Poisoned Sheep feed", "Sheep feed");
+
+			// ---- 1.8.2: real items the second live audit proved need a name hop
+			a("bucket packs", "Empty bucket pack");
+			a("defence potion", "Defence potion(4)");
+			a("more planks", "Plank");
+			a("pairs of climbing boots", "Climbing boots");
+			a("sack of 10 potatoes", "Potatoes(10)");
+			a("second knife", "Knife");
+			a("vinegar", "Jug of vinegar");
+
+			// ---- 1.8.8: from the first fully-scanned live audit
+			a("Crab Meat", "Crab meat");
+			a("Isafdor Painting", "Isafdar painting");
+			a("5 Coloured Balls", "Stone ball");
+			a("all 5 Coloured Balls", "Stone ball");
+			a("Coloured Balls", "Stone ball");
+			a("Pink Roses", "Roses");
+			a("Red Roses", "Roses");
+			a("White Roses", "Roses");
+
+
+
+
+
+
+			// ---- 1.9.0: confirmed against the wiki
+			a("Battered Key", "Battered key");
+
+
+			// ---- 1.9.1: the guide names differ from the in-game names
+			a("Brimstone boots", "Boots of brimstone");
+			a("Masterthief Armband", "Thieves\u0027 armband");
+			a("Masterthief armband", "Thieves\u0027 armband");
+			// the plain wizard hat IS black in game; only the (g)/(t) variants
+			// carry a colour word, so "Black Wizard Hat" means the base item
+			a("Black Wizard Hat", "Wizard hat");
+			a("Black wizard hat", "Wizard hat");
+
+			// ---- 1.11.0: bare rune words in a list where "Rune" is written once
+			a("air", "Air rune");
+			a("earth", "Earth rune");
+			a("fire", "Fire rune");
+			a("water", "Water rune");
+			a("mind", "Mind rune");
+			a("law", "Law rune");
+			a("astral", "Astral rune");
+			a("cosmic", "Cosmic rune");
+			a("nature", "Nature rune");
+			a("chaos", "Chaos rune");
+			a("death", "Death rune");
+			a("blood", "Blood rune");
+			a("soul", "Soul rune");
+			a("body", "Body rune");
+			a("Tooth", "Ogre tooth");
+
+			// ---- 1.11.4: reported from live in-client checking
+			a("Butterfly Magic Net", "Magic butterfly net");
+			a("Butterfly net/Magic Net", "Magic butterfly net");
+			a("Magic Net", "Magic butterfly net");
+			a("Crab Meat", "Giant crab meat");
+			a("sand", "Bucket of sand");
+
+			// NOTE: "Food" deliberately has NO alias. Any cooked food satisfies
+			// these steps, so it stays free text: the resolver reports free text
+			// as UNRESOLVABLE, which is ignored for presence borders and for trip
+			// readiness. Aliasing it to a specific fish would show a red missing
+			// border to a player carrying a different food. AliasTest guards this.
+
+		// Auto-register the plural of every dose-suffixed canonical name:
+		// guides write "Waterskins(4)" but the item is "Waterskin(4)". Doing this
+		// by rule rather than by hand covers every potion and dose item at once.
+		java.util.Map<String, String> plurals = new HashMap<>();
+		for (String canonical : new java.util.HashSet<>(ALIASES.values()))
+		{
+			java.util.regex.Matcher m = DOSE_SUFFIX.matcher(canonical);
+			if (m.matches())
+			{
+				plurals.put(ItemReq.normalize(m.group(1) + "s" + m.group(2)), canonical);
+			}
+		}
+		ALIASES.putAll(plurals);
 	}
 
 	/**

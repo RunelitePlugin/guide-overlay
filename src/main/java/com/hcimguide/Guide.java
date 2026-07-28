@@ -61,6 +61,9 @@ public class Guide
 		return n;
 	}
 
+	private static final java.util.regex.Pattern NUMBERED_BANK_ID =
+		java.util.regex.Pattern.compile("E[0-9]+\\.B[0-9]+[A-Z]?");
+
 	/** Number of sections positively identified as numbered Bank markers. */
 	public int numberedBanks()
 	{
@@ -69,7 +72,7 @@ public class Guide
 		{
 			for (GuideBank b : e.getBanks())
 			{
-				if (b.getId().matches("E[0-9]+\\.B[0-9]+[A-Z]?"))
+				if (NUMBERED_BANK_ID.matcher(b.getId()).matches())
 				{
 					n++;
 				}
@@ -81,5 +84,23 @@ public class Guide
 	public boolean isEmpty()
 	{
 		return totalSteps() == 0;
+	}
+
+	/**
+	 * Set when a safety cap (step count, episode count, sections per
+	 * episode) discarded part of the source during parsing, so the UI can
+	 * say "this import is incomplete" instead of presenting a truncated
+	 * guide as the whole thing. Never persisted - recomputed on every parse.
+	 */
+	private boolean truncated;
+
+	public void markTruncated()
+	{
+		truncated = true;
+	}
+
+	public boolean isTruncated()
+	{
+		return truncated;
 	}
 }

@@ -1,6 +1,8 @@
 package com.hcimguide;
 
 import java.awt.Color;
+import java.awt.Font;
+import net.runelite.client.config.Alpha;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
@@ -15,20 +17,111 @@ public interface HcimGuideConfig extends Config
 	String COMPLETED_STEPS_KEY = "completedSteps";
 
 	/**
-	 * Font choice for the plugin's overlays (HUD, compass, NPC labels).
-	 * RuneLite's config UI title-cases the enum names for display. The SANS_*
-	 * options use the system sans-serif font - plainer than the RuneScape
-	 * fonts but noticeably easier to read at small sizes.
+	 * Font family for the plugin's text overlays. Physical-font presets use
+	 * the named installed font when available and fall back to Java's logical
+	 * sans-serif family when unavailable. The legacy constants remain so old
+	 * saved config values continue to deserialize after upgrading.
 	 */
-	enum FontStyle
+	enum OverlayFontFamily
 	{
-		CLIENT_DEFAULT,
-		SMALL,
-		REGULAR,
-		BOLD,
-		SANS_SMALL,
-		SANS,
-		SANS_LARGE
+		CLIENT_DEFAULT("Client default", null, Font.PLAIN),
+		RUNESCAPE("RuneScape", null, Font.PLAIN),
+		SANS_SERIF("Sans serif", Font.SANS_SERIF, Font.PLAIN),
+		SERIF("Serif", Font.SERIF, Font.PLAIN),
+		MONOSPACED("Monospaced", Font.MONOSPACED, Font.PLAIN),
+		DIALOG("Dialog", Font.DIALOG, Font.PLAIN),
+		DIALOG_INPUT("Dialog input", Font.DIALOG_INPUT, Font.PLAIN),
+		ARIAL("Arial", "Arial", Font.PLAIN),
+		CALIBRI("Calibri", "Calibri", Font.PLAIN),
+		CAMBRIA("Cambria", "Cambria", Font.PLAIN),
+		CANDARA("Candara", "Candara", Font.PLAIN),
+		CONSOLAS("Consolas", "Consolas", Font.PLAIN),
+		COURIER_NEW("Courier New", "Courier New", Font.PLAIN),
+		GEORGIA("Georgia", "Georgia", Font.PLAIN),
+		HELVETICA("Helvetica", "Helvetica", Font.PLAIN),
+		INTER("Inter", "Inter", Font.PLAIN),
+		JETBRAINS_MONO("JetBrains Mono", "JetBrains Mono", Font.PLAIN),
+		LUCIDA_CONSOLE("Lucida Console", "Lucida Console", Font.PLAIN),
+		MENLO("Menlo", "Menlo", Font.PLAIN),
+		NOTO_SANS("Noto Sans", "Noto Sans", Font.PLAIN),
+		OPEN_SANS("Open Sans", "Open Sans", Font.PLAIN),
+		ROBOTO("Roboto", "Roboto", Font.PLAIN),
+		SEGOE_UI("Segoe UI", "Segoe UI", Font.PLAIN),
+		TAHOMA("Tahoma", "Tahoma", Font.PLAIN),
+		TIMES_NEW_ROMAN("Times New Roman", "Times New Roman", Font.PLAIN),
+		TREBUCHET_MS("Trebuchet MS", "Trebuchet MS", Font.PLAIN),
+		VERDANA("Verdana", "Verdana", Font.PLAIN),
+		CUSTOM("Custom installed font", null, Font.PLAIN),
+
+		// Legacy persisted values from 1.15.2 and earlier.
+		SMALL("RuneScape small (legacy)", null, Font.PLAIN),
+		REGULAR("RuneScape regular (legacy)", null, Font.PLAIN),
+		BOLD("RuneScape bold (legacy)", null, Font.BOLD),
+		SANS_SMALL("Sans serif (legacy small)", Font.SANS_SERIF, Font.PLAIN),
+		SANS("Sans serif (legacy)", Font.SANS_SERIF, Font.PLAIN),
+		SANS_LARGE("Sans serif (legacy large)", Font.SANS_SERIF, Font.PLAIN);
+
+		private final String label;
+		private final String awtName;
+		private final int defaultStyle;
+
+		OverlayFontFamily(String label, String awtName, int defaultStyle)
+		{
+			this.label = label;
+			this.awtName = awtName;
+			this.defaultStyle = defaultStyle;
+		}
+
+		String getAwtName()
+		{
+			return awtName;
+		}
+
+		int getDefaultStyle()
+		{
+			return defaultStyle;
+		}
+
+		boolean isRuneScape()
+		{
+			return this == RUNESCAPE || this == SMALL || this == REGULAR || this == BOLD;
+		}
+
+		@Override
+		public String toString()
+		{
+			return label;
+		}
+	}
+
+	/** Font weight/style applied independently of the selected family. */
+	enum OverlayFontWeight
+	{
+		FAMILY_DEFAULT("Family default", -1),
+		PLAIN("Plain", Font.PLAIN),
+		BOLD("Bold", Font.BOLD),
+		ITALIC("Italic", Font.ITALIC),
+		BOLD_ITALIC("Bold italic", Font.BOLD | Font.ITALIC);
+
+		private final String label;
+		private final int awtStyle;
+
+		OverlayFontWeight(String label, int awtStyle)
+		{
+			this.label = label;
+			this.awtStyle = awtStyle;
+		}
+
+		int resolveStyle(OverlayFontFamily family)
+		{
+			return awtStyle >= 0 ? awtStyle : family.getDefaultStyle();
+		}
+
+		@Override
+		public String toString()
+		{
+			return label;
+		}
 	}
 
 	/** Where the clickable next/previous step arrows live. */
@@ -46,31 +139,21 @@ public interface HcimGuideConfig extends Config
 		TAILED
 	}
 
-	/** Text size for step text in the side panel. */
-	enum PanelTextSize
+	/** Which parts of location guidance are visible. */
+	enum GuidanceDisplayMode
 	{
-		SMALL(11),
-		REGULAR(12),
-		LARGE(14);
-
-		private final int px;
-
-		PanelTextSize(int px)
-		{
-			this.px = px;
-		}
-
-		public int getPx()
-		{
-			return px;
-		}
+		ALL,
+		WORLD_MAP_ONLY,
+		SHORTEST_PATH_ONLY,
+		NEARBY_ONLY,
+		NO_COMPASS
 	}
 
 	// ------------------------------------------------------------------ sections
 
 	@ConfigSection(
 		name = "Target tracking",
-		description = "Pinned-step target: hint arrow, target highlight, far-target compass",
+		description = "Current-step target: colored scene arrow, target highlight and path-aligned compass",
 		position = 0,
 		closedByDefault = true
 	)
@@ -160,8 +243,8 @@ public interface HcimGuideConfig extends Config
 
 	@ConfigItem(
 		keyName = "enableHintArrow",
-		name = "Hint arrow to target",
-		description = "Show the in-game hint arrow when the pinned step's NPC (or its known location) is nearby",
+		name = "Colored target arrow",
+		description = "Draw a persistent colored arrow above the current (or pinned) step's nearby NPC or destination tile",
 		position = 1,
 		section = targetSection
 	)
@@ -170,11 +253,50 @@ public interface HcimGuideConfig extends Config
 		return true;
 	}
 
+	@Alpha
+	@ConfigItem(
+		keyName = "targetArrowColor",
+		name = "Target arrow color",
+		description = "Color and opacity of the custom arrow above the tracked target",
+		position = 2,
+		section = targetSection
+	)
+	default Color targetArrowColor()
+	{
+		return new Color(0, 255, 255, 230);
+	}
+
+	@Range(min = 8, max = 32)
+	@ConfigItem(
+		keyName = "targetArrowSize",
+		name = "Target arrow size",
+		description = "Size of the custom target arrow in pixels",
+		position = 3,
+		section = targetSection
+	)
+	default int targetArrowSize()
+	{
+		return 16;
+	}
+
+	@ConfigItem(
+		keyName = "nativeHintArrow",
+		name = "Native game hint arrow",
+		description = "Also request the game's native hint arrow. Other plugins or the game may replace it; the colored overlay arrow remains independent.",
+		position = 4,
+		section = targetSection
+	)
+	default boolean nativeHintArrow()
+	{
+		return false;
+	}
+
+	@Alpha
 	@ConfigItem(
 		keyName = "highlightColor",
 		name = "Target highlight color",
-		description = "Outline color for the pinned step's target NPC and the compass accent color",
-		position = 2,
+		description = "Outline and label color for the guided step's target NPC",
+		position = 5,
 		section = targetSection
 	)
 	default Color highlightColor()
@@ -182,11 +304,24 @@ public interface HcimGuideConfig extends Config
 		return new Color(0, 255, 255);
 	}
 
+	@Alpha
+	@ConfigItem(
+		keyName = "compassColor",
+		name = "Compass color",
+		description = "Color of the compass arrow, ring and distance text. Independent of the target highlight color.",
+		position = 12,
+		section = targetSection
+	)
+	default Color compassColor()
+	{
+		return new Color(0, 255, 255);
+	}
+
 	@ConfigItem(
 		keyName = "showDirectionArrow",
-		name = "Compass to far targets",
-		description = "When your target is too far away to be nearby, show a compass arrow toward its last known location. Movable with Alt+drag.",
-		position = 3,
+		name = "Compass to path target",
+		description = "Show a compass toward the destination handed to Shortest Path on every located step (in the 'All' location display mode; the hand-off drives the compass even when Shortest Path isn't installed). Without a hand-off target it falls back to the current far target. Movable with Alt+drag.",
+		position = 6,
 		section = targetSection
 	)
 	default boolean showDirectionArrow()
@@ -197,8 +332,8 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "compassNextStep",
 		name = "Compass without pinning",
-		description = "With nothing pinned, point the compass at the NEXT unchecked step's known target, so it's there whenever there's somewhere to go. Turn off to only show the compass for steps you pin with ⌖.",
-		position = 4,
+		description = "When there is no hand-off target and the current or pinned step offers no target of its own, point the compass at the NEXT unchecked step's known far target. Turn off to disable only this fallback.",
+		position = 7,
 		section = targetSection
 	)
 	default boolean compassNextStep()
@@ -210,7 +345,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "compassShowRing",
 		name = "Compass outer circle",
 		description = "Draw the round dial behind the compass needle. Turn off for just the floating arrow.",
-		position = 5,
+		position = 8,
 		section = targetSection
 	)
 	default boolean compassShowRing()
@@ -222,7 +357,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "compassArrowStyle",
 		name = "Arrow style",
 		description = "Triangle: a solid pointer. Tailed: an arrow with a shaft, like a drawn arrow.",
-		position = 6,
+		position = 9,
 		section = targetSection
 	)
 	default CompassArrowStyle compassArrowStyle()
@@ -234,8 +369,8 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "compassSize",
 		name = "Compass size",
-		description = "Diameter of the far-target compass, in pixels",
-		position = 7,
+		description = "Diameter of the path-target compass, in pixels",
+		position = 10,
 		section = targetSection
 	)
 	default int compassSize()
@@ -247,8 +382,8 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "compassOpacity",
 		name = "Compass opacity",
-		description = "Opacity of the far-target compass (percent)",
-		position = 8,
+		description = "Opacity of the path-target compass (percent)",
+		position = 11,
 		section = targetSection
 	)
 	default int compassOpacity()
@@ -259,14 +394,63 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "compassShowDistance",
 		name = "Show tile distance",
-		description = "Show the tile distance under the far-target compass",
-		position = 9,
+		description = "Show the tile distance under the compass",
+		position = 13,
 		section = targetSection
 	)
 	default boolean compassShowDistance()
 	{
 		return true;
 	}
+
+	@ConfigItem(
+		keyName = "guidanceDisplayMode",
+		name = "Location display mode",
+		description = "Choose which native location guides are shown. The per-destination crosshair can still hide everything temporarily.",
+		position = 14,
+		section = targetSection
+	)
+	default GuidanceDisplayMode guidanceDisplayMode()
+	{
+		return GuidanceDisplayMode.ALL;
+	}
+
+	@ConfigItem(
+		keyName = "distanceAwareGuidance",
+		name = "Distance-aware guidance",
+		description = "Far away: map/path. Nearby: compass, colored target arrow and scene highlights. Uses hysteresis to avoid flicker.",
+		position = 15,
+		section = targetSection
+	)
+	default boolean distanceAwareGuidance()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "showLocationConfidence",
+		name = "Panel location details",
+		description = "Append the destination's source and confidence to the side panel's location status line. The HUD shows only its small location counter either way.",
+		position = 16,
+		section = targetSection
+	)
+	default boolean showLocationConfidence()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "hideLowConfidenceLocations",
+		name = "Hide low-confidence pins",
+		description = "Do not display locations classified as low confidence. Off by default so every resolved location produces guidance.",
+		position = 17,
+		section = targetSection
+	)
+	default boolean hideLowConfidenceLocations()
+	{
+		return false;
+	}
+
 
 	// ------------------------------------------------------------------ world map
 
@@ -278,6 +462,18 @@ public interface HcimGuideConfig extends Config
 		section = mapSection
 	)
 	default boolean showWorldMapMarker()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "centerMapOnOpen",
+		name = "Center map on target when opened",
+		description = "When you open the world map, start it centered on the current step's destination. The map is never moved while you are using it.",
+		position = 3,
+		section = mapSection
+	)
+	default boolean centerMapOnOpen()
 	{
 		return true;
 	}
@@ -397,7 +593,7 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "highlightStepObjects",
 		name = "Highlight step objects",
-		description = "Outline scene objects the current section's steps mention - ladders, staircases, altars, doors, furnaces and the like - so the \"which ladder?\" moments answer themselves",
+		description = "Outline the scene object the CURRENT step mentions - the nearest ladder, staircase, altar or door of each type named by the step you are on. Never highlights objects for later steps.",
 		position = 5,
 		section = highlightSection
 	)
@@ -409,13 +605,13 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "stepObjectColor",
 		name = "Step object color",
-		description = "Outline color for objects referenced by current-section steps",
+		description = "Outline color for the current step's mentioned object",
 		position = 6,
 		section = highlightSection
 	)
 	default Color stepObjectColor()
 	{
-		return new Color(210, 140, 255);
+		return new Color(64, 190, 240);
 	}
 
 	@ConfigItem(
@@ -459,7 +655,7 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "autoTrackNext",
 		name = "Auto-track next target",
-		description = "After a step auto-completes, automatically pin the next unchecked step that has an NPC target (hint arrow + highlight)",
+		description = "After a step auto-completes, automatically pin the next unchecked step that has an NPC target (colored arrow + highlight)",
 		position = 2,
 		section = autoSection
 	)
@@ -534,21 +730,58 @@ public interface HcimGuideConfig extends Config
 
 	@ConfigItem(
 		keyName = "overlayFontStyle",
-		name = "Overlay font",
-		description = "Font used by this plugin's overlays (step HUD, compass distance, NPC name labels). 'Client default' follows RuneLite's own overlay font setting; the Sans options are plainer but easier to read.",
+		name = "Overlay font family",
+		description = "Font used by the step HUD, compass distance and scene labels. Installed-font presets fall back safely when unavailable. Choose Custom to type any installed family name below.",
 		position = 5,
 		section = hudSection
 	)
-	default FontStyle overlayFontStyle()
+	default OverlayFontFamily overlayFontFamily()
 	{
-		return FontStyle.SMALL;
+		return OverlayFontFamily.SANS_SERIF;
+	}
+
+	@ConfigItem(
+		keyName = "overlayFontWeight",
+		name = "Overlay font style",
+		description = "Plain, bold, italic or bold italic, independent of the font family",
+		position = 6,
+		section = hudSection
+	)
+	default OverlayFontWeight overlayFontWeight()
+	{
+		return OverlayFontWeight.FAMILY_DEFAULT;
+	}
+
+	@Range(min = 8, max = 40)
+	@ConfigItem(
+		keyName = "overlayFontSize",
+		name = "Overlay font size",
+		description = "Text size for the step HUD, compass distance and scene labels, in pixels",
+		position = 7,
+		section = hudSection
+	)
+	default int overlayFontSize()
+	{
+		return 12;
+	}
+
+	@ConfigItem(
+		keyName = "customOverlayFontFamily",
+		name = "Custom overlay font",
+		description = "Exact installed font-family name used when Overlay font family is Custom. Unknown names fall back to Sans serif.",
+		position = 8,
+		section = hudSection
+	)
+	default String customOverlayFontFamily()
+	{
+		return "";
 	}
 
 	@ConfigItem(
 		keyName = "hudShowStepItems",
 		name = "Item pictures on HUD",
 		description = "Show the current step's item pictures inside the on-screen box. The side panel's own item grids have a separate toggle under Side panel, so you can show items in either place, both, or neither.",
-		position = 6,
+		position = 9,
 		section = hudSection
 	)
 	default boolean hudShowStepItems()
@@ -561,7 +794,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "hudBackgroundOpacity",
 		name = "Background opacity",
 		description = "Opacity of the on-screen box's dark background (percent). Higher makes the text easier to read over busy scenes.",
-		position = 7,
+		position = 10,
 		section = hudSection
 	)
 	default int hudBackgroundOpacity()
@@ -572,22 +805,59 @@ public interface HcimGuideConfig extends Config
 	// ------------------------------------------------------------------ side panel
 
 	@ConfigItem(
-		keyName = "panelTextSize",
-		name = "Panel text size",
-		description = "Text size of steps in the side panel",
+		keyName = "panelFontFamily",
+		name = "Panel font family",
+		description = "Font family used throughout the Guide Overlay side panel. Installed-font presets fall back safely when unavailable. Choose Custom to type any installed family name below.",
 		position = 1,
 		section = uiSection
 	)
-	default PanelTextSize panelTextSize()
+	default OverlayFontFamily panelFontFamily()
 	{
-		return PanelTextSize.REGULAR;
+		return OverlayFontFamily.SANS_SERIF;
+	}
+
+	@ConfigItem(
+		keyName = "panelFontWeight",
+		name = "Panel font style",
+		description = "Plain, bold, italic or bold italic for the side panel, independent of the font family",
+		position = 2,
+		section = uiSection
+	)
+	default OverlayFontWeight panelFontWeight()
+	{
+		return OverlayFontWeight.PLAIN;
+	}
+
+	@Range(min = 8, max = 40)
+	@ConfigItem(
+		keyName = "panelFontSize",
+		name = "Panel font size",
+		description = "Text size throughout the side panel, in pixels",
+		position = 3,
+		section = uiSection
+	)
+	default int panelFontSize()
+	{
+		return 10;
+	}
+
+	@ConfigItem(
+		keyName = "customPanelFontFamily",
+		name = "Custom panel font",
+		description = "Exact installed font-family name used when Panel font family is Custom. Unknown names fall back to Sans serif.",
+		position = 4,
+		section = uiSection
+	)
+	default String customPanelFontFamily()
+	{
+		return "";
 	}
 
 	@ConfigItem(
 		keyName = "showItemGrids",
 		name = "Show item icons",
 		description = "Show an inventory-style grid of item icons under Withdraw/Collect steps, with green borders when the item is in your inventory",
-		position = 2,
+		position = 5,
 		section = uiSection
 	)
 	default boolean showItemGrids()
@@ -599,7 +869,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "dimCompletedSteps",
 		name = "Dim completed steps",
 		description = "Gray out and strike through steps you have checked off",
-		position = 3,
+		position = 6,
 		section = uiSection
 	)
 	default boolean dimCompletedSteps()
@@ -611,7 +881,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "autoCollapseCompleted",
 		name = "Auto-collapse finished banks",
 		description = "Collapse a bank section automatically once every step in it is checked",
-		position = 4,
+		position = 7,
 		section = uiSection
 	)
 	default boolean autoCollapseCompleted()
@@ -624,7 +894,7 @@ public interface HcimGuideConfig extends Config
 		keyName = "preloadNextBanks",
 		name = "Preload upcoming banks",
 		description = "How many upcoming bank sections to warm up in the background (item icons resolved ahead of time) beyond the current one. 0 = load everything on demand; higher preloads more but does more background work.",
-		position = 5,
+		position = 8,
 		section = uiSection
 	)
 	default int preloadNextBanks()
@@ -636,12 +906,84 @@ public interface HcimGuideConfig extends Config
 		keyName = "itemPresenceBorders",
 		name = "Have-it borders on items",
 		description = "Outline item icons green when you have the item, red when missing. Turn off for a clean, wiki-style inventory picture.",
-		position = 6,
+		position = 9,
 		section = uiSection
 	)
 	default boolean itemPresenceBorders()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		keyName = "colorTransportSteps",
+		name = "Cyan transport steps",
+		description = "Color teleport and transport instructions cyan in the side panel and HUD so route changes stand out.",
+		position = 10,
+		section = uiSection
+	)
+	default boolean colorTransportSteps()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "transportStepColor",
+		name = "Transport text color",
+		description = "Text color used for teleport, fairy-ring, boat, minecart, Quetzal, portal and similar transport steps.",
+		position = 11,
+		section = uiSection
+	)
+	default Color transportStepColor()
+	{
+		return new Color(80, 220, 255);
+	}
+
+	@ConfigItem(
+		keyName = "colorDangerSteps",
+		name = "Red danger steps",
+		description = "Color Wilderness, deliberate-death, item-loss and other explicit high-risk instructions coral red.",
+		position = 12,
+		section = uiSection
+	)
+	default boolean colorDangerSteps()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "dangerStepColor",
+		name = "Danger text color",
+		description = "Text color used for explicit danger, Wilderness, death-risk and item-loss instructions.",
+		position = 13,
+		section = uiSection
+	)
+	default Color dangerStepColor()
+	{
+		return new Color(255, 107, 107);
+	}
+
+	@ConfigItem(
+		keyName = "colorPreparationSteps",
+		name = "Amber preparation steps",
+		description = "Color withdrawals, equipment setup, charges and explicit prerequisites amber.",
+		position = 14,
+		section = uiSection
+	)
+	default boolean colorPreparationSteps()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "preparationStepColor",
+		name = "Preparation text color",
+		description = "Text color used for item setup, equipment, charges, minimum requirements and before-leaving reminders.",
+		position = 15,
+		section = uiSection
+	)
+	default Color preparationStepColor()
+	{
+		return new Color(255, 200, 87);
 	}
 
 	// ------------------------------------------------------------------ routing & teleports
@@ -668,6 +1010,19 @@ public interface HcimGuideConfig extends Config
 	default boolean routeUseShortestPath()
 	{
 		return true;
+	}
+
+	@Range(min = 0, max = 20)
+	@ConfigItem(
+		keyName = "pathRefreshTiles",
+		name = "Path refresh distance",
+		description = "Shortest Path only removes the part of the route you have already walked when it recalculates, so this asks it to recalculate after you move this many tiles. LOWER = smoother trailing edge but SIGNIFICANTLY more CPU work, because a full route is recalculated every few tiles; on long cross-map routes a low value can make the path lag further behind instead of less. HIGHER = much less load, at the cost of the walked tail lingering longer. 0 disables it entirely and the path only refreshes when the step changes. Recalculation happens inside the Shortest Path plugin, not this one.",
+		position = 9,
+		section = routeSection
+	)
+	default int pathRefreshTiles()
+	{
+		return 3;
 	}
 
 	@ConfigItem(
@@ -747,7 +1102,7 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "navArrows",
 		name = "Arrow buttons",
-		description = "Where the clickable ◀ ▶ step arrows appear: Attached sits under the on-screen HUD box (needs the HUD overlay on), Floating is its own small overlay you can Alt+drag anywhere, Hidden removes them. Clicking ▶ checks off your current step; ◀ un-checks the last one.",
+		description = "Where the clickable ◀ ▶ step arrows appear: Attached sits at the top of the on-screen HUD box, centered, so the row keeps a fixed position as the text below changes (needs the HUD overlay on). Floating is its own small overlay you can Alt+drag anywhere. Hidden removes them. Clicking ▶ checks off your current step; ◀ un-checks the last one.",
 		position = 1,
 		section = navSection
 	)
@@ -792,7 +1147,92 @@ public interface HcimGuideConfig extends Config
 		return Keybind.NOT_SET;
 	}
 
+	@ConfigItem(
+		keyName = "autoAdvanceWaypoints",
+		name = "Auto-advance waypoints",
+		description = "Advance to the next waypoint after remaining inside its arrival radius for the required game ticks.",
+		position = 5,
+		section = navSection
+	)
+	default boolean autoAdvanceWaypoints()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "autoCompleteOnArrival",
+		name = "Complete travel steps on arrival",
+		description = "Check off explicit travel-only steps after you remain at their final waypoint. Compound instructions, NPC interactions, inherited/low-confidence locations, quest/item/skill conditions, and parent summary steps are never completed by arrival.",
+		position = 6,
+		section = navSection
+	)
+	default boolean autoCompleteOnArrival()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "persistWaypointIndex",
+		name = "Remember waypoint position",
+		description = "Remember the active waypoint for each step across client restarts.",
+		position = 7,
+		section = navSection
+	)
+	default boolean persistWaypointIndex()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "preferQuestHelperMarkers",
+		name = "Prefer Quest Helper markers",
+		description = "For quest-stage steps, suppress duplicate Guide Overlay NPC/object highlights while keeping the checklist, map destination and Shortest Path route.",
+		position = 8,
+		section = navSection
+	)
+	default boolean preferQuestHelperMarkers()
+	{
+		return false;
+	}
+
 	// ------------------------------------------------------------------ notifications & sounds
+
+	enum SoundSource
+	{
+		GAME,
+		PLUGIN;
+
+		@Override
+		public String toString()
+		{
+			return this == GAME ? "Game (follows game volume)" : "Plugin (works when muted)";
+		}
+	}
+
+	@ConfigItem(
+		keyName = "soundSource",
+		name = "Sound source",
+		description = "Game plays through the client, so the game's master and sound-effect volumes must both be on. Plugin generates the chime itself and works with the game muted.",
+		position = -1,
+		section = notifySection
+	)
+	default SoundSource soundSource()
+	{
+		return SoundSource.PLUGIN;
+	}
+
+	@Range(min = 0, max = 100)
+	@ConfigItem(
+		keyName = "pluginSoundVolume",
+		name = "Plugin sound volume",
+		description = "Volume for plugin-generated chimes. Independent of the game's volume. 0 silences them.",
+		position = -1,
+		section = notifySection
+	)
+	default int pluginSoundVolume()
+	{
+		return 60;
+	}
 
 	@ConfigItem(
 		keyName = "stepCompleteSound",

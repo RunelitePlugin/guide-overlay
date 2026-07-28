@@ -2,8 +2,12 @@ package com.hcimguide;
 
 import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.BasicStroke;
 import java.awt.Graphics2D;
 import java.awt.Polygon;
+import java.awt.Rectangle;
+import java.awt.RenderingHints;
+import java.awt.Shape;
 import javax.inject.Inject;
 import net.runelite.api.Client;
 import net.runelite.api.NPC;
@@ -19,7 +23,8 @@ import net.runelite.client.util.Text;
 
 /**
  * Draws the step-related highlights, similar to Quest Helper:
- * - the pinned step's target NPC: thick outline + name + (via plugin) hint arrow
+ * - the guided (current or pinned) step's target NPC: thick outline, name and
+ *   colored target arrow
  * - every NPC referenced by the active bank's unchecked steps: thinner outline
  * - ground items the active bank needs: tile highlight + item name
  */
@@ -44,7 +49,11 @@ public class TargetOverlay extends Overlay
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
-		OverlayFonts.apply(graphics, config.overlayFontStyle());
+		OverlayFonts.apply(graphics, config);
+		if (!plugin.allowSceneGuidance())
+		{
+			return null;
+		}
 		NPC target = plugin.getTargetNpc();
 
 		// step NPCs (skip the pinned target; it gets its own stronger outline below)
@@ -62,7 +71,8 @@ public class TargetOverlay extends Overlay
 			}
 		}
 
-		// scene objects the section's steps mention (ladders, altars, doors...)
+		// the current step's applicable scene objects (nearest ladder/altar/
+		// door of each type the step mentions - scoped by the plugin)
 		if (config.highlightStepObjects())
 		{
 			Color color = config.stepObjectColor();
@@ -120,7 +130,77 @@ public class TargetOverlay extends Overlay
 			drawNameAbove(graphics, target, color);
 		}
 
+		drawTargetArrow(graphics, target);
 		return null;
+	}
+
+	private void drawTargetArrow(Graphics2D graphics, NPC npc)
+	{
+		if (!config.enableHintArrow())
+		{
+			return;
+		}
+		int centerX;
+		int tipY;
+		Shape hull = npc == null ? null : npc.getConvexHull();
+		if (hull != null)
+		{
+			Rectangle bounds = hull.getBounds();
+			centerX = bounds.x + bounds.width / 2;
+			tipY = bounds.y - 4;
+		}
+		else
+		{
+			net.runelite.api.coords.WorldPoint point = plugin.getTargetArrowPoint();
+			if (point == null)
+			{
+				return;
+			}
+			LocalPoint local = LocalPoint.fromWorld(client.getTopLevelWorldView(), point);
+			if (local == null)
+			{
+				return;
+			}
+			Polygon tile = Perspective.getCanvasTilePoly(client, local);
+			if (tile == null)
+			{
+				return;
+			}
+			Rectangle bounds = tile.getBounds();
+			centerX = bounds.x + bounds.width / 2;
+			tipY = bounds.y - 3;
+		}
+
+		int size = config.targetArrowSize();
+		Polygon arrow = targetArrowPolygon(centerX, tipY, size);
+		Graphics2D arrowGraphics = (Graphics2D) graphics.create();
+		try
+		{
+			arrowGraphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+				RenderingHints.VALUE_ANTIALIAS_ON);
+			arrowGraphics.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND,
+				BasicStroke.JOIN_ROUND));
+			arrowGraphics.setColor(config.targetArrowColor());
+			arrowGraphics.fillPolygon(arrow);
+			arrowGraphics.setColor(new Color(0, 0, 0,
+				Math.min(220, config.targetArrowColor().getAlpha())));
+			arrowGraphics.drawPolygon(arrow);
+		}
+		finally
+		{
+			arrowGraphics.dispose();
+		}
+	}
+
+	static Polygon targetArrowPolygon(int centerX, int tipY, int size)
+	{
+		int half = Math.max(3, size / 2);
+		int top = tipY - Math.max(6, size);
+		Polygon arrow = new Polygon();
+		arrow.addPoint(centerX - half, top);
+		arrow.addPoint(centerX + half, top);
+		arrow.addPoint(centerX, tipY);
+		return arrow;
 	}
 
 	private static void drawNameAbove(Graphics2D graphics, NPC npc, Color color)
