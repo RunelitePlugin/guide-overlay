@@ -2,6 +2,8 @@ package com.hcimguide;
 
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 public class WikiUrlTest
 {
@@ -42,5 +44,64 @@ public class WikiUrlTest
 	public void rejectsEmpty()
 	{
 		WikiUrl.pageTitle("  ");
+	}
+
+	@Test
+	public void titlesWithPercentValidateAsStoredWithoutDecodingAgain()
+	{
+		// what a link yields is what the registry stores, and what it stores
+		// must validate as that exact string on every later read
+		String literalPercent = WikiUrl.pageTitle("https://oldschool.runescape.wiki/w/Guide:100%25_run");
+		assertEquals("Guide:100%_run", literalPercent);
+		assertTrue(WikiUrl.isValidTitle(literalPercent));
+
+		String looksEncoded = WikiUrl.pageTitle("https://oldschool.runescape.wiki/w/Guide:A%2541");
+		assertEquals("Guide:A%41", looksEncoded);
+		assertTrue(WikiUrl.isValidTitle(looksEncoded));
+
+		String schemeLike = WikiUrl.pageTitle("https://oldschool.runescape.wiki/w/Foo%3A%2F%2Fbar");
+		assertEquals("Foo://bar", schemeLike);
+		assertTrue(WikiUrl.isValidTitle(schemeLike));
+	}
+
+	@Test
+	public void storedTitleValidationKeepsEveryStructuralRule()
+	{
+		assertTrue(WikiUrl.isValidTitle("Guide:B0aty_HCIM_Guide_V3"));
+		assertFalse(WikiUrl.isValidTitle(null));
+		assertFalse(WikiUrl.isValidTitle(""));
+		assertFalse(WikiUrl.isValidTitle("Has space"));
+		assertFalse(WikiUrl.isValidTitle(" Padded"));
+		assertFalse(WikiUrl.isValidTitle("<html>x"));
+		assertFalse(WikiUrl.isValidTitle("a|b"));
+		assertFalse(WikiUrl.isValidTitle("a[b]"));
+		assertFalse(WikiUrl.isValidTitle("a{b}"));
+		StringBuilder tooLong = new StringBuilder();
+		for (int i = 0; i < 256; i++)
+		{
+			tooLong.append('a');
+		}
+		assertFalse(WikiUrl.isValidTitle(tooLong.toString()));
+	}
+
+	@Test
+	public void bareTitleKeepsALiteralPercent()
+	{
+		assertEquals("Guide:100%_run", WikiUrl.pageTitle("Guide:100% run"));
+		assertEquals("Guide:Bob's_Guide", WikiUrl.pageTitle("Guide:Bob%27s_Guide"));
+	}
+
+	@Test
+	public void malformedEscapeInALinkIsRejectedWithAPlainMessage()
+	{
+		try
+		{
+			WikiUrl.pageTitle("https://oldschool.runescape.wiki/w/Guide:100%_run");
+			org.junit.Assert.fail("a malformed escape in a link must be rejected");
+		}
+		catch (IllegalArgumentException e)
+		{
+			assertEquals("Not a valid wiki link", e.getMessage());
+		}
 	}
 }

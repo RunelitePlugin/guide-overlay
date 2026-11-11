@@ -317,11 +317,15 @@ requirements of Guide Overlay, and their Hub names may change independently.
 
 The plugin connects to two places, and only to read:
 
-- **GitHub** for the bundled guide data and the NPC location database. Both URLs
-  are pinned to a fixed, reviewed commit, so the same content is fetched every
-  time.
-- **The OSRS wiki**, only when you add a guide by link, to read the page you
-  asked for.
+- **The OSRS wiki**, for the built-in B0aty HCIM guide and for any guide you
+  add by link. These are read live: an import fetches the page as it is at
+  that moment, so you get the authors' latest edits - and, the wiki being
+  community-edited, whatever else the page says right then. The text is then
+  stored locally and never refreshed unless you re-import it; the previous
+  import is kept and can be restored from the menu.
+- **GitHub**, for the BRUHsailer guide data and the NPC location database.
+  Both URLs are pinned to a fixed, reviewed commit, so the same content is
+  fetched every time.
 
 Nothing is uploaded. No account name, character data, inventory, location or
 gameplay information is ever sent anywhere. The only thing a server learns is

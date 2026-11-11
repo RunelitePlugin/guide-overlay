@@ -25,7 +25,7 @@ does not own it.
 
 | File | Capability |
 |---|---|
-| `GuideInputHandler` | Registers `HotkeyListener`s for next/previous step; reads mouse position for the overlay's own buttons. Observes only. |
+| `GuideInputHandler` | Registers `HotkeyListener`s for next/previous step; handles left-clicks on the overlay's own buttons and consumes those clicks so they do not also reach the game. Never generates input. |
 | `GuideExternalActions` | Clipboard read/write for progress codes; `LinkBrowser` for guide video links. |
 | `ChimePlayer` | Playback of a generated tone via the client's `AudioPlayer`. |
 | `GuideService` | HTTP GET for guide text; writes the guide snapshot to disk. |
@@ -50,13 +50,25 @@ does not own it.
 
 | Resource | Host | Trigger |
 |---|---|---|
-| Wiki guide chosen by the user | `oldschool.runescape.wiki/api.php` | User pastes a link and confirms |
-| Built-in guide data | `raw.githubusercontent.com`, commit-pinned | User confirms one-time import |
+| Wiki guide chosen by the user | `oldschool.runescape.wiki/api.php`, live page | User pastes a link in the "Add guide" dialog (that dialog is the confirmation) |
+| Built-in B0aty HCIM guide | `oldschool.runescape.wiki/api.php`, live page | User confirms import |
+| Built-in BRUHsailer guide data | `raw.githubusercontent.com`, commit-pinned | User confirms one-time import |
 | NPC location dataset | `raw.githubusercontent.com`, commit-pinned | User confirms optional download |
 
-- GET only. Neither network file contains `.post()`, `.put()`, `.patch()` or
-  `.method()`, so no request can carry a body.
-- HTTPS only. Final response host re-checked after redirects.
+Wiki guides, the built-in B0aty guide included, are deliberately NOT pinned to
+a revision: an import reads the page as it stands at that moment, so the guide
+follows its authors' edits. The wiki is community-edited, so what is imported
+is whatever the page says when the user confirms. The text is then stored
+locally and never refreshed on its own; a re-import is always a user action,
+and the previous import is kept as a backup that can be restored. The two
+GitHub resources are pinned to a full commit SHA and always return the same
+content.
+
+- GET only. Neither network file contains `.post()`, `.put()`, `.patch()`,
+  `.delete()` or `.method()`, so no request can carry a body.
+- HTTPS only. Redirects are not followed (a 3xx is reported as a failed
+  download). The final response host is still re-checked, together with every
+  earlier hop of the response.
 - Caps: 16 MiB per guide; 64 MiB and 50,000 entries for the dataset. A hard
   per-call wall-clock timeout (60 s guide/wiki, 5 min dataset) bounds a server
   that trickles bytes.
@@ -65,13 +77,20 @@ does not own it.
 - Calls are cancelled on shutdown. A response arriving after the plugin was
   disabled is discarded, not applied.
 
-`GuideService.java`, `LocationDbDownloader.java`.
+`GuideService.java`, `LocationDbDownloader.java`. The BRUHsailer URL literal is
+declared in the built-in table in `GuideRegistry.java`; `GuideService.fetchUrl`
+re-checks its scheme and host before requesting it.
 
 ## File writes
 
 Guide snapshot and one backup under the RuneLite data directory. Writes go to a
-temp file and are moved into place. The only deletion is `Files.deleteIfExists`
-on the plugin's own temp path after a failed write.
+temp file and are moved into place. Importing text identical to the stored
+snapshot changes nothing, so the backup always holds the previous *different*
+import. The only deletions are `Files.deleteIfExists` on the plugin's own temp
+path after a failed write, and on its own temp files (`<id>.txt…tmp`,
+`<id>.bak…tmp`, `npc-locations.json…tmp`) that are more than ten minutes old -
+leftovers of a client that died mid-save. Removing a guide from the list
+deletes nothing: its snapshot and progress stay stored.
 
 The side panel can also export progress, custom locations, and developer audit
 reports, but only after the user opens a Save dialog and chooses the exact
@@ -82,25 +101,47 @@ at startup or on a timer.
 
 ## Stored data
 
-Completed and skipped step keys, active phase per step, custom map pins, a
-per-guide teleport-stock note (`teleportBankStock`: item names and counts the
-player banked, for the trip-ready check), and three UI flags: `selectedGuide`,
+Completed and skipped step keys (`completedSteps.<id>`, `skippedSteps.<id>`),
+active phase per step (`executionPhases.<id>`), custom map pins with one backup
+copy (`customLocationsV1`, `customLocationsV1Backup`), the saved position
+within multi-stop routes (`waypointIndexesV1`), the list of user-added guides
+(`guides`) and of removed guides whose data is still stored (`guidesRemoved`),
+a teleport-stock note (`teleportBankStock`: item names and counts the player
+banked, for the trip-ready check), and three UI flags: `selectedGuide`,
 `importPrompted`, `fullDbPrompted`. All through `ConfigManager`. Progress is
 RS-profile scoped. No credentials or chat content.
 
-Every import path is bounded before allocation, and config JSON is parsed with a
-streaming `JsonReader` rather than a generic collection type:
+Every import path is bounded before it allocates per entry. How stored JSON is
+read:
+
+- Streaming `JsonReader`: completed / skipped / phase state, saved waypoint
+  positions, the NPC location store and the downloaded dataset.
+- Size-capped first, then bound to a fixed plugin-owned class: the guide
+  registry (`Entry[]`) and the custom-pin blob (`Root`).
+- Size-capped first, then walked as a JSON tree (`JsonParser` / `JsonObject`):
+  the teleport-stock note, a pasted custom-pin import, guide JSON and the wiki
+  API response.
+
+Nothing is bound to `Map`, `List`, `Object` or a `TypeToken`. Limits:
 
 | Data | Limits |
 |---|---|
 | Completed / skipped / phase state | 8 MiB text, 50,000 entries, 512-char keys |
-| Guide registry | 64 KiB, 64 user guides, validated IDs, titles and wiki pages |
-| Custom pins | 128 KiB per write, 64 guides, 20,000 steps, 16 waypoints per step |
-| Progress clipboard code | 8 MiB encoded, 4 MiB decoded, 50,000 keys |
+| Guide registry | 64 KiB, 64 user guides, 64 removed-guide records, validated IDs, titles and wiki pages |
+| Custom pins | 128 KiB per write (pins, their backup copy and saved waypoint positions alike), 64 guides, 20,000 steps, 16 waypoints per step; imported labels 120 chars, no angle brackets |
+| Progress clipboard code | 8 MiB encoded, 4 MiB decoded, 50,000 key lines (counted before any is stored), 512-char lines |
 | Guide model | 25,000 steps, 500 episodes, 500 sections per episode |
-| NPC location store | 32 MiB, 50,000 entries, coordinates validated |
+| NPC location store | 32 MiB, 50,000 entries per load, coordinates validated. Observed and imported positions are written first, so an oversized store loses bulk data, not what the player saw |
 
 Guide IDs are constrained to [a-z0-9-]{1,64}; they are used as filenames and config keys, so this prevents path traversal. Only the hardcoded built-in guides carry a remote URL — a user-added guide supplies a wiki page name, not a URL, so the set of reachable hosts is fixed at compile time.
+
+An id that still has stored data behind it is only ever given back to the same
+source. Removing a guide records its id with its wiki page (or its name, for a
+file-only guide); a guide added later reuses that id only when it is that same
+page or name, and otherwise gets a fresh id - as it does when a snapshot file
+exists under an id that no list accounts for. A new guide therefore never opens
+on another page's stored text or inherits its ticks, and nothing is deleted to
+achieve that.
 
 `ProgressCodec.java`, `GuideRegistry.java`, `CustomLocationStore.java`.
 
@@ -117,10 +158,23 @@ never parked for the clip's duration.
 
 ## Input
 
-Two configurable hotkeys and mouse position for the overlay's own buttons.
-`GuideInputHandler` is the only file registering a listener. No `java.awt.Robot`,
-no constructed `KeyEvent` or `MouseEvent`, no menu invocation or menu-entry
-mutation anywhere in the plugin.
+Two configurable hotkeys (unbound by default) and left-clicks on the overlay's
+own buttons. `GuideInputHandler` is the only file registering a listener, and
+the only file that consumes an input event:
+
+- the press, drag, release and click of a left-button gesture that began on
+  one of the plugin's own on-screen buttons, so that click does not also reach
+  the game underneath;
+- the key press of a bound hotkey, which RuneLite's `HotkeyListener` consumes
+  for every plugin that uses it.
+
+Nothing else is consumed, and nothing is ever generated: no `java.awt.Robot`,
+no constructed `KeyEvent` or `MouseEvent`, no menu invocation, and no change to
+any game menu entry. The HUD and step-navigation overlays add their own
+`RUNELITE_OVERLAY` entries through `Overlay.addMenuEntry` (the overlay's
+right-click menu: next/previous step, location-guide and pin actions), and the
+plugin subscribes to `MenuOptionClicked` read-only, to note which NPC or object
+the player just clicked.
 
 ## Target arrow
 
@@ -189,13 +243,18 @@ item names are DEBUG only.
 
 ## Absent
 
-Verified by `tools/audit.sh`: generated keyboard or mouse input; menu invocation
-or menu-entry mutation; packet or protocol code; `java.awt.Robot`;
-`Runtime.exec` and `ProcessBuilder`; JNI and native library loading;
-`Class.forName`, `setAccessible`, `MethodHandles`, `URLClassLoader` and other
-dynamic class loading; Gson `TypeToken` and `java.lang.reflect` imports; raw
-sockets; outgoing chat insertion or modification;
-credential storage; upload of player or account data.
+Verified by the audit scripts (`tools/audit.sh`, `tools/audit-capabilities.sh`,
+`tools/reviewer_checks.py`): generated keyboard or mouse input; menu invocation
+or creation/replacement of game menu entries; packet or protocol code;
+`java.awt.Robot`; `Runtime.exec` and `ProcessBuilder`; JNI and native library
+loading; `Class.forName`, `setAccessible`, `MethodHandles`, `URLClassLoader` and
+other dynamic class loading; Gson `TypeToken` and `java.lang.reflect` imports;
+raw sockets; request bodies and non-GET verbs; followed redirects; fetchable
+URLs outside the two allowed hosts or not commit-pinned on GitHub.
+
+Absent by review rather than by a script: outgoing chat insertion or
+modification (the plugin only adds local game messages to the player's own chat
+box); credential storage; upload of player or account data.
 
 ## Shutdown
 

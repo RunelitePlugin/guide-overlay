@@ -89,4 +89,79 @@ public class ProgressCodecTest
 	{
 		ProgressCodec.encode(new HashSet<>(), "../../outside");
 	}
+
+	private static String codeFor(String payload) throws Exception
+	{
+		java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+		try (java.util.zip.GZIPOutputStream gz = new java.util.zip.GZIPOutputStream(bos))
+		{
+			gz.write(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+		}
+		return ProgressCodec.PREFIX + java.util.Base64.getEncoder().encodeToString(bos.toByteArray());
+	}
+
+	private static String repeat(String s, int n)
+	{
+		StringBuilder sb = new StringBuilder(s.length() * n);
+		for (int i = 0; i < n; i++)
+		{
+			sb.append(s);
+		}
+		return sb.toString();
+	}
+
+	@Test
+	public void rejectsAFewKilobytesThatInflateToMillionsOfLines() throws Exception
+	{
+		// under the decoded-size cap, and only ONE distinct key - the limit has
+		// to count lines, not the size of the resulting set
+		String code = codeFor(repeat("a\n", 2 * 1024 * 1024 - 8));
+		org.junit.Assert.assertTrue(code.length() < 8000);
+		try
+		{
+			ProgressCodec.decode(code);
+			org.junit.Assert.fail("a line bomb must be rejected");
+		}
+		catch (IllegalArgumentException e)
+		{
+			org.junit.Assert.assertEquals("Progress code has too many entries", e.getMessage());
+		}
+	}
+
+	@Test(expected = IllegalArgumentException.class)
+	public void rejectsAnOverlongLineOfAnyKind() throws Exception
+	{
+		ProgressCodec.decode(codeFor("#future:" + repeat("x", 600) + "\nE1.B1#1#0"));
+	}
+
+	@Test(expected = IllegalArgumentException.class)
+	public void rejectsUnboundedMetadataLines() throws Exception
+	{
+		ProgressCodec.decode(codeFor(repeat("#x\n", 1000) + "E1.B1#1#0"));
+	}
+
+	@Test
+	public void decodesLegacyShapesBlankLinesAndUnknownMetadata() throws Exception
+	{
+		// no guide line (oldest codes), blank lines, CR-free, trailing newline
+		ProgressCodec.Decoded old = ProgressCodec.decode(codeFor("E1.B1#1a#0\n\nE1.B2#2b#1\n"));
+		org.junit.Assert.assertNull(old.guideId);
+		org.junit.Assert.assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("E1.B1#1a#0", "E1.B2#2b#1")), old.keys);
+
+		ProgressCodec.Decoded tagged = ProgressCodec.decode(
+			codeFor("#guide: b0aty-hcim-v3 \n#future:whatever\nE1.B1#1a#0"));
+		org.junit.Assert.assertEquals("b0aty-hcim-v3", tagged.guideId);
+		org.junit.Assert.assertEquals(java.util.Collections.singleton("E1.B1#1a#0"), tagged.keys);
+	}
+
+	@Test
+	public void aFullSizeProgressSetStillRoundTrips() throws Exception
+	{
+		java.util.Set<String> keys = new java.util.HashSet<>();
+		for (int i = 0; i < 50_000; i++)
+		{
+			keys.add("E1.B1#" + Integer.toHexString(i) + "#0");
+		}
+		org.junit.Assert.assertEquals(keys, ProgressCodec.decode(ProgressCodec.encode(keys, "x")).keys);
+	}
 }

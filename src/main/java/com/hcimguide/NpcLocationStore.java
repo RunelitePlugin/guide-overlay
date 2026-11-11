@@ -49,9 +49,28 @@ public class NpcLocationStore
 	private static final int MAX_IMPORT_CHARS = 16 * 1024 * 1024;
 	private static final long MAX_STORE_BYTES = 32L * 1024 * 1024;
 
+	/** Own temp files older than this were left by a JVM that died mid-save. */
+	private static final long STALE_TEMP_MILLIS = 10 * 60 * 1000L;
+
 	private final Gson gson;
+	private final File storeFile;
 	/** normalized NPC name -> {x, y, plane}. */
 	private final Map<String, int[]> locations = new ConcurrentHashMap<>();
+	/**
+	 * Position of each entry in the saved file, lowest first. Loading keeps
+	 * only the first MAX_IMPORT_ENTRIES of the file, so the order decides what
+	 * survives an oversized store: positions the player observed or imported
+	 * are written at the front, bulk data (download, bundled) at the back, and
+	 * entries read from the file keep the order they were read in. Without it
+	 * the cut fell on arbitrary entries, observed ones included.
+	 */
+	private final Map<String, Long> saveRank = new ConcurrentHashMap<>();
+	private final java.util.concurrent.atomic.AtomicLong frontRank =
+		new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong fileRank =
+		new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong backRank =
+		new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE / 2);
 	private volatile boolean dirty;
 	private volatile boolean loaded;
 
@@ -87,7 +106,14 @@ public class NpcLocationStore
 	@Inject
 	public NpcLocationStore(Gson gson)
 	{
+		this(gson, STORE_FILE);
+	}
+
+	/** Explicit store file, for exercising persistence in isolation. */
+	NpcLocationStore(Gson gson, File storeFile)
+	{
 		this.gson = gson;
+		this.storeFile = storeFile;
 	}
 
 	/** Loads the on-disk store (seeded from the bundled resources on first run). Call off the EDT. */
@@ -101,12 +127,12 @@ public class NpcLocationStore
 		// saved store > the bundled FULL database (if present) > the seed -
 		// so neither file load nor bundled data can overwrite a position
 		// observed moments ago
-		if (STORE_FILE.isFile())
+		if (storeFile.isFile())
 		{
 			try
 			{
 				String json = readStoreText();
-				mergeIfAbsent(readLocationMap(new StringReader(json), MAX_IMPORT_ENTRIES));
+				mergeIfAbsent(readLocationMap(new StringReader(json), MAX_IMPORT_ENTRIES), fileRank);
 			}
 			catch (Exception e)
 			{
@@ -135,7 +161,7 @@ public class NpcLocationStore
 		}
 		try (InputStreamReader reader = new InputStreamReader(in, StandardCharsets.UTF_8))
 		{
-			mergeIfAbsent(readLocationMap(reader, MAX_IMPORT_ENTRIES));
+			mergeIfAbsent(readLocationMap(reader, MAX_IMPORT_ENTRIES), backRank);
 		}
 		catch (Exception e)
 		{
@@ -143,11 +169,14 @@ public class NpcLocationStore
 		}
 	}
 
-	/** Bounded streaming parser avoids reflective generic metadata and whole-tree allocation. */
+	/**
+	 * Bounded streaming parser avoids reflective generic metadata and whole-tree
+	 * allocation. Keeps the FIRST maxEntries of the source, in source order.
+	 */
 	private static Map<String, int[]> readLocationMap(Reader input, int maxEntries)
 		throws IOException
 	{
-		Map<String, int[]> out = new HashMap<>();
+		Map<String, int[]> out = new LinkedHashMap<>();
 		try (com.google.gson.stream.JsonReader reader = new com.google.gson.stream.JsonReader(input))
 		{
 			reader.beginObject();
@@ -191,7 +220,7 @@ public class NpcLocationStore
 		return out;
 	}
 
-	private void mergeIfAbsent(Map<String, int[]> raw)
+	private void mergeIfAbsent(Map<String, int[]> raw, java.util.concurrent.atomic.AtomicLong rank)
 	{
 		if (raw == null)
 		{
@@ -206,9 +235,9 @@ public class NpcLocationStore
 				&& v[0] >= 0 && v[0] < 20000 && v[1] >= 0 && v[1] < 20000 && v[2] >= 0 && v[2] <= 3)
 			{
 				String key = Names.normalize(e.getKey());
-				if (!key.isEmpty())
+				if (!key.isEmpty() && locations.putIfAbsent(key, v) == null)
 				{
-					locations.putIfAbsent(key, v);
+					saveRank.putIfAbsent(key, rank.incrementAndGet());
 				}
 			}
 		}
@@ -233,6 +262,7 @@ public class NpcLocationStore
 			return;
 		}
 		locations.put(key, new int[]{point.getX(), point.getY(), point.getPlane()});
+		saveRank.put(key, frontRank.decrementAndGet());
 		invalidateLookupCache();
 		dirty = true;
 	}
@@ -374,6 +404,7 @@ public class NpcLocationStore
 				if (!key.isEmpty())
 				{
 					locations.put(key, v);
+					saveRank.put(key, frontRank.decrementAndGet());
 					count++;
 				}
 			}
@@ -404,6 +435,7 @@ public class NpcLocationStore
 				&& v[0] >= 0 && v[0] < 20000 && v[1] >= 0 && v[1] < 20000 && v[2] >= 0 && v[2] <= 3
 				&& locations.putIfAbsent(e.getKey(), v) == null)
 			{
+				saveRank.putIfAbsent(e.getKey(), backRank.incrementAndGet());
 				added++;
 			}
 		}
@@ -430,14 +462,57 @@ public class NpcLocationStore
 		try
 		{
 			//noinspection ResultOfMethodCallIgnored
-			STORE_FILE.getParentFile().mkdirs();
-			atomicWrite(STORE_FILE,
-				gson.toJson(new HashMap<>(locations)).getBytes(StandardCharsets.UTF_8));
+			storeFile.getParentFile().mkdirs();
+			sweepStaleTemps();
+			atomicWrite(storeFile, gson.toJson(inSaveOrder()).getBytes(StandardCharsets.UTF_8));
 		}
 		catch (Exception e)
 		{
 			dirty = true;
 			log.warn("Could not save npc location store", e);
+		}
+	}
+
+	/** Snapshot of the map with the entries that must survive a capped load first. */
+	private Map<String, int[]> inSaveOrder()
+	{
+		java.util.List<Map.Entry<String, int[]>> entries =
+			new java.util.ArrayList<>(new HashMap<>(locations).entrySet());
+		Map<String, Long> ranks = new HashMap<>(saveRank);
+		entries.sort(java.util.Comparator.comparingLong(
+			(Map.Entry<String, int[]> e) -> ranks.getOrDefault(e.getKey(), Long.MAX_VALUE)));
+		Map<String, int[]> ordered = new LinkedHashMap<>();
+		for (Map.Entry<String, int[]> e : entries)
+		{
+			ordered.put(e.getKey(), e.getValue());
+		}
+		return ordered;
+	}
+
+	/** Best effort: removes this store's own long-abandoned temp files. */
+	private void sweepStaleTemps()
+	{
+		File[] files = storeFile.getParentFile().listFiles();
+		if (files == null)
+		{
+			return;
+		}
+		long cutoff = System.currentTimeMillis() - STALE_TEMP_MILLIS;
+		for (File file : files)
+		{
+			String name = file.getName();
+			if (file.isFile() && file.lastModified() < cutoff && name.endsWith(".tmp")
+				&& name.startsWith(storeFile.getName()))
+			{
+				try
+				{
+					Files.deleteIfExists(file.toPath());
+				}
+				catch (IOException e)
+				{
+					// stays for the next save to retry
+				}
+			}
 		}
 	}
 
@@ -465,9 +540,9 @@ public class NpcLocationStore
 		}
 	}
 
-	private static String readStoreText() throws IOException
+	private String readStoreText() throws IOException
 	{
-		try (InputStream in = Files.newInputStream(STORE_FILE.toPath()))
+		try (InputStream in = Files.newInputStream(storeFile.toPath()))
 		{
 			java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
 			byte[] buffer = new byte[8192];
