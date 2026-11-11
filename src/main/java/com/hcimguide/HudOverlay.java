@@ -2,10 +2,14 @@ package com.hcimguide;
 
 import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics2D;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import javax.inject.Inject;
@@ -13,6 +17,7 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
+import net.runelite.client.ui.overlay.components.ComponentConstants;
 import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.PanelComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
@@ -76,6 +81,74 @@ public class HudOverlay extends OverlayPanel
 	/** Second box for upcoming steps, so the current step stands alone. */
 	private final PanelComponent nextStepsPanel = new PanelComponent();
 
+	/** Bounds of the width and step-count settings; stored values are not trusted. */
+	private static final int MIN_WIDTH = 160;
+	private static final int MAX_WIDTH = 320;
+	private static final int MIN_SHOWN_STEPS = 1;
+	private static final int MAX_SHOWN_STEPS = 5;
+
+	/*
+	 * Render-side caches. Each is derived from immutable inputs, so the
+	 * per-frame work is a comparison; the regex classification, the name
+	 * normalisation behind a presence check and the title wrap only run when
+	 * their input changes. Written by the render (client) thread; resetCaches
+	 * runs on another thread, so it only ever REPLACES the volatile reference
+	 * and never mutates the object a frame may be using.
+	 */
+
+	/** Step -> presentation kind, by identity. */
+	private volatile Map<GuideStep, StepTextSemantic.Kind> kindCache = new IdentityHashMap<>();
+	private static final int MAX_CACHED_KINDS = 256;
+
+	/** The section title wrapped for one width/font/progress combination. */
+	private static final class TitleCache
+	{
+		private final String title;
+		private final int done;
+		private final int total;
+		private final int width;
+		private final Font font;
+		private final List<String> lines;
+
+		TitleCache(String title, int done, int total, int width, Font font, List<String> lines)
+		{
+			this.title = title;
+			this.done = done;
+			this.total = total;
+			this.width = width;
+			this.font = font;
+			this.lines = lines;
+		}
+	}
+
+	private volatile TitleCache titleCache;
+
+	static final byte PRESENCE_NONE = 0;
+	static final byte PRESENCE_HAVE = 1;
+	static final byte PRESENCE_MISSING = 2;
+
+	/** Have/missing per item slot for one items snapshot and one inventory snapshot. */
+	private static final class PresenceCache
+	{
+		private final HcimGuidePlugin.HudItems items;
+		private final InventorySnapshot inventory;
+		private final byte[] states;
+
+		PresenceCache(HcimGuidePlugin.HudItems items, InventorySnapshot inventory, byte[] states)
+		{
+			this.items = items;
+			this.inventory = inventory;
+			this.states = states;
+		}
+	}
+
+	private volatile PresenceCache presenceCache;
+
+	/** What the "Next steps" box last rendered; null = never, or reset. */
+	private volatile List<GuideStep> nextStepsShown;
+	private int nextStepsWidth;
+	private Font nextStepsFont;
+
 	/** One atomic per-frame hit snapshot; null = controls not shown this frame. */
 	private volatile StepNavOverlay.HitRegions hitRegions;
 
@@ -129,17 +202,28 @@ public class HudOverlay extends OverlayPanel
 
 		OverlayFonts.apply(graphics, config);
 		panelComponent.getChildren().clear();
-		panelComponent.setPreferredSize(new Dimension(config.hudWidth(), 0));
+		int configuredWidth = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, config.hudWidth()));
+		panelComponent.setPreferredSize(new Dimension(configuredWidth, 0));
 		panelComponent.setBackgroundColor(backgroundColor());
 
 		int[] progress = plugin.progressOf(bank.getSteps());
-		panelComponent.getChildren().add(TitleComponent.builder()
-			.text(bank.getTitle() + "  (" + progress[0] + "/" + progress[1] + ")")
-			.color(TITLE_COLOR)
-			.build());
+		// A title component centres its text and never wraps, so a title wider
+		// than the box would be painted outside it on both sides. Wrap it to
+		// the width the box is actually drawn at (an Alt-resized overlay
+		// overrides the configured width).
+		Dimension resized = getPreferredSize();
+		int textWidth = (resized != null ? resized.width : configuredWidth)
+			- 2 * ComponentConstants.STANDARD_BORDER;
+		for (String line : titleLines(graphics, bank.getTitle(), progress[0], progress[1], textWidth))
+		{
+			panelComponent.getChildren().add(TitleComponent.builder()
+				.text(line)
+				.color(TITLE_COLOR)
+				.build());
+		}
 
 		int shown = 0;
-		int max = config.hudMaxSteps();
+		int max = Math.max(MIN_SHOWN_STEPS, Math.min(MAX_SHOWN_STEPS, config.hudMaxSteps()));
 		// with the split enabled, upcoming steps move to their own box below,
 		// so the current step stands alone and is easy to focus on
 		boolean split = config.hudSplitNextSteps() && max > 1;
@@ -258,9 +342,96 @@ public class HudOverlay extends OverlayPanel
 		return new Dimension(d.width, y);
 	}
 
+	/** Section title plus its progress count, wrapped to the box; cached until an input changes. */
+	private List<String> titleLines(Graphics2D graphics, String title, int done, int total, int width)
+	{
+		Font font = graphics.getFont();
+		TitleCache cache = titleCache;
+		if (cache == null || cache.done != done || cache.total != total || cache.width != width
+			|| !java.util.Objects.equals(cache.title, title) || !cache.font.equals(font))
+		{
+			cache = new TitleCache(title, done, total, width, font,
+				wrapTitle(title, "  (" + done + "/" + total + ")", graphics.getFontMetrics(), width));
+			titleCache = cache;
+		}
+		return cache.lines;
+	}
+
+	/**
+	 * Break a title into lines no wider than {@code maxWidth}. Words stay
+	 * whole unless a single word is wider than the box, which is cut rather
+	 * than left to overflow. The suffix (the progress count) is never split:
+	 * it follows the last line when it fits there and gets its own otherwise.
+	 */
+	static List<String> wrapTitle(String title, String suffix, FontMetrics metrics, int maxWidth)
+	{
+		List<String> lines = new ArrayList<>();
+		StringBuilder line = new StringBuilder();
+		for (String word : (title == null ? "" : title.trim()).split("\\s+"))
+		{
+			if (word.isEmpty())
+			{
+				continue;
+			}
+			if (line.length() > 0 && metrics.stringWidth(line + " " + word) > maxWidth)
+			{
+				lines.add(line.toString());
+				line.setLength(0);
+			}
+			if (line.length() > 0)
+			{
+				line.append(' ');
+			}
+			line.append(word);
+			while (line.length() > 1 && metrics.stringWidth(line.toString()) > maxWidth)
+			{
+				int cut = line.length() - 1;
+				while (cut > 1 && metrics.stringWidth(line.substring(0, cut)) > maxWidth)
+				{
+					cut--;
+				}
+				lines.add(line.substring(0, cut));
+				line.delete(0, cut);
+			}
+		}
+		if (line.length() == 0)
+		{
+			lines.add(suffix.trim());
+		}
+		else if (metrics.stringWidth(line + suffix) > maxWidth)
+		{
+			lines.add(line.toString());
+			lines.add(suffix.trim());
+		}
+		else
+		{
+			lines.add(line + suffix);
+		}
+		return lines;
+	}
+
 	private Color semanticStepColor(GuideStep step, Color fallback)
 	{
-		StepTextSemantic.Kind kind = StepTextSemantic.classify(step == null ? null : step.getText());
+		StepTextSemantic.Kind kind;
+		if (step == null)
+		{
+			kind = StepTextSemantic.Kind.NORMAL;
+		}
+		else
+		{
+			// a step's text never changes, so its kind is classified once
+			Map<GuideStep, StepTextSemantic.Kind> kinds = kindCache;
+			kind = kinds.get(step);
+			if (kind == null)
+			{
+				kind = StepTextSemantic.classify(step.getText());
+				if (kinds.size() >= MAX_CACHED_KINDS)
+				{
+					kinds.clear();
+				}
+				kinds.put(step, kind);
+			}
+		}
 		switch (kind)
 		{
 			case DANGER:
@@ -299,14 +470,22 @@ public class HudOverlay extends OverlayPanel
 				.leftColor(stepColor)
 				.build());
 		}
-		// PanelComponent sizes its background (and return value) from the
-		// PREVIOUS render's child measurements - stale whenever this box was
-		// hidden last frame. A clipped measuring pass warms that cache so the
-		// visible render below is correctly sized on its very first frame.
-		Graphics2D measure = (Graphics2D) g.create();
-		measure.setClip(new Rectangle(0, 0, 0, 0));
-		nextStepsPanel.render(measure);
-		measure.dispose();
+		// PanelComponent sizes its background (and return value) from its
+		// PREVIOUS render's child measurements - stale whenever what it shows
+		// has changed since. A clipped measuring pass warms that cache so the
+		// visible render below is correctly sized on the first frame of new
+		// content; unchanged content needs no second pass.
+		Font font = g.getFont();
+		if (!upcoming.equals(nextStepsShown) || width != nextStepsWidth || !font.equals(nextStepsFont))
+		{
+			Graphics2D measure = (Graphics2D) g.create();
+			measure.setClip(new Rectangle(0, 0, 0, 0));
+			nextStepsPanel.render(measure);
+			measure.dispose();
+			nextStepsShown = upcoming;
+			nextStepsWidth = width;
+			nextStepsFont = font;
+		}
 		Dimension d = nextStepsPanel.render(g);
 		return d == null ? y : y + BOX_GAP + d.height;
 	}
@@ -361,6 +540,19 @@ public class HudOverlay extends OverlayPanel
 
 		boolean borders = config.itemPresenceBorders();
 		InventorySnapshot inv = borders ? plugin.getInventorySnapshot() : null;
+		// both snapshots are immutable and replaced wholesale, so the presence
+		// of every slot is recomputed only when one of them is a new object
+		byte[] presence = null;
+		if (inv != null)
+		{
+			PresenceCache cache = presenceCache;
+			if (cache == null || cache.items != hud || cache.inventory != inv)
+			{
+				cache = new PresenceCache(hud, inv, presenceStates(items, inv));
+				presenceCache = cache;
+			}
+			presence = cache.states;
+		}
 		int cell = 0;
 		for (int i = 0; i < ids.length && cell < drawn; i++)
 		{
@@ -399,11 +591,9 @@ public class HudOverlay extends OverlayPanel
 				g.drawString(label, cx + 1, cy + 9);
 				g.setFont(prev);
 			}
-			// concept slots name a concept, not an item: a presence check would
-			// always fail and paint a permanent red border
-			if (borders && req != null && inv != null && !ConceptItems.isConcept(req.getName()))
+			if (presence != null && i < presence.length && presence[i] != PRESENCE_NONE)
 			{
-				g.setColor(inv.countOf(req) >= req.getCompletionQuantity() ? PRESENT : MISSING);
+				g.setColor(presence[i] == PRESENCE_HAVE ? PRESENT : MISSING);
 				g.drawRect(cx, cy, ICON_W - 1, ICON_H - 1);
 			}
 			cell++;
@@ -417,6 +607,30 @@ public class HudOverlay extends OverlayPanel
 				ICON_PAD, y + stripH - 2);
 		}
 		return y + stripH;
+	}
+
+	/**
+	 * Have/missing state per requirement. Concept slots name a concept, not an
+	 * item: a presence check would always fail and paint a permanent red
+	 * border, so they get no state at all.
+	 */
+	static byte[] presenceStates(List<ItemReq> items, InventorySnapshot inventory)
+	{
+		byte[] states = new byte[items.size()];
+		for (int i = 0; i < states.length; i++)
+		{
+			ItemReq req = items.get(i);
+			if (req == null || ConceptItems.isConcept(req.getName()))
+			{
+				states[i] = PRESENCE_NONE;
+			}
+			else
+			{
+				states[i] = inventory.countOf(req) >= req.getCompletionQuantity()
+					? PRESENCE_HAVE : PRESENCE_MISSING;
+			}
+		}
+		return states;
 	}
 
 	/** Attached step and location controls, centered under the box. */
@@ -503,6 +717,10 @@ public class HudOverlay extends OverlayPanel
 		spriteCache.clear();
 		spriteRequested.clear();
 		nextStepsPanel.getChildren().clear();
+		kindCache = new IdentityHashMap<>();
+		titleCache = null;
+		presenceCache = null;
+		nextStepsShown = null;
 		clearArrowRects();
 	}
 

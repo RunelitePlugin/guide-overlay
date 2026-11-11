@@ -62,4 +62,20 @@ final class PanelLayout
 		int max = Math.max(0, viewHeight - viewportHeight);
 		return Math.max(0, Math.min(desired, max));
 	}
+
+	/**
+	 * Vertical view position that puts a row back at a remembered distance
+	 * below the viewport top (negative when its top was scrolled out of view).
+	 *
+	 * @param rowY row top in view coordinates
+	 * @param offset the row's former distance below the viewport top
+	 * @param viewportHeight the viewport's visible extent height
+	 * @param viewHeight total scrollable view height
+	 * @return clamped y for {@code JViewport.setViewPosition}
+	 */
+	static int anchoredViewPosition(int rowY, int offset, int viewportHeight, int viewHeight)
+	{
+		int max = Math.max(0, viewHeight - viewportHeight);
+		return Math.max(0, Math.min(rowY - offset, max));
+	}
 }

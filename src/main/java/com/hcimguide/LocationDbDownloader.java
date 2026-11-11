@@ -114,8 +114,12 @@ public class LocationDbDownloader
 		// hard wall-clock ceiling per call (generous: the one-time dataset is
 		// a few MB and slow home connections are legitimate). The byte cap
 		// bounds size; this bounds a server trickling bytes forever.
+		// Redirects are not followed (the pinned URL never redirects): a 3xx
+		// is reported as a failed download, not requested from its target.
 		this.okHttpClient = okHttpClient.newBuilder()
 			.callTimeout(java.time.Duration.ofMinutes(5))
+			.followRedirects(false)
+			.followSslRedirects(false)
 			.build();
 		this.store = store;
 	}
@@ -167,11 +171,11 @@ public class LocationDbDownloader
 				}
 				try (ResponseBody body = response.body())
 				{
-					// A pinned https URL only bounds where the request STARTS.
-					// OkHttp follows redirects by default, so the host is checked
-					// again on the response that actually arrived.
+					// A pinned https URL only bounds where the request STARTS, so
+					// the host is checked again on the response that actually
+					// arrived - and on every hop behind it.
 					okhttp3.HttpUrl finalUrl = response.request().url();
-					if (!finalUrl.isHttps() || !"raw.githubusercontent.com".equals(finalUrl.host()))
+					if (!GuideService.cameOnlyFrom(response, "raw.githubusercontent.com"))
 					{
 						safe(settled, onError, "Unexpected final download host: " + finalUrl.host());
 						return;
@@ -271,6 +275,18 @@ public class LocationDbDownloader
 					}
 					log.warn("Location database parse failed", e);
 					safe(settled, onError, "Parse failed: " + e.getMessage());
+				}
+				catch (OutOfMemoryError | StackOverflowError e)
+				{
+					// not Exceptions: without this the download would never
+					// report an outcome. Nothing was merged - the store is only
+					// touched after a complete parse.
+					if (requestStopped(call, requestCurrent))
+					{
+						return;
+					}
+					log.warn("Location database parse exhausted memory or stack");
+					safe(settled, onError, "Parse failed: the dataset is too large to load");
 				}
 			}
 		});

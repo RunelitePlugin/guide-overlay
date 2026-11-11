@@ -62,9 +62,18 @@ if network_owners != expected_network:
     fail("network ownership changed: " + ", ".join(p.name for p in network_owners))
 
 network_text = "\n".join(read(path) for path in expected_network)
-if re.search(r"RequestBody|FormBody|MultipartBody|\.post\s*\(|\.put\s*\(|\.patch\s*\(", network_text):
-    fail("network owner contains an upload/request-body API")
-urls = sorted(set(re.findall(r'"(https?://[^"\s]+)"', network_text)))
+# GET only: no request-body type, and no builder call that selects another verb.
+if re.search(
+    r"RequestBody|FormBody|MultipartBody|\.post\s*\(|\.put\s*\(|\.patch\s*\(|\.delete\s*\(|\.method\s*\(",
+    network_text,
+):
+    fail("network owner contains an upload/request-body API or a non-GET verb")
+# Every URL the plugin can fetch: the literals in the two network owners PLUS
+# the built-in guide table in GuideRegistry.java, whose raw URL is handed to
+# GuideService.fetchUrl at runtime.
+fetch_sources = expected_network + [JAVA_ROOT / "GuideRegistry.java"]
+fetch_text = "\n".join(read(path) for path in fetch_sources)
+urls = sorted(set(re.findall(r'"(https?://[^"\s]+)"', fetch_text)))
 if not urls:
     fail("no runtime URL literals found in network owners; host allowlist check is vacuous")
 if any(not url.startswith("https://") for url in urls):
@@ -74,13 +83,43 @@ for url in urls:
     host = url.split("/", 3)[2]
     if host not in allowed_hosts:
         fail(f"unexpected runtime host: {host}")
-if re.search(r"raw\.githubusercontent\.com/[^\s\"]+/(?:main|master)/", network_text):
+    # raw GitHub data must name a full commit SHA, never a branch or tag
+    if host == "raw.githubusercontent.com" and not re.fullmatch(
+        r"https://raw\.githubusercontent\.com/[^/]+/[^/]+/[0-9a-f]{40}/.+", url
+    ):
+        fail(f"raw GitHub URL is not pinned to a commit SHA: {url}")
+if not any("raw.githubusercontent.com" in url for url in re.findall(
+        r'"(https?://[^"\s]+)"', read(JAVA_ROOT / "GuideRegistry.java"))):
+    fail("built-in guide URL literal not found in GuideRegistry.java; its checks are vacuous")
+if re.search(r"raw\.githubusercontent\.com/[^\s\"]+/(?:main|master)/", fetch_text):
     fail("moving-branch raw GitHub URL found")
+# Redirects are not followed, every hop of a response is host-checked, and each
+# call has a wall-clock ceiling - in BOTH network owners.
+for path in expected_network:
+    text = read(path)
+    for required, label in (
+        (".followRedirects(false)", "redirect following is not disabled"),
+        (".followSslRedirects(false)", "cross-scheme redirect following is not disabled"),
+        (".callTimeout(", "no per-call wall-clock timeout"),
+        ("cameOnlyFrom(response,", "response hops are not host-checked"),
+    ):
+        if required not in text:
+            fail(f"{path.name}: {label}")
 for forbidden_type in ("Client", "Player", "ItemContainer", "Skill", "Quest", "WorldPoint"):
     if re.search(rf"import\s+net\.runelite\.api\.{forbidden_type}\s*;", network_text):
         fail(f"network owner imports gameplay type {forbidden_type}")
 if "Authorization" in network_text or "Cookie" in network_text:
     fail("network owner references authentication/session headers")
+
+# Stored/imported JSON is never bound to a generic collection or Object type:
+# either streamed, walked as a tree, or bound to a fixed plugin-owned class.
+if re.search(r"fromJson\s*\([^;]*?\b(?:Map|HashMap|List|ArrayList|Set|Collection|Object)\.class", all_java):
+    fail("JSON is bound to a generic collection/Object type")
+
+# Input events are consumed in exactly one place (the overlay's own buttons).
+for path in java_files:
+    if path.name != "GuideInputHandler.java" and re.search(r"\.consume\s*\(", read(path)):
+        fail(f"input event consumed outside GuideInputHandler: {path.name}")
 
 # Normal logs must not copy stable identifiers or user-imported guide content.
 sensitive_log_tokens = re.compile(
@@ -301,7 +340,10 @@ print("REVIEWER CHECKS PASS")
 print(f"- Java runtime files: {len(java_files)}")
 print("- Network owners: GuideService.java, LocationDbDownloader.java")
 print("- Runtime hosts: " + ", ".join(sorted(allowed_hosts)))
-print("- Requests: GET only; no request bodies/auth headers")
+print("- Fetchable URL literals (network owners + GuideRegistry.java):")
+for url in urls:
+    print(f"    {url}")
+print("- Requests: GET only; no request bodies/auth headers; redirects not followed")
 print("- Normal logs: no account/profile keys or imported step/font text")
 print(f"- Overlays: {len(expected_overlays)} added/removed symmetrically")
 print(f"- Item scan: {chunk} IDs/chunk; {tracked:,}-name hard cap; generation-cancelled")

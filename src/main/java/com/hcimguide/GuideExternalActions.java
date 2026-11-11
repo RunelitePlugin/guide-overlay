@@ -102,7 +102,8 @@ public class GuideExternalActions
 	 * boundary: allowlist, scheme, https upgrade, and null rejection.</p>
 	 *
 	 * @return true if the URL was accepted and handed to the browser. A false
-	 *     return means nothing was opened.
+	 *     return means nothing was opened. Never throws: the launcher validates
+	 *     its argument on the calling thread, and this runs on the EDT.
 	 */
 	public boolean openVideoUrl(String url)
 	{
@@ -111,7 +112,14 @@ public class GuideExternalActions
 		{
 			return false;
 		}
-		launcher.browse(accepted);
+		try
+		{
+			launcher.browse(accepted);
+		}
+		catch (RuntimeException e)
+		{
+			return false;
+		}
 		return true;
 	}
 }

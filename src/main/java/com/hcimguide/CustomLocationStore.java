@@ -84,15 +84,59 @@ final class CustomLocationStore
 	private static final int MAX_WAYPOINTS = 16;
 	private static final Pattern STEP_KEY = Pattern.compile("[A-Za-z0-9._:#-]{3,256}");
 
+	/** Where the blobs live; narrowed so the store can be exercised without a live client. */
+	interface Storage
+	{
+		String read(String key);
+
+		/** @throws IllegalStateException when nothing may be written right now */
+		void write(String key, String value);
+	}
+
 	private final Gson gson;
-	private final ConfigManager configManager;
+	private final Storage storage;
 	private long revision;
 
 	@Inject
 	CustomLocationStore(Gson gson, ConfigManager configManager)
 	{
+		this(gson, new Storage()
+		{
+			@Override
+			public String read(String key)
+			{
+				// An empty profile value must not shadow real data stored globally:
+				// reads fall back to global, but writes go to the profile, so treating
+				// "" as present orphaned the global copy and looked like data loss.
+				String profile = configManager.getRSProfileConfiguration(GROUP, key);
+				return profile != null && !profile.isEmpty()
+					? profile
+					: configManager.getConfiguration(GROUP, key);
+			}
+
+			@Override
+			public void write(String key, String value)
+			{
+				if (configManager.getRSProfileKey() != null)
+				{
+					configManager.setRSProfileConfiguration(GROUP, key, value);
+				}
+				else
+				{
+					// no character profile yet (login screen): refuse rather than
+					// write into the GLOBAL config, where the pins would bleed into
+					// every character that has no profile-scoped blob of its own
+					throw new IllegalStateException(
+						"Log into a character before editing custom locations");
+				}
+			}
+		});
+	}
+
+	CustomLocationStore(Gson gson, Storage storage)
+	{
 		this.gson = gson;
-		this.configManager = configManager;
+		this.storage = storage;
 	}
 
 	synchronized StepLocationPlan getPlan(String guideId, String stepKey)
@@ -151,7 +195,7 @@ final class CustomLocationStore
 		int index = 0;
 		for (StoredWaypoint waypoint : stored.waypoints)
 		{
-			if (!waypoint.valid() || hints.size() >= MAX_WAYPOINTS)
+			if (waypoint == null || !waypoint.valid() || hints.size() >= MAX_WAYPOINTS)
 			{
 				continue;
 			}
@@ -415,7 +459,7 @@ final class CustomLocationStore
 		{
 			return; // nothing was stored and nothing needs storing
 		}
-		writeConfig(INDEX_KEY, gson.toJson(indexes));
+		writeIndexes(indexes);
 	}
 
 	private synchronized void removeActiveIndex(String guideId, String stepKey)
@@ -423,8 +467,26 @@ final class CustomLocationStore
 		Map<String, Integer> indexes = readIndexes();
 		if (indexes.remove(indexKey(guideId, stepKey)) != null)
 		{
-			writeConfig(INDEX_KEY, gson.toJson(indexes));
+			writeIndexes(indexes);
 		}
+	}
+
+	/**
+	 * Same ceiling as the pins: a blob past MAX_JSON_CHARS reads back as "no
+	 * saved positions at all", so growing past it would trade one unsaved
+	 * position for every saved one. The position then simply stays
+	 * session-only. Shrinking is always allowed.
+	 */
+	private void writeIndexes(Map<String, Integer> indexes)
+	{
+		String json = gson.toJson(indexes);
+		String previous = readConfig(INDEX_KEY);
+		if (json.length() > MAX_JSON_CHARS && json.length() >= (previous == null ? 0 : previous.length()))
+		{
+			log.warn("Waypoint positions exceed the storage limit - this one was not saved");
+			return;
+		}
+		writeConfig(INDEX_KEY, json);
 	}
 
 	private Root readRoot()
@@ -453,7 +515,7 @@ final class CustomLocationStore
 				// an older schema is not corruption: read it as-is and let the
 				// next write stamp the current version
 				state = StoreState.VALID;
-				return root;
+				return withoutNulls(root);
 			}
 			Root recovered = readBackup();
 			if (recovered != null)
@@ -490,6 +552,28 @@ final class CustomLocationStore
 		}
 	}
 
+	/**
+	 * JSON can legally hold null where a guide, a step or a waypoint belongs
+	 * ({"waypoints":[null]}). Dropping those once, where the blob is read,
+	 * keeps every index into a waypoint list pointing at a real waypoint.
+	 */
+	private static Root withoutNulls(Root root)
+	{
+		root.guides.values().removeIf(java.util.Objects::isNull);
+		for (Map<String, StoredStep> guide : root.guides.values())
+		{
+			guide.values().removeIf(java.util.Objects::isNull);
+			for (StoredStep step : guide.values())
+			{
+				if (step.waypoints != null)
+				{
+					step.waypoints.removeIf(java.util.Objects::isNull);
+				}
+			}
+		}
+		return root;
+	}
+
 	/** Previous good copy, or null when there is not a usable one. */
 	private Root readBackup()
 	{
@@ -501,7 +585,7 @@ final class CustomLocationStore
 		try
 		{
 			Root root = gson.fromJson(json, Root.class);
-			return root != null && root.guides != null ? root : null;
+			return root != null && root.guides != null ? withoutNulls(root) : null;
 		}
 		catch (RuntimeException ignored)
 		{
@@ -542,9 +626,11 @@ final class CustomLocationStore
 			throw new IllegalStateException("Custom location data exceeds the storage limit");
 		}
 		// keep the previous good value so a truncated or failed write is
-		// recoverable rather than terminal
+		// recoverable rather than terminal. Held to the same ceiling as any
+		// other write: an over-limit legacy value is not copied (it would not
+		// round-trip reliably either) and the existing backup stays in place.
 		if (state != StoreState.RECOVERED && previous != null && !previous.isEmpty()
-			&& previous.length() <= MAX_READ_CHARS)
+			&& previous.length() <= MAX_JSON_CHARS)
 		{
 			writeConfig(BACKUP_KEY, previous);
 		}
@@ -583,61 +669,49 @@ final class CustomLocationStore
 		revision++;
 	}
 
-	@SuppressWarnings("unchecked")
 	private Map<String, Integer> readIndexes()
 	{
 		String json = readConfig(INDEX_KEY);
-		if (json == null || json.length() > MAX_JSON_CHARS)
+		Map<String, Integer> out = new HashMap<>();
+		if (json == null || json.isEmpty() || json.length() > MAX_JSON_CHARS)
 		{
-			return new HashMap<>();
-		}
-		try
-		{
-			Map<String, Double> raw = gson.fromJson(json, Map.class);
-			Map<String, Integer> out = new HashMap<>();
-			if (raw != null)
-			{
-				for (Map.Entry<String, Double> entry : raw.entrySet())
-				{
-					if (entry.getKey() != null && entry.getValue() != null)
-					{
-						out.put(entry.getKey(), entry.getValue().intValue());
-					}
-				}
-			}
 			return out;
 		}
-		catch (RuntimeException ex)
+		// Streamed entry by entry: a value that is not a number is skipped on
+		// its own. Binding the whole object at once made one bad value throw
+		// for the lot, and the next write then replaced every saved position.
+		try (com.google.gson.stream.JsonReader reader = new com.google.gson.stream.JsonReader(
+			new java.io.StringReader(json)))
 		{
-			return new HashMap<>();
+			reader.beginObject();
+			while (reader.hasNext())
+			{
+				String key = reader.nextName();
+				if (reader.peek() != com.google.gson.stream.JsonToken.NUMBER)
+				{
+					reader.skipValue();
+					continue;
+				}
+				double value = reader.nextDouble();
+				out.put(key, (int) Math.max(0, Math.min(Integer.MAX_VALUE, value)));
+			}
+			reader.endObject();
 		}
+		catch (java.io.IOException | RuntimeException ex)
+		{
+			// not readable as an object any further: keep what was read
+		}
+		return out;
 	}
 
 	private String readConfig(String key)
 	{
-		// An empty profile value must not shadow real data stored globally:
-		// reads fall back to global, but writes go to the profile, so treating
-		// "" as present orphaned the global copy and looked like data loss.
-		String profile = configManager.getRSProfileConfiguration(GROUP, key);
-		return profile != null && !profile.isEmpty()
-			? profile
-			: configManager.getConfiguration(GROUP, key);
+		return storage.read(key);
 	}
 
 	private void writeConfig(String key, String value)
 	{
-		if (configManager.getRSProfileKey() != null)
-		{
-			configManager.setRSProfileConfiguration(GROUP, key, value);
-		}
-		else
-		{
-			// no character profile yet (login screen): refuse rather than
-			// write into the GLOBAL config, where the pins would bleed into
-			// every character that has no profile-scoped blob of its own
-			throw new IllegalStateException(
-				"Log into a character before editing custom locations");
-		}
+		storage.write(key, value);
 	}
 
 	private static String indexKey(String guideId, String stepKey)
@@ -664,7 +738,10 @@ final class CustomLocationStore
 			{
 				continue;
 			}
-			String label = waypoint.label == null ? "Custom waypoint" : waypoint.label.trim();
+			// labels are display strings: no angle bracket may survive, or a
+			// Swing component could render the text as markup
+			String label = waypoint.label == null ? "Custom waypoint"
+				: waypoint.label.replace("<", "").replace(">", "").trim();
 			if (label.isEmpty())
 			{
 				label = "Custom waypoint";

@@ -32,6 +32,10 @@ public final class ProgressCodec
 	private static final int MAX_KEYS = 50_000;
 	/** Parsed step keys are compact hashes; this leaves ample forward-compatible room. */
 	private static final int MAX_KEY_CHARS = 512;
+	/** Longest line of any kind; a key line is further held to MAX_KEY_CHARS. */
+	private static final int MAX_LINE_CHARS = 512;
+	/** "#..." lines: one is written today, the rest is forward-compatible headroom. */
+	private static final int MAX_METADATA_LINES = 64;
 	private static final java.util.regex.Pattern GUIDE_ID_PATTERN =
 		java.util.regex.Pattern.compile("[a-z0-9-]{1,64}");
 
@@ -129,32 +133,57 @@ public final class ProgressCodec
 			}
 			Set<String> keys = new HashSet<>();
 			String guideId = null;
-			for (String line : out.toString(StandardCharsets.UTF_8.name()).split("\n"))
+			// Scanned in place, never split(): a few KB of gzip can inflate to
+			// millions of tiny lines, and one String per line is allocated only
+			// after the line has passed the count and length limits below.
+			String payload = out.toString(StandardCharsets.UTF_8.name());
+			int keyLines = 0;
+			int metadataLines = 0;
+			int start = 0;
+			while (start < payload.length())
 			{
-				if (line.isEmpty())
+				int end = payload.indexOf('\n', start);
+				if (end < 0)
 				{
-					continue;
+					end = payload.length();
 				}
-				if (line.startsWith("#"))
+				if (end > start)
 				{
-					// metadata lines; unknown ones are ignored for forward compatibility
-					if (line.startsWith("#guide:"))
+					if (end - start > MAX_LINE_CHARS)
 					{
-						String candidate = line.substring("#guide:".length()).trim();
-						if (!GUIDE_ID_PATTERN.matcher(candidate).matches())
-						{
-							throw new IllegalArgumentException("Progress code contains an invalid guide id");
-						}
-						guideId = candidate;
+						throw new IllegalArgumentException("Progress contains an invalid step key");
 					}
-					continue;
+					if (payload.charAt(start) == '#')
+					{
+						// metadata lines; unknown ones are ignored for forward compatibility
+						if (++metadataLines > MAX_METADATA_LINES)
+						{
+							throw new IllegalArgumentException("Progress code has too many entries");
+						}
+						if (payload.startsWith("#guide:", start))
+						{
+							String candidate = payload.substring(start + "#guide:".length(), end).trim();
+							if (!GUIDE_ID_PATTERN.matcher(candidate).matches())
+							{
+								throw new IllegalArgumentException("Progress code contains an invalid guide id");
+							}
+							guideId = candidate;
+						}
+					}
+					else
+					{
+						// every key LINE counts, duplicates included: the set's
+						// size alone would let repeats through unbounded
+						if (++keyLines > MAX_KEYS)
+						{
+							throw new IllegalArgumentException("Progress code has too many entries");
+						}
+						String line = payload.substring(start, end);
+						validateKey(line);
+						keys.add(line);
+					}
 				}
-				validateKey(line);
-				keys.add(line);
-				if (keys.size() > MAX_KEYS)
-				{
-					throw new IllegalArgumentException("Progress code has too many entries");
-				}
+				start = end + 1;
 			}
 			return new Decoded(keys, guideId);
 		}

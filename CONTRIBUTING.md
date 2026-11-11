@@ -19,5 +19,10 @@ Changes that add a capability must update both of:
 1. `PLUGIN_HUB_REVIEW.md`
 2. `tools/reviewer_checks.py` or `tools/audit-capabilities.sh`
 
+A URL the plugin fetches must be a string literal in `GuideService.java`,
+`LocationDbDownloader.java` or the built-in guide table in `GuideRegistry.java`:
+those are the files the URL checks read. GitHub data URLs must name a full
+commit SHA.
+
 Do not add reflection, JNI, subprocess execution, synthetic input/game actions,
 runtime source/class loading, moving-branch data URLs, or new runtime dependencies.

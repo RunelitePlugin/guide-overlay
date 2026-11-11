@@ -126,4 +126,54 @@ public class GuideExternalActionsTest
 		}
 		assertTrue("browser must never be invoked for a rejected URL", opened.isEmpty());
 	}
+
+	@Test
+	public void neverAcceptsAStringTheBrowserLauncherCannotParse()
+	{
+		// LinkBrowser parses its argument with java.net.URI on the calling thread
+		String[] notUris = {
+			"https://youtu.be/abc\"def",
+			"https://youtu.be/a|b",
+			"https://youtu.be/a^b",
+			"https://youtu.be/a%zz",
+			"https://youtube.com/watch?v={x}",
+			"https://youtu.be/a`b",
+			"https://youtube.com:port/watch",
+		};
+		for (String url : notUris)
+		{
+			assertFalse("should reject: " + url, actions.openVideoUrl(url));
+			assertEquals("must not be discovered in step text: " + url,
+				null, VideoLinks.firstVideoUrl("Watch " + url + " first"));
+		}
+		assertTrue(opened.isEmpty());
+	}
+
+	@Test
+	public void everyAcceptedUrlIsAValidUri()
+	{
+		String[] accepted = {
+			"https://www.youtube.com/watch?v=aBcD&t=10s",
+			"http://m.youtube.com/watch?v=aBcD#t=1",
+			"https://youtu.be/abc-_123",
+			"https://streamable.com/x1y2z3",
+			"https://youtube.com:443/watch?v=a%20b",
+		};
+		for (String url : accepted)
+		{
+			String ok = VideoLinks.accepted(url);
+			assertTrue("should accept: " + url, ok != null);
+			java.net.URI.create(ok); // throws on anything the launcher would refuse
+		}
+	}
+
+	@Test
+	public void aFailingLauncherMeansFalseNotAnException()
+	{
+		GuideExternalActions failing = new GuideExternalActions(url ->
+		{
+			throw new IllegalArgumentException("launcher refused " + url);
+		});
+		assertFalse(failing.openVideoUrl("https://youtu.be/abc123"));
+	}
 }

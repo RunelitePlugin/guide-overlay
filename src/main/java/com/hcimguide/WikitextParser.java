@@ -14,7 +14,6 @@ import java.util.regex.Pattern;
  */
 public class WikitextParser
 {
-	private static final Pattern HEADING = Pattern.compile("^(={2,6})\\s*(.*?)\\s*\\1\\s*$");
 	private static final Pattern BULLET = Pattern.compile("^([*#:]+)\\s*(.*)$");
 	private static final Pattern EPISODE_TITLE = Pattern.compile("^Episode\\s+(\\d{1,3})\\b.*", Pattern.CASE_INSENSITIVE);
 	private static final Pattern BANK_TITLE = Pattern.compile("^Bank\\s+([0-9]+[A-Za-z]?)\\b.*", Pattern.CASE_INSENSITIVE);
@@ -26,7 +25,13 @@ public class WikitextParser
 	private static final Pattern BANK_LABEL = Pattern.compile(
 		"^Bank\\s*#?\\s*([0-9]+[A-Za-z]?)(?:\\s*(?:[-:–—]\\s*.+|\\([^)]*\\)|\\[[^]]*]))?\\s*[.:]?\\s*$",
 		Pattern.CASE_INSENSITIVE);
-	private static final Pattern BOLD_RUN = Pattern.compile("'''\\s*(.*?)\\s*'''");
+	/**
+	 * Bold run. Deliberately NO whitespace quantifiers around the lazy group:
+	 * three adjacent variable-width quantifiers backtrack cubically on a long
+	 * run of spaces after an unclosed opener. The captured content is trimmed
+	 * in code instead.
+	 */
+	private static final Pattern BOLD_RUN = Pattern.compile("'''(.*?)'''");
 	/**
 	 * {{Youtube|id}} embed template. The id must be the FIRST argument and be
 	 * terminated by '|' or '}' - so named parameters ({{Youtube|width=400|id}})
@@ -34,7 +39,7 @@ public class WikitextParser
 	 * keeping with the tolerant-parser design. Both live capitalizations of
 	 * the template name match.
 	 */
-	private static final Pattern YOUTUBE_TEMPLATE = Pattern.compile("\\{\\{\\s*[Yy]ou[Tt]ube\\s*\\|\\s*([A-Za-z0-9_-]{5,20})\\s*[|}]");
+	private static final Pattern YOUTUBE_TEMPLATE = Pattern.compile("\\{\\{\\s*+[Yy]ou[Tt]ube\\s*+\\|\\s*+([A-Za-z0-9_-]{5,20})\\s*+[|}]");
 	// NOTE: HTML comments are stripped with the regex-free stripHtmlComments()
 	// - a lazy <!--.*?--> pattern goes quadratic on unterminated prefixes
 
@@ -43,7 +48,7 @@ public class WikitextParser
 	 * each {{Checklist}} block ("&lt;!-- Bank 12 --&gt;", "&lt;!-- Bank 105A --&gt;").
 	 */
 	private static final Pattern BANK_COMMENT = Pattern.compile(
-		"^<!--\\s*Bank\\s*#?\\s*([0-9]+[A-Za-z]?)\\s*-->$", Pattern.CASE_INSENSITIVE);
+		"^<!--\\s*+Bank\\s*+#?\\s*+([0-9]++[A-Za-z]?)\\s*+-->$", Pattern.CASE_INSENSITIVE);
 
 	/**
 	 * Video URL in a standalone marker line: a {{Youtube|id}} embed or a
@@ -97,6 +102,12 @@ public class WikitextParser
 			end++;
 		}
 		String raw = line.substring(start, end);
+		if (raw.length() > MAX_TITLE_CHARS)
+		{
+			// the title is copied into the section id and from there into
+			// every step key of the block - it must stay short
+			raw = raw.substring(0, MAX_TITLE_CHARS);
+		}
 		// computed titles ("Bank {{#expr:{{#var:bankNumber}}+1}}") carry no
 		// usable number - treat as empty so the block continues the current
 		// section (the preceding <!-- Bank N --> comment names real banks)
@@ -113,13 +124,21 @@ public class WikitextParser
 	 * which would otherwise keep the caption as text.
 	 */
 	private static final Pattern FILE_LINK = Pattern.compile(
-		"(?i)\\[\\[(?:File|Image):[^\\[\\]]*(?:\\[\\[[^\\[\\]]*]][^\\[\\]]*)*]]");
-	private static final Pattern WIKILINK_PIPED = Pattern.compile("\\[\\[[^\\[\\]|]*\\|([^\\[\\]]*)]]");
-	private static final Pattern WIKILINK = Pattern.compile("\\[\\[([^\\[\\]|]*)]]");
-	private static final Pattern EXTLINK_LABELED = Pattern.compile("\\[(?:https?|ftp)://\\S*\\s+([^\\]]*)]");
-	private static final Pattern EXTLINK = Pattern.compile("\\[(?:https?|ftp)://[^\\]\\s]*]");
-	private static final Pattern TEMPLATE = Pattern.compile("\\{\\{([^{}]*)}}");
-	private static final Pattern HTML_TAG = Pattern.compile("<[^<>]+>");
+		"(?i)\\[\\[(?:File|Image):[^\\[\\]]*+(?:\\[\\[[^\\[\\]]*+]][^\\[\\]]*+)*+]]");
+	// Every quantifier below is possessive: each is followed by a character its
+	// class excludes, so nothing is lost, and a failed match cannot re-walk
+	// the scanned run once per candidate start.
+	private static final Pattern WIKILINK_PIPED = Pattern.compile("\\[\\[[^\\[\\]|]*+\\|([^\\[\\]]*+)]]");
+	private static final Pattern WIKILINK = Pattern.compile("\\[\\[([^\\[\\]|]*+)]]");
+	private static final Pattern TEMPLATE = Pattern.compile("\\{\\{([^{}]*+)}}");
+	private static final Pattern HTML_TAG = Pattern.compile("<[^<>]++>");
+	private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+	/**
+	 * "->" written as an arrow between actions ("Ardy Cloak -> DKP"). Not the
+	 * tail of an HTML comment ("-->"), which must stay intact for tag removal.
+	 */
+	private static final Pattern ARROW = Pattern.compile("(?<!-)->");
+	private static final Pattern NUMERIC_ENTITY = Pattern.compile("&#(?:([0-9]{1,7})|[xX]([0-9a-fA-F]{1,6}));");
 
 	/**
 	 * Parses in strict Episode/Bank mode first; when the page has no
@@ -129,6 +148,12 @@ public class WikitextParser
 	 */
 	public Guide parse(String wikitext)
 	{
+		if (wikitext != null && !wikitext.isEmpty() && wikitext.charAt(0) == '\uFEFF')
+		{
+			// a byte-order mark (files saved by some editors) would otherwise
+			// hide the first line's heading from the "==" test
+			wikitext = wikitext.substring(1);
+		}
 		Guide strict = parseInternal(wikitext, false);
 		if (!strict.isEmpty())
 		{
@@ -156,6 +181,26 @@ public class WikitextParser
 	 * source were ever fixed.
 	 */
 	private static final int MAX_STEP_SOURCE_CHARS = 4096;
+	/**
+	 * Longest section/episode title kept. Titles feed the section id, which is
+	 * copied into every step key of the section, so an unbounded title
+	 * multiplies by the step count. Real titles are under 60 characters.
+	 */
+	private static final int MAX_TITLE_CHARS = 200;
+	/**
+	 * Longest section id. Ids prefix every step key and the persistence layer
+	 * rejects keys over 512 characters, so this also bounds key length:
+	 * id + "#" + 8 hex digits + "#" + occurrence stays far below that limit.
+	 * An id built from a 64-character title slug always fits unchanged.
+	 */
+	private static final int MAX_BANK_ID_CHARS = 72;
+	/**
+	 * The persistence layer never stored a key longer than this, so an earlier
+	 * key beyond it has no saved progress and needs no migration entry.
+	 */
+	private static final int MAX_PERSISTED_KEY_CHARS = 512;
+	/** Deepest bullet nesting kept; the wiki guides use at most two levels. */
+	private static final int MAX_DEPTH = 6;
 
 	private Guide parseInternal(String wikitext, boolean generic)
 	{
@@ -179,8 +224,20 @@ public class WikitextParser
 		// previous non-empty line, for telling a section {{Youtube}} embed
 		// apart from an inline embed of the preceding step's own video
 		String lastNonEmpty = null;
+		// occurrence counter in the PREVIOUS key generation's text space, and
+		// section ids as that generation minted them - together they rebuild
+		// each step's earlier key so saved progress can follow a text change
+		Map<String, Integer> legacyOccurrence = new HashMap<>();
+		Map<String, String> legacyBankIds = new HashMap<>();
+		// the same, in the still older key space where every step of an episode
+		// sat in one "Notes" section (see ProgressKeyMigration.migrateLegacyNotes,
+		// which rebuilds those keys from the CURRENT text and so cannot follow
+		// a text change by itself)
+		Map<String, Integer> legacyNotesOccurrence = new HashMap<>();
+		// true between a {{Checklist}} opener and its closing "}}"
+		boolean inChecklist = false;
 
-		for (String rawLine : wikitext.split("\r?\n"))
+		for (String rawLine : wikitext.split("\r\n|\r|\n"))
 		{
 			String line = rawLine.trim();
 			if (line.isEmpty())
@@ -190,20 +247,22 @@ public class WikitextParser
 			String previousLine = lastNonEmpty;
 			lastNonEmpty = line;
 
-			Matcher h = HEADING.matcher(line);
-			if (h.matches())
+			// headings are recognised by counting "=" - a regex with a lazy
+			// group between whitespace runs backtracks cubically on a padded line
+			int level = headingLevel(line);
+			if (level > 0)
 			{
+				inChecklist = false;
 				// same source cap as step lines: cleanInline runs a dozen
 				// linear passes, and headings were the one line kind fed to it
 				// unbounded - a pathological multi-megabyte heading must not
 				// buy CPU the step lines already refuse
-				String headingSource = h.group(2);
+				String headingSource = stripRegexSpace(line.substring(level, line.length() - level));
 				if (headingSource.length() > MAX_STEP_SOURCE_CHARS)
 				{
 					headingSource = headingSource.substring(0, MAX_STEP_SOURCE_CHARS);
 				}
-				String title = cleanInline(headingSource);
-				int level = h.group(1).length();
+				String title = capTitle(cleanInline(headingSource));
 
 				boolean isChapter;
 				if (generic)
@@ -244,6 +303,7 @@ public class WikitextParser
 					guide.getEpisodes().add(episode);
 					bank = null;
 					banksById.clear();
+					legacyBankIds.clear();
 					pendingBank = null;
 					continue;
 				}
@@ -261,7 +321,7 @@ public class WikitextParser
 					{
 						id = "E" + episode.getNumber() + "-" + slug(title);
 					}
-					bank = findOrCreateBank(guide, episode, banksById, id, title);
+					bank = findOrCreateBank(guide, episode, banksById, legacyBankIds, id, title);
 				}
 				else
 				{
@@ -282,19 +342,24 @@ public class WikitextParser
 			// current section (the wiki uses those as visual continuation
 			// boxes around screenshots).
 			boolean handledAsChecklist = false;
+			// NO regex below ever sees a line longer than the step cap: the
+			// patterns are linear on real lines, but a megabyte line would still
+			// buy megabytes of matcher work per pattern
+			boolean oversized = line.length() > MAX_STEP_SOURCE_CHARS;
 			if (episode != null)
 			{
-				Matcher bc = BANK_COMMENT.matcher(line);
-				if (bc.matches())
+				Matcher bc = oversized ? null : BANK_COMMENT.matcher(line);
+				if (bc != null && bc.matches())
 				{
 					pendingBank = bc.group(1).toUpperCase(Locale.ROOT);
 					continue;
 				}
 				if (line.startsWith("{{Checklist"))
 				{
+					inChecklist = true;
 					if (pendingBank != null)
 					{
-						bank = findOrCreateBank(guide, episode, banksById,
+						bank = findOrCreateBank(guide, episode, banksById, legacyBankIds,
 							"E" + episode.getNumber() + ".B" + pendingBank, "Bank " + pendingBank);
 						pendingBank = null;
 					}
@@ -307,7 +372,7 @@ public class WikitextParser
 							String id = tb.matches()
 								? "E" + episode.getNumber() + ".B" + tb.group(1).toUpperCase(Locale.ROOT)
 								: "E" + episode.getNumber() + "-" + slug(title);
-							bank = findOrCreateBank(guide, episode, banksById, id, title);
+							bank = findOrCreateBank(guide, episode, banksById, legacyBankIds, id, title);
 						}
 						// empty/computed title: continuation of the current section
 					}
@@ -323,6 +388,22 @@ public class WikitextParser
 				}
 			}
 
+			if (oversized)
+			{
+				// skipped, never shortened (see MAX_STEP_SOURCE_CHARS); only a
+				// dropped list item makes the import incomplete
+				if (episode != null && isBulletStart(line.charAt(0)))
+				{
+					guide.markTruncated();
+				}
+				continue;
+			}
+			if (line.equals("}}"))
+			{
+				inChecklist = false;
+				continue;
+			}
+
 			// Other guides mark banks as visible text: bold lines, list items,
 			// table cells, captions. Extract the label from the whole raw line;
 			// the anchored matcher keeps prose ("Bank 9 duplicates Bank 8") as
@@ -336,7 +417,7 @@ public class WikitextParser
 					//noinspection ResultOfMethodCallIgnored
 					bk.matches();
 					String id = "E" + episode.getNumber() + ".B" + bk.group(1).toUpperCase(Locale.ROOT);
-					bank = findOrCreateBank(guide, episode, banksById, id, bankLabel);
+					bank = findOrCreateBank(guide, episode, banksById, legacyBankIds, id, bankLabel);
 					continue;
 				}
 			}
@@ -349,12 +430,31 @@ public class WikitextParser
 					guide.markTruncated();
 					continue;
 				}
-				if (line.length() > MAX_STEP_SOURCE_CHARS)
+				String source = b.group(2);
+				// the text (and so the key) the previous parser generation gave
+				// this line, computed from the untouched source
+				String legacyText = cleanInline(source, true);
+				if (closesBlock(source))
 				{
-					guide.markTruncated();
-					continue;
+					// "* last item}}": the block's closing braces share the
+					// bullet's line - they are markup, not step text
+					source = source.substring(0, source.length() - 2);
+					inChecklist = false;
 				}
-				String text = cleanInline(b.group(2));
+				String text = cleanInline(source);
+				String legacyKey = null;
+				String legacyNotesKey = null;
+				if (!legacyText.isEmpty())
+				{
+					String notesId = "E" + episode.getNumber() + "-notes";
+					String sectionId = bank != null ? bank.getId() : notesId;
+					String legacyBankId = legacyBankIds.getOrDefault(sectionId, sectionId);
+					String legacyHash = "#" + Integer.toHexString(legacyText.hashCode()) + "#";
+					int legacyOcc = legacyOccurrence.merge(legacyBankId + " " + legacyText, 1, Integer::sum) - 1;
+					legacyKey = legacyBankId + legacyHash + legacyOcc;
+					int notesOcc = legacyNotesOccurrence.merge(notesId + " " + legacyText, 1, Integer::sum) - 1;
+					legacyNotesKey = notesId + legacyHash + notesOcc;
+				}
 				if (text.isEmpty())
 				{
 					continue;
@@ -363,15 +463,26 @@ public class WikitextParser
 				if (bank == null)
 				{
 					String id = "E" + episode.getNumber() + "-notes";
-					bank = findOrCreateBank(guide, episode, banksById, id, "Notes");
+					bank = findOrCreateBank(guide, episode, banksById, legacyBankIds, id, "Notes");
 				}
-				int depth = Math.max(0, b.group(1).length() - 1);
+				int depth = Math.min(MAX_DEPTH, Math.max(0, b.group(1).length() - 1));
 				String occKey = bank.getId() + " " + text;
 				int occ = occurrence.merge(occKey, 1, Integer::sum) - 1;
 				// String.hashCode is stable across JVMs. Identical texts in a bank are
 				// separated by the occurrence suffix; a 32-bit collision between two
 				// DIFFERENT texts within one ~30-step bank is vanishingly unlikely.
 				String key = bank.getId() + "#" + Integer.toHexString(text.hashCode()) + "#" + occ;
+				// Registered in the SPLIT map (one old key -> its one current
+				// key): that is the map replayed for skipped steps as well as
+				// completed ones, so both kinds of saved mark follow the step.
+				if (legacyKey != null && !legacyKey.equals(key) && legacyKey.length() <= MAX_PERSISTED_KEY_CHARS)
+				{
+					guide.getLegacySplitKeys().put(legacyKey, java.util.Collections.singletonList(key));
+				}
+				if (legacyNotesKey != null && !legacyText.equals(text) && !legacyNotesKey.equals(key))
+				{
+					guide.getLegacySplitKeys().putIfAbsent(legacyNotesKey, java.util.Collections.singletonList(key));
+				}
 				GuideStep guideStep = new GuideStep(key, text, depth, bank.getId());
 				// video URLs become a per-step "watch in browser" action; text
 				// (and therefore keys) untouched. The RAW line is the fallback:
@@ -410,7 +521,39 @@ public class WikitextParser
 					{
 						episode.setVideoUrl(video);
 					}
+					continue;
 				}
+			}
+
+			// A plain-text line INSIDE a checklist block is part of the list the
+			// wiki renders ("IF 85 Crafting" above the steps it governs). It
+			// becomes a note row. Its key carries an "n" occurrence marker: a
+			// separate key space, so a note can never take over the key (and the
+			// saved tick) of a real step with the same text.
+			if (inChecklist && bank != null && !handledAsChecklist
+				&& Character.isLetterOrDigit(line.charAt(0)))
+			{
+				String source = line;
+				if (closesBlock(source))
+				{
+					source = source.substring(0, source.length() - 2);
+					inChecklist = false;
+				}
+				String text = cleanInline(source);
+				if (text.isEmpty())
+				{
+					continue;
+				}
+				if (totalSteps >= MAX_STEPS)
+				{
+					guide.markTruncated();
+					continue;
+				}
+				totalSteps++;
+				int occ = occurrence.merge(bank.getId() + " note " + text, 1, Integer::sum) - 1;
+				String key = bank.getId() + "#" + Integer.toHexString(text.hashCode()) + "#n" + occ;
+				bank.getSteps().add(new GuideStep(key, text, 0, bank.getId()));
+				continue;
 			}
 			// anything else (plain paragraphs, templates, iframes) is ignored
 		}
@@ -419,8 +562,15 @@ public class WikitextParser
 	}
 
 	private static GuideBank findOrCreateBank(Guide guide, GuideEpisode episode,
-		Map<String, GuideBank> banksById, String id, String title)
+		Map<String, GuideBank> banksById, Map<String, String> legacyBankIds, String rawId, String title)
 	{
+		String id = boundId(rawId);
+		if (!id.equals(rawId))
+		{
+			// the unbounded id an earlier generation minted for this section,
+			// for rebuilding the step keys saved progress may be stored under
+			legacyBankIds.putIfAbsent(id, rawId);
+		}
 		GuideBank existing = banksById.get(id);
 		if (existing != null)
 		{
@@ -433,10 +583,112 @@ public class WikitextParser
 			guide.markTruncated();
 			return episode.getBanks().get(episode.getBanks().size() - 1);
 		}
-		GuideBank created = new GuideBank(id, title, episode.getNumber());
+		GuideBank created = new GuideBank(id, capTitle(title), episode.getNumber());
 		banksById.put(id, created);
 		episode.getBanks().add(created);
 		return created;
+	}
+
+	/**
+	 * Heading level (2-6) of a trimmed line, or 0 when it is not a heading.
+	 * MediaWiki semantics: the level is the shorter of the leading and trailing
+	 * "=" runs, capped at six; surplus "=" stay in the title.
+	 */
+	static int headingLevel(String line)
+	{
+		int n = line.length();
+		if (n < 4 || line.charAt(0) != '=' || line.charAt(n - 1) != '=')
+		{
+			return 0;
+		}
+		int lead = 0;
+		while (lead < n && line.charAt(lead) == '=')
+		{
+			lead++;
+		}
+		if (lead == n)
+		{
+			// nothing but "=": the two runs share the line
+			return Math.min(6, n / 2);
+		}
+		int trail = 0;
+		while (line.charAt(n - 1 - trail) == '=')
+		{
+			trail++;
+		}
+		int level = Math.min(6, Math.min(lead, trail));
+		return level >= 2 ? level : 0;
+	}
+
+	/** Trims the characters a regex "\\s" matches (not every control character, as trim() would). */
+	private static String stripRegexSpace(String s)
+	{
+		int start = 0;
+		int end = s.length();
+		while (start < end && isRegexSpace(s.charAt(start)))
+		{
+			start++;
+		}
+		while (end > start && isRegexSpace(s.charAt(end - 1)))
+		{
+			end--;
+		}
+		return s.substring(start, end);
+	}
+
+	private static boolean isRegexSpace(char c)
+	{
+		return c == ' ' || c == '\t' || c == '\n' || c == '\u000B' || c == '\f' || c == '\r';
+	}
+
+	private static boolean isBulletStart(char c)
+	{
+		return c == '*' || c == '#' || c == ':';
+	}
+
+	private static String capTitle(String title)
+	{
+		return title.length() > MAX_TITLE_CHARS ? title.substring(0, MAX_TITLE_CHARS - 1) + "…" : title;
+	}
+
+	/**
+	 * Bounds a section id. The hash of the full id keeps two long ids that
+	 * share a prefix apart instead of merging their sections.
+	 */
+	private static String boundId(String id)
+	{
+		if (id.length() <= MAX_BANK_ID_CHARS)
+		{
+			return id;
+		}
+		return id.substring(0, MAX_BANK_ID_CHARS - 9) + "-" + Integer.toHexString(id.hashCode());
+	}
+
+	/**
+	 * True when a line ends with the "}}" that closes its enclosing template
+	 * block rather than a template of its own ("* text {{plink|X}}").
+	 */
+	private static boolean closesBlock(String source)
+	{
+		if (!source.endsWith("}}"))
+		{
+			return false;
+		}
+		int balance = 0;
+		for (int i = 0; i + 1 < source.length(); i++)
+		{
+			if (source.charAt(i) == '{' && source.charAt(i + 1) == '{')
+			{
+				balance++;
+				i++;
+			}
+			else if (source.charAt(i) == '}' && source.charAt(i + 1) == '}')
+			{
+				balance--;
+				i++;
+			}
+		}
+		return balance < 0;
 	}
 
 	/**
@@ -477,7 +729,7 @@ public class WikitextParser
 		int candidatesChecked = 0;
 		while (bold.find() && candidatesChecked < MAX_LABEL_CANDIDATES)
 		{
-			String candidate = normalizeBankCandidate(cleanInline(bold.group(1)));
+			String candidate = normalizeBankCandidate(cleanInline(stripRegexSpace(bold.group(1))));
 			if (!isBankLabel(candidate))
 			{
 				continue;
@@ -632,15 +884,53 @@ public class WikitextParser
 
 	private static String normalizeLayoutJunk(String s)
 	{
+		// Scanned by hand: as regexes these four rules put overlapping
+		// character classes side by side, which is quadratic on a line of
+		// repeated "=" or "|".
 		String out = s == null ? "" : s.trim();
+		int start = 0;
+		int end = out.length();
 		// <gallery> entries use: File:name.png|caption
-		out = out.replaceFirst("(?i)^(?:File|Image):[^|]+\\|\\s*", "");
+		int prefix = regionMatchesIgnoreCase(out, 0, "File:") ? 5
+			: regionMatchesIgnoreCase(out, 0, "Image:") ? 6 : -1;
+		if (prefix > 0)
+		{
+			int pipe = out.indexOf('|', prefix);
+			if (pipe > prefix)
+			{
+				start = skipRegexSpace(out, pipe + 1);
+			}
+		}
 		// MediaWiki table cell syntax: | style="..." | content
-		out = out.replaceFirst("^[|!]\\s*[^|]*=\\s*[^|]*\\|\\s*", "");
+		if (start < end && (out.charAt(start) == '|' || out.charAt(start) == '!'))
+		{
+			int pipe = out.indexOf('|', start + 1);
+			int equals = out.indexOf('=', start + 1);
+			if (pipe > 0 && equals > 0 && equals < pipe)
+			{
+				start = skipRegexSpace(out, pipe + 1);
+			}
+		}
 		// table/list/definition prefixes and harmless trailing cell punctuation
-		out = out.replaceFirst("^[|!;:*#\\s]+", "");
-		out = out.replaceFirst("[|!;\\s]+$", "");
-		return out.trim();
+		while (start < end && (isRegexSpace(out.charAt(start)) || "|!;:*#".indexOf(out.charAt(start)) >= 0))
+		{
+			start++;
+		}
+		while (end > start && (isRegexSpace(out.charAt(end - 1)) || "|!;".indexOf(out.charAt(end - 1)) >= 0))
+		{
+			end--;
+		}
+		return out.substring(start, end).trim();
+	}
+
+	private static int skipRegexSpace(String s, int from)
+	{
+		int i = from;
+		while (i < s.length() && isRegexSpace(s.charAt(i)))
+		{
+			i++;
+		}
+		return i;
 	}
 
 	/** Remove complete [[File:...]] / [[Image:...]] blocks with nested links. */
@@ -707,6 +997,18 @@ public class WikitextParser
 	 */
 	static String cleanInline(String s)
 	{
+		return cleanInline(s, false);
+	}
+
+	/**
+	 * @param legacy reproduce, character for character, the text the previous
+	 *               parser generation produced (arrows flattened to "-",
+	 *               fewer entities, control characters kept). Step keys hash
+	 *               the text, so this is how a step's earlier key is rebuilt
+	 *               for progress migration - never use it for display.
+	 */
+	static String cleanInline(String s, boolean legacy)
+	{
 		if (s == null)
 		{
 			return "";
@@ -742,25 +1044,212 @@ public class WikitextParser
 		m.appendTail(sb);
 		out = sb.toString();
 
-		out = EXTLINK_LABELED.matcher(out).replaceAll("$1");
-		out = EXTLINK.matcher(out).replaceAll("");
+		out = stripExternalLinks(out, true);
+		out = stripExternalLinks(out, false);
 		out = out.replace("'''", "").replace("''", "");
 		// SECURITY: decode entities BEFORE stripping tags, so entity-escaped
 		// markup ("&lt;html&gt;") becomes a real tag and is removed with the
 		// rest. "&amp;" is decoded LAST to prevent double-decoding
 		// ("&amp;lt;" must yield the literal text "&lt;", not "<").
+		if (!legacy)
+		{
+			out = decodeEntities(out);
+		}
 		out = out.replace("&nbsp;", " ")
 			.replace("&lt;", "<")
 			.replace("&gt;", ">")
 			.replace("&#39;", "'")
 			.replace("&quot;", "\"")
 			.replace("&amp;", "&");
+		return stripMarkupCharacters(out, legacy);
+	}
+
+	/**
+	 * External links, scanned by hand so a row of unclosed "[http://" stays
+	 * linear (as a regex, every opener re-walks the rest of the line).
+	 * Labeled: "[url label]" becomes "label" - the url is the whole run of
+	 * non-whitespace after the scheme. Unlabeled: "[url]" is removed.
+	 */
+	private static String stripExternalLinks(String s, boolean labeled)
+	{
+		int at = nextExternalLink(s, 0);
+		if (at < 0)
+		{
+			return s;
+		}
+		StringBuilder out = new StringBuilder(s.length());
+		int copied = 0;
+		while (at >= 0)
+		{
+			int end = at;
+			if (labeled)
+			{
+				while (end < s.length() && !isRegexSpace(s.charAt(end)))
+				{
+					end++;
+				}
+				int label = skipRegexSpace(s, end);
+				int close = label > end ? s.indexOf(']', label) : -1;
+				if (close >= 0)
+				{
+					out.append(s, copied, at).append(s, label, close);
+					copied = close + 1;
+					end = close + 1;
+				}
+				else if (label > end)
+				{
+					// whitespace but no "]" anywhere after it: nothing further
+					// along can close a label either
+					break;
+				}
+				// else: the url run is not followed by whitespace; every
+				// opener inside that run ends at the same place, so skip it
+			}
+			else
+			{
+				while (end < s.length() && s.charAt(end) != ']' && !isRegexSpace(s.charAt(end)))
+				{
+					end++;
+				}
+				if (end < s.length() && s.charAt(end) == ']')
+				{
+					out.append(s, copied, at);
+					copied = end + 1;
+					end++;
+				}
+				// else: an opener inside the scanned run stops at the same
+				// whitespace, so the whole run is skipped
+			}
+			at = nextExternalLink(s, Math.max(end, at + 1));
+		}
+		return out.append(s, copied, s.length()).toString();
+	}
+
+	/** Index of the next "[http://", "[https://" or "[ftp://" at or after {@code from}, or -1. */
+	private static int nextExternalLink(String s, int from)
+	{
+		for (int i = s.indexOf('[', from); i >= 0; i = s.indexOf('[', i + 1))
+		{
+			if (s.startsWith("http://", i + 1) || s.startsWith("https://", i + 1) || s.startsWith("ftp://", i + 1))
+			{
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	/**
+	 * Shared tail of every display-string cleaner: remove tags and angle
+	 * brackets, collapse whitespace. Outside legacy mode the arrows guides
+	 * write between actions survive as "→" ("Ardy Cloak -> DKP",
+	 * "Vial > Tarromin > Limpwurt") instead of losing their ">" - so the
+	 * no-angle-bracket rule below holds and the instruction stays readable.
+	 */
+	private static String stripMarkupCharacters(String s, boolean legacy)
+	{
+		String out = s;
+		if (!legacy)
+		{
+			// BEFORE tag removal: a stray "<" earlier on the line would
+			// otherwise pair with the arrow's ">" and delete the text between
+			out = ARROW.matcher(out).replaceAll("→");
+		}
 		out = HTML_TAG.matcher(out).replaceAll("");
+		if (!legacy)
+		{
+			// AFTER tag removal, so a real tag written "<b >" is already gone
+			out = WHITESPACE.matcher(out).replaceAll(" ").replace(" > ", " → ");
+		}
 		// belt and braces: no angle bracket may survive into display strings -
 		// Swing renders any label/tooltip text starting with "<html>" as HTML
 		out = out.replace("<", "").replace(">", "");
-		out = out.replaceAll("\\s+", " ").trim();
-		return out;
+		if (!legacy)
+		{
+			out = stripInvisible(out);
+		}
+		return WHITESPACE.matcher(out).replaceAll(" ").trim();
+	}
+
+	/**
+	 * Drops characters that render as nothing or reorder their neighbours:
+	 * control characters, zero-width marks and bidirectional overrides (a
+	 * right-to-left override would display a step back to front).
+	 * Whitespace controls are left for the caller's whitespace collapse.
+	 */
+	private static String stripInvisible(String s)
+	{
+		StringBuilder sb = null;
+		for (int i = 0; i < s.length(); i++)
+		{
+			char c = s.charAt(i);
+			boolean drop = (c < 0x20 && !isRegexSpace(c)) || (c >= 0x7F && c <= 0x9F) || c == 0x00AD
+				|| (c >= 0x200B && c <= 0x200F) || (c >= 0x202A && c <= 0x202E)
+				|| (c >= 0x2060 && c <= 0x2064) || (c >= 0x2066 && c <= 0x2069)
+				|| c == 0xFEFF;
+			// no-break space and the Unicode line/paragraph separators
+			boolean space = c == 0x00A0 || c == 0x2028 || c == 0x2029;
+			if (!drop && !space)
+			{
+				if (sb != null)
+				{
+					sb.append(c);
+				}
+				continue;
+			}
+			if (sb == null)
+			{
+				sb = new StringBuilder(s.length()).append(s, 0, i);
+			}
+			if (space)
+			{
+				sb.append(' ');
+			}
+		}
+		return sb == null ? s : sb.toString();
+	}
+
+	/**
+	 * Numeric references and the handful of named entities wiki editors
+	 * actually type. Runs before the caller's "&amp;" step, so an escaped
+	 * reference ("&amp;rarr;") stays literal text. An unknown or out-of-range
+	 * reference is left exactly as written.
+	 */
+	private static String decodeEntities(String s)
+	{
+		if (s.indexOf('&') < 0)
+		{
+			return s;
+		}
+		String out = s.replace("&ndash;", "–").replace("&mdash;", "—")
+			.replace("&rarr;", "→").replace("&larr;", "←")
+			.replace("&times;", "×").replace("&hellip;", "…")
+			.replace("&frac12;", "½").replace("&apos;", "'")
+			.replace("&lsquo;", "‘").replace("&rsquo;", "’")
+			.replace("&ldquo;", "“").replace("&rdquo;", "”");
+		if (out.indexOf("&#") < 0)
+		{
+			return out;
+		}
+		Matcher m = NUMERIC_ENTITY.matcher(out);
+		StringBuffer sb = new StringBuffer();
+		while (m.find())
+		{
+			int codePoint;
+			try
+			{
+				codePoint = m.group(1) != null ? Integer.parseInt(m.group(1)) : Integer.parseInt(m.group(2), 16);
+			}
+			catch (NumberFormatException e)
+			{
+				codePoint = -1;
+			}
+			boolean valid = codePoint > 0 && codePoint <= Character.MAX_CODE_POINT
+				&& !(codePoint >= 0xD800 && codePoint <= 0xDFFF);
+			m.appendReplacement(sb, Matcher.quoteReplacement(
+				valid ? new String(Character.toChars(codePoint)) : m.group()));
+		}
+		m.appendTail(sb);
+		return sb.toString();
 	}
 
 	/**
@@ -771,13 +1260,17 @@ public class WikitextParser
 	 */
 	static String sanitizeDisplay(String s)
 	{
+		return sanitizeDisplay(s, false);
+	}
+
+	/** @param legacy see {@link #cleanInline(String, boolean)} */
+	static String sanitizeDisplay(String s, boolean legacy)
+	{
 		if (s == null)
 		{
 			return "";
 		}
-		String out = HTML_TAG.matcher(s).replaceAll("");
-		out = out.replace("<", "").replace(">", "");
-		return out.replaceAll("\\s+", " ").trim();
+		return stripMarkupCharacters(s, legacy);
 	}
 
 	private static String replaceTemplates(String s)

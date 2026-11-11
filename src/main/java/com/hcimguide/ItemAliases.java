@@ -87,6 +87,7 @@ final class ItemAliases
 		a("Karambwans", "Cooked karambwan");
 		a("Karambawns", "Cooked karambwan");
 		a("Karamwbwans", "Cooked karambwan");
+		a("Teleport cards", "Teleport card");
 		a("Karambwanji", "Raw karambwanji");
 		a("Cooked Trout", "Trout");
 		a("Dwarven Cake", "Dwarven rock cake");
@@ -186,11 +187,10 @@ final class ItemAliases
 			a("Trollweis", "Trollweiss");
 			a("Berserker Helmet", "Berserker helm");
 
-			// Deliberately NO bare "Earth"/"Water"/"Mind" -> rune aliases:
-			// neither guide ever puts those words in an item position, and a
-			// context-free alias would turn a step like "Collect water" into
-			// a hard rune requirement that blocks trip-ready. Re-add only
-			// with a quantity-context rule if a guide ever needs it.
+			// Bare rune words ("2 Law, 2 Water") are aliased further down. The
+			// one that is also an ordinary noun, "water", only reaches its
+			// alias through ItemListParser's quantity/list-context rule, so
+			// "Collect water" never becomes a rune requirement.
 			a("Earth Staff", "Staff of earth");
 
 			// ---- 1.5.4e: Sailing items (names confirmed from Shipbuilding wiki)

@@ -68,6 +68,23 @@ public class HcimGuidePanelLayoutTest
 	}
 
 	@Test
+	public void anchoredRowReturnsToItsFormerOffset()
+	{
+		// row now at y=1200 that sat 40px below the viewport top
+		assertEquals(1160, PanelLayout.anchoredViewPosition(1200, 40, 300, 5000));
+		// a row whose top was scrolled 15px out of view
+		assertEquals(1215, PanelLayout.anchoredViewPosition(1200, -15, 300, 5000));
+	}
+
+	@Test
+	public void anchoredPositionIsClampedToTheScrollRange()
+	{
+		assertEquals(0, PanelLayout.anchoredViewPosition(20, 60, 300, 5000));
+		assertEquals(4700, PanelLayout.anchoredViewPosition(4990, 10, 300, 5000));
+		assertEquals(0, PanelLayout.anchoredViewPosition(150, 0, 300, 200));
+	}
+
+	@Test
 	public void repeatedCenteringIsStable()
 	{
 		int first = PanelLayout.centeredViewPosition(2000, 30, 300, 5000);

@@ -215,7 +215,6 @@ public final class ItemListParser
 		"varrock",
 		// ---- 1.7.8: names the full two-guide audit proved are not items
 		"arceuus minecart",
-		"at varrock east bank: plague sample",
 		"boat back",
 		"build a house",
 		"build an iron helm",
@@ -269,14 +268,11 @@ public final class ItemListParser
 		"mine a gold ore",
 		"northern yanille shortcut",
 		"oak mast and linen sails",
-		"palm leaf drop 5x",
 		"pick it up 5x",
-		"potato cactus -> 6 karamwbwans",
 		"quest cape",
 		"range gear to kill sea snake",
 		"remainder of cash from blast furnace",
 		"repair kits",
-		"sand with superglass make runes in the rune pouch",
 		"scrying orb if 56 bomb",
 		"shortcut back",
 		"speak with the bartender",
@@ -601,7 +597,73 @@ public final class ItemListParser
 	 * suffix. Expanded to the full count so the requirement is right (16000),
 	 * not read as an item named "16k". Applied before the item name is cut.
 	 */
-	private static final Pattern K_SUFFIX = Pattern.compile("(?i)^(\\d+)k\\b\\s*(.*)$");
+	private static final Pattern K_SUFFIX = Pattern.compile("(?i)^(\\d+(?:\\.\\d+)?)k\\b\\s*(.*)$");
+
+	/** "5-10 Lobsters": the lower bound satisfies the step, the label keeps the range. */
+	private static final Pattern RANGE_QTY = Pattern.compile("^(\\d{1,9})\\s*-\\s*(\\d{1,9})\\s+(.*)$");
+
+	/**
+	 * "Defence Potion (3)/(4)": either dose will do. The pair is dropped so the
+	 * bare name resolves to its any-dose group instead of two exact items.
+	 */
+	private static final Pattern DOSE_ALTERNATIVES = Pattern.compile("^(.*\\S)\\s*\\(\\d\\)\\s*/\\s*\\(\\d\\)$");
+
+	/** "290gp": a coin amount written without the space the quantity prefix needs. */
+	private static final Pattern GP_AMOUNT = Pattern.compile("(?i)^(\\d{1,10})gp$");
+
+	/** "Strange Fruits(Optional)": the guide says the item may be left out. */
+	private static final Pattern OPTIONAL_ITEM = Pattern.compile("(?i)\\(\\s*optional\\s*\\)\\s*$");
+
+	/** "18 Sand with Superglass make runes in the Rune Pouch": an item plus a spell's runes. */
+	private static final Pattern WITH_RUNES_IN_POUCH = Pattern.compile(
+		"(?i)^(.+?)\\s+with\\s+(.+?\\s+runes?)\\s+in\\s+(?:the|your)\\s+rune\\s+pouch$");
+
+	/** "Withdraw at Varrock east bank: Plague Sample, ..." - where, not what. */
+	private static final Pattern WITHDRAW_PLACE = Pattern.compile("(?i)^at\\s+[^:,]{1,40}:\\s*");
+
+	/** "... Ball of Wool. If 85 Crafting also withdraw ...": what follows is conditional. */
+	private static final Pattern CONDITIONAL_TAIL = Pattern.compile("\\.\\s+If\\b.*$");
+
+	/** "Collect 1x Palm leaf Drop 5x": a drop-and-retake count, not part of the name. */
+	private static final Pattern DROP_REPEAT = Pattern.compile("(?i)\\s+drop\\s+\\d+x?\\b.*$");
+
+	/** Sentence fragments an items_needed note leaves between its commas. */
+	private static final Pattern PROSE_LEAD = Pattern.compile(
+		"(?i)^(?:will\\s+(?:need|have|be|get)|while|whatever|whichever|follow)\\b.*");
+
+	/**
+	 * Stand-in for a count too large for an int. Deliberately far below
+	 * Integer.MAX_VALUE: set and spell expansions multiply a quantity by up to
+	 * 28, and that product must not wrap around.
+	 */
+	private static final int HUGE_QUANTITY = 50_000_000;
+
+	private static int quantity(String digits)
+	{
+		try
+		{
+			return Math.max(1, Integer.parseInt(digits));
+		}
+		catch (NumberFormatException e)
+		{
+			// only ever called with a run of digits: too many of them for an
+			// int, which is "a great many" - not "one"
+			return HUGE_QUANTITY;
+		}
+	}
+
+	private static int thousands(String number)
+	{
+		try
+		{
+			long value = Math.round(Double.parseDouble(number) * 1000);
+			return value > Integer.MAX_VALUE ? HUGE_QUANTITY : (int) Math.max(1, value);
+		}
+		catch (NumberFormatException e)
+		{
+			return 1;
+		}
+	}
 
 	/**
 	 * Phrases naming a whole armour set or spell rune cost. These occur across
@@ -804,17 +866,18 @@ public final class ItemListParser
 	 * spaces so it never splits inside a word like "Grand" or "Wand".
 	 */
 	private static final Pattern LIST_SPLIT = Pattern.compile(
-		",|&|(?<!\\d)\\+|\\s+and\\s+");
+		",|&|→|(?<!\\d)\\+|\\s+and\\s+");
 	private static final Pattern INSTRUCTION_FRAGMENT = Pattern.compile(
 		"(?i)^(?:wear|wield|equip|use|then|and|if|climb|go|run|walk|talk|return|"
 			+ "bank|deposit|bury|teleport|travel|head|enter|leave|cross|open|close)\\b.*");
 	/**
 	 * A requirement phrase, not an instruction. It must survive the instruction
 	 * filter so {@link #emit} can turn a destination-free phrase into the honest
-	 * minimum requirement (one law rune).
+	 * minimum requirement (one law rune). The same goes for the items whose
+	 * NAME begins with the verb: Teleport crystal, Teleport card, tablets.
 	 */
 	private static final Pattern TELEPORT_RUNES_REQUIREMENT = Pattern.compile(
-		"(?i)^teleport\\s+runes?(?:\\s+.*)?$");
+		"(?i)^teleport\\s+(?:runes?|crystals?|cards?|tab(?:let)?s?|scrolls?)(?:\\s+.*)?$");
 	private static final Pattern GATHER_BOUNDARY = Pattern.compile("[.\\[(,&+]");
 	private static final Pattern LEADING_ARTICLE = Pattern.compile("^(?:the|a|an)\\s+");
 
@@ -895,6 +958,8 @@ public final class ItemListParser
 		// Slots) + Food"), so trailing-only stripping isn't enough; the third
 		// covers a writer who forgot the closing parenthesis
 		String list = DIALOGUE_OPTIONS.matcher(m.group(1)).replaceAll("");
+		list = WITHDRAW_PLACE.matcher(list).replaceFirst("");
+		list = CONDITIONAL_TAIL.matcher(list).replaceFirst("");
 		list = GROUPED_THOUSANDS.matcher(list).replaceAll("");
 		list = protectAndNames(list);
 		list = SLOTS_PAREN.matcher(list).replaceAll("");
@@ -925,31 +990,42 @@ public final class ItemListParser
 			return null;
 		}
 		String inner = text.substring(idx + "(Items: ".length()).trim();
-		// the step may have been length-capped mid-suffix ("...…"): parse the
-		// items that survived instead of dropping the whole list
-		boolean truncated = false;
-		if (inner.endsWith("…"))
+		if (inner.length() > MAX_ITEM_PARSE_CHARS)
 		{
-			inner = inner.substring(0, inner.length() - 1);
-			truncated = true;
+			return null;
 		}
 		if (inner.endsWith(")"))
 		{
 			inner = inner.substring(0, inner.length() - 1);
-			truncated = false; // the list closed before the cap hit
 		}
-		List<ItemReq> out = parseList(inner);
-		if (truncated && out != null && !out.isEmpty())
+		// A list cut to fit ends in "…" - before the closing parenthesis when
+		// the guide parser shortened it ("... 5 noted pla…)"), bare when the
+		// step-length cap did. Either way the final fragment ("pla") is not a
+		// real item name: parse only up to the last complete entry.
+		if (inner.endsWith("…"))
 		{
-			// the cap cut mid-list: the final fragment ("kni…") is not a real
-			// item name - drop it rather than show a bogus grid entry
-			out.remove(out.size() - 1);
-			if (out.isEmpty())
+			int lastComplete = inner.lastIndexOf(',');
+			if (lastComplete < 0)
 			{
 				return null;
 			}
+			inner = inner.substring(0, lastComplete);
 		}
-		return out;
+		return parseList(protectAndNames(inner));
+	}
+
+	/**
+	 * Items from a guide step's complete, separately supplied list (a JSON
+	 * guide's items_needed) - the same display-only contract as
+	 * {@link #parseItemsSuffix}, without that suffix's length limit.
+	 */
+	public static List<ItemReq> parseItemsNeeded(String items)
+	{
+		if (items == null || items.length() > MAX_ITEM_PARSE_CHARS)
+		{
+			return null;
+		}
+		return parseList(protectAndNames(items));
 	}
 
 	/** Split a comma/&amp;/+-separated item list into requirements. */
@@ -957,8 +1033,10 @@ public final class ItemListParser
 	{
 		List<ItemReq> out = new ArrayList<>();
 		// the guide separates items with commas, ampersands, and plus signs
-		for (String part : LIST_SPLIT.split(list))
+		String[] parts = LIST_SPLIT.split(list);
+		for (int index = 0; index < parts.length; index++)
 		{
+			String part = parts[index];
 			// a curated override can also name a single LIST SEGMENT
 			// ("Cure Me Spells", "Curse Runes"): those phrases only ever
 			// occur inside longer withdraw lines, so the whole-step lookup
@@ -967,6 +1045,11 @@ public final class ItemListParser
 			if (segmentOverride != null)
 			{
 				out.addAll(segmentOverride);
+				continue;
+			}
+			if (OPTIONAL_ITEM.matcher(part).find())
+			{
+				// checked before the advice strip below removes the marker
 				continue;
 			}
 			String p = stripTrailingAdvice(part.trim());
@@ -988,6 +1071,23 @@ public final class ItemListParser
 				&& !TELEPORT_RUNES_REQUIREMENT.matcher(p).matches())
 			{
 				continue;
+			}
+			if (PROSE_LEAD.matcher(p).matches())
+			{
+				continue;
+			}
+			Matcher pouch = WITH_RUNES_IN_POUCH.matcher(p);
+			if (pouch.matches())
+			{
+				// the spell's runes are their own requirement; the item in
+				// front of "with" carries on through the rules below
+				emit(out, pouch.group(2), 1, null);
+				p = pouch.group(1).trim();
+			}
+			Matcher doses = DOSE_ALTERNATIVES.matcher(p);
+			if (doses.matches())
+			{
+				p = doses.group(1);
 			}
 			// strip a trailing "(...)" qualifier whose insides would otherwise be
 			// mistaken for list separators ("Potion (3)/(4)")
@@ -1014,18 +1114,19 @@ public final class ItemListParser
 				emit(out, p, 1, null);
 				continue;
 			}
+			Matcher gp = GP_AMOUNT.matcher(p);
+			if (gp.matches())
+			{
+				emit(out, "Coins", quantity(gp.group(1)), null);
+				continue;
+			}
 			int qty = 1;
 			String qtyLabel = null;
 			Matcher q = QTY_PREFIX.matcher(p);
+			Matcher range = RANGE_QTY.matcher(p);
 			if (q.matches())
 			{
-				try
-				{
-					qty = Math.max(1, Integer.parseInt(q.group(1)));
-				}
-				catch (NumberFormatException ignored)
-				{
-				}
+				qty = quantity(q.group(1));
 				if (!q.group(2).isEmpty())
 				{
 					// "100+ Cosmic Runes": 100 satisfies the step, the label
@@ -1034,18 +1135,18 @@ public final class ItemListParser
 				}
 				p = q.group(3).trim();
 			}
+			else if (range.matches())
+			{
+				qty = quantity(range.group(1));
+				qtyLabel = range.group(1) + "-" + range.group(2);
+				p = range.group(3).trim();
+			}
 			else
 			{
 				Matcher ks = K_SUFFIX.matcher(p);
 				if (ks.matches() && !ks.group(2).trim().isEmpty())
 				{
-					try
-					{
-						qty = Math.max(1, Integer.parseInt(ks.group(1)) * 1000);
-					}
-					catch (NumberFormatException ignored)
-					{
-					}
+					qty = thousands(ks.group(1));
 					p = ks.group(2).trim();
 				}
 				else
@@ -1059,14 +1160,59 @@ public final class ItemListParser
 					}
 				}
 			}
+			// A bare "Water" is dropped as prose ("Collect water" must not
+			// become a rune requirement). It IS the rune when a count is
+			// written ("2 Law, 2 Water") or the next entry supplies the noun
+			// ("Water & earth Runes").
+			if (p.equalsIgnoreCase("water") && (q.matches() || nextEntryIsRunes(parts, index)))
+			{
+				p = "Water rune";
+			}
 			emit(out, p, qty, qtyLabel);
 		}
 		if (out.isEmpty())
 		{
 			return null;
 		}
+		pairBoltsWithBoneCrossbow(out);
 		applyInventoryFillThresholds(out);
 		return out;
+	}
+
+	private static boolean nextEntryIsRunes(String[] parts, int index)
+	{
+		if (index + 1 >= parts.length)
+		{
+			return false;
+		}
+		String next = TRAILING_DOTS.matcher(parts[index + 1]).replaceAll("").toLowerCase(java.util.Locale.ROOT);
+		return next.endsWith(" rune") || next.endsWith(" runes");
+	}
+
+	/**
+	 * "Bone Crossbow + Bolts": the Dorgeshuun (bone) crossbow fires only bone
+	 * bolts, so a bare "bolts" next to it is never the generic bronze kind.
+	 */
+	private static void pairBoltsWithBoneCrossbow(List<ItemReq> items)
+	{
+		boolean boneCrossbow = false;
+		for (ItemReq req : items)
+		{
+			String n = req.getNormalized();
+			boneCrossbow |= n.equals("bonecrossbow") || n.equals("dorgeshuuncrossbow") || n.equals("dorgbow");
+		}
+		if (!boneCrossbow)
+		{
+			return;
+		}
+		for (int i = 0; i < items.size(); i++)
+		{
+			ItemReq req = items.get(i);
+			if (req.getNormalized().equals("bolts"))
+			{
+				items.set(i, new ItemReq("Bone bolts", req.getQuantity(), req.getQuantityLabel()));
+			}
+		}
 	}
 
 	/**
@@ -1125,6 +1271,27 @@ public final class ItemListParser
 		String first = parts[0].trim();
 		String last = parts[parts.length - 1].trim();
 
+		// "2x Red/Yellow/Blue Dyes": a count written once, on the first part,
+		// belongs to every part - unless a later part carries its own
+		// ("Mind/6xAir/6xEarth Runes" keeps each count where it is written)
+		String sharedQuantity = null;
+		String firstName = first;
+		Matcher lead = QTY_PREFIX.matcher(first);
+		if (lead.matches())
+		{
+			firstName = lead.group(3).trim();
+			sharedQuantity = first.substring(0, first.length() - lead.group(3).length());
+			for (int i = 1; i < parts.length; i++)
+			{
+				String other = parts[i].trim();
+				if (!other.isEmpty() && Character.isDigit(other.charAt(0)))
+				{
+					sharedQuantity = null;
+					break;
+				}
+			}
+		}
+
 		// trailing shared noun: last part's final word, when the earlier parts
 		// are bare enough to need it ("Mind" -> "Mind Runes")
 		String tailNoun = null;
@@ -1137,10 +1304,10 @@ public final class ItemListParser
 		// leading shared qualifier: first part's first word, when the later
 		// parts are single bare words ("Raw Rat" -> "Raw Chicken")
 		String headWord = null;
-		int firstSpace = first.indexOf(' ');
+		int firstSpace = firstName.indexOf(' ');
 		if (firstSpace > 0)
 		{
-			headWord = first.substring(0, firstSpace).trim();
+			headWord = firstName.substring(0, firstSpace).trim();
 		}
 		boolean tailShared = tailNoun != null && !tailNoun.isEmpty()
 			&& parts.length > 1 && !containsWord(first, tailNoun);
@@ -1161,6 +1328,10 @@ public final class ItemListParser
 			else if (tailShared && !containsWord(a, tailNoun))
 			{
 				a = a + " " + tailNoun;
+			}
+			if (sharedQuantity != null && raw != parts[0])
+			{
+				a = sharedQuantity + a;
 			}
 			expand(out, a);
 		}
@@ -1483,13 +1654,7 @@ public final class ItemListParser
 		Matcher q = QTY_PREFIX.matcher(fragment);
 		if (q.matches())
 		{
-			try
-			{
-				qty = Math.max(1, Integer.parseInt(q.group(1)));
-			}
-			catch (NumberFormatException ignored)
-			{
-			}
+			qty = quantity(q.group(1));
 			if (!q.group(2).isEmpty())
 			{
 				qtyLabel = q.group(1) + "+";
@@ -1624,6 +1789,7 @@ public final class ItemListParser
 			String[] bits = GATHER_BOUNDARY.split(seg);
 			String name = bits.length > 0 ? bits[0].trim() : "";
 			name = GATHER_CUTOFF.matcher(name).replaceAll("").trim();
+			name = DROP_REPEAT.matcher(name).replaceFirst("");
 			// k-suffix ("16k feathers") and spelled-out quantity ("three raw
 			// beef") on THIS segment before the article strip, so each item in
 			// a multi-item gather keeps its own count instead of defaulting to 1
@@ -1631,13 +1797,7 @@ public final class ItemListParser
 			Matcher segK = K_SUFFIX.matcher(name);
 			if (segK.matches() && !segK.group(2).trim().isEmpty())
 			{
-				try
-				{
-					segWordQty = Integer.parseInt(segK.group(1)) * 1000;
-				}
-				catch (NumberFormatException ignored)
-				{
-				}
+				segWordQty = thousands(segK.group(1));
 				name = segK.group(2).trim();
 			}
 			else
@@ -1658,7 +1818,8 @@ public final class ItemListParser
 			{
 				continue;
 			}
-			if (INSTRUCTION_FRAGMENT.matcher(name).matches())
+			if (INSTRUCTION_FRAGMENT.matcher(name).matches()
+				&& !TELEPORT_RUNES_REQUIREMENT.matcher(name).matches())
 			{
 				continue;
 			}

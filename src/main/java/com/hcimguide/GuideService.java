@@ -106,10 +106,19 @@ public class GuideService
 	private static final Pattern GUIDE_ID = Pattern.compile("[a-z0-9-]{1,64}");
 	/** Body/on-disk cap for guide content (real guides are well under 1MB). */
 	private static final long MAX_GUIDE_BYTES = 16L * 1024 * 1024;
+	/**
+	 * This service's own temp files ("<id>.txt<digits>.tmp"). One left behind
+	 * by a JVM that died mid-save is removed by a later save, but only once it
+	 * is older than any save could still be running - a second client sharing
+	 * the directory may be in the middle of its own.
+	 */
+	private static final Pattern STALE_TEMP = Pattern.compile("[a-z0-9-]{1,64}\\.(?:txt|bak)[0-9-]*\\.tmp");
+	private static final long STALE_TEMP_MILLIS = 10 * 60 * 1000L;
 
+	private final File guidesDir;
 	private final OkHttpClient okHttpClient;
 	private final Gson gson;
-	private final WikitextParser parser = new WikitextParser();
+	private final WikitextParser parser;
 	private final JsonGuideParser jsonParser = new JsonGuideParser();
 
 	/**
@@ -119,10 +128,21 @@ public class GuideService
 	 */
 	private Guide parseGuide(String text)
 	{
-		// single-pass: tryParse both sniffs AND parses, so a multi-MB JSON
-		// import isn't parsed twice (once to identify, once to build)
-		Guide json = jsonParser.tryParse(text);
-		return json != null ? json : parser.parse(text);
+		try
+		{
+			// single-pass: tryParse both sniffs AND parses, so a multi-MB JSON
+			// import isn't parsed twice (once to identify, once to build)
+			Guide json = jsonParser.tryParse(text);
+			return json != null ? json : parser.parse(text);
+		}
+		catch (OutOfMemoryError | StackOverflowError e)
+		{
+			// Not Exceptions: left alone they would bypass every caller's
+			// failure handling, so an import would never report an outcome.
+			// Rethrown as an ordinary parse failure - the half-built guide is
+			// unreachable from here and nothing downstream ever sees it.
+			throw new IllegalArgumentException("guide is too large or too deeply nested to load", e);
+		}
 	}
 
 	/**
@@ -153,24 +173,55 @@ public class GuideService
 	@Inject
 	public GuideService(OkHttpClient okHttpClient, Gson gson)
 	{
+		this(okHttpClient, gson, GUIDES_DIR, new WikitextParser());
+	}
+
+	/** Explicit store directory and wikitext parser, for exercising storage in isolation. */
+	GuideService(OkHttpClient okHttpClient, Gson gson, File guidesDir, WikitextParser parser)
+	{
 		// hard wall-clock ceiling per call: the body caps bound BYTES, but a
 		// server trickling bytes under the shared client's read timeout could
 		// otherwise hold a worker for as long as it liked. Shares the client's
 		// pools; only the timeout differs.
+		// Neither endpoint redirects, so redirects are not followed at all: a
+		// 3xx is reported as a failed download instead of being requested from
+		// wherever it points.
 		this.okHttpClient = okHttpClient.newBuilder()
 			.callTimeout(java.time.Duration.ofSeconds(60))
+			.followRedirects(false)
+			.followSslRedirects(false)
 			.build();
 		this.gson = gson;
+		this.guidesDir = guidesDir;
+		this.parser = parser;
 	}
 
-	private static File snapshotFile(String guideId)
+	/**
+	 * True only when the response AND every earlier response that led to it
+	 * (redirects, retries) was an https exchange with {@code host}. Checking
+	 * the final URL alone would accept a detour through another host.
+	 */
+	static boolean cameOnlyFrom(Response response, String host)
 	{
-		return new File(GUIDES_DIR, requireGuideId(guideId) + ".txt");
+		for (Response hop = response; hop != null; hop = hop.priorResponse())
+		{
+			HttpUrl url = hop.request().url();
+			if (!url.isHttps() || !url.host().equals(host))
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
-	private static File backupFile(String guideId)
+	private File snapshotFile(String guideId)
 	{
-		return new File(GUIDES_DIR, requireGuideId(guideId) + ".bak");
+		return new File(guidesDir, requireGuideId(guideId) + ".txt");
+	}
+
+	private File backupFile(String guideId)
+	{
+		return new File(guidesDir, requireGuideId(guideId) + ".bak");
 	}
 
 	private static String requireGuideId(String guideId)
@@ -191,7 +242,7 @@ public class GuideService
 			if (LEGACY_FILE.isFile() && !target.isFile())
 			{
 				//noinspection ResultOfMethodCallIgnored
-				GUIDES_DIR.mkdirs();
+				guidesDir.mkdirs();
 				Files.move(LEGACY_FILE.toPath(), target.toPath());
 			}
 		}
@@ -274,7 +325,7 @@ public class GuideService
 	 * is reported as a warning on a successful restore, never as "nothing
 	 * was restored" while the disk actually changed.
 	 */
-	public RestoreResult restorePrevious(String guideId)
+	public synchronized RestoreResult restorePrevious(String guideId)
 	{
 		File snapshot = snapshotFile(guideId);
 		File backup = backupFile(guideId);
@@ -374,12 +425,11 @@ public class GuideService
 					response.close();
 					return;
 				}
-				// A pinned https URL only bounds where the request STARTS.
-				// OkHttp follows redirects by default, so verify the response
-				// actually came back from the host we asked for.
+				// A pinned https URL only bounds where the request STARTS, so
+				// verify the response - and every hop behind it - actually came
+				// back from the host we asked for.
 				okhttp3.HttpUrl finalUrl = response.request().url();
-				if (!finalUrl.isHttps()
-					|| !finalUrl.host().equals(call.request().url().host()))
+				if (!cameOnlyFrom(response, call.request().url().host()))
 				{
 					response.close();
 					safeError(settled, onError,
@@ -408,6 +458,13 @@ public class GuideService
 					log.warn("Reading wiki response failed", e);
 					error = "Could not read the wiki response: " + e.getMessage();
 				}
+				catch (OutOfMemoryError e)
+				{
+					// must still settle the request - see parseGuide
+					log.warn("Reading wiki response ran out of memory");
+					bodyText = null;
+					error = "Could not read the wiki response: not enough memory";
+				}
 
 				String wikitext = null;
 				if (error == null && requestStopped(call, requestCurrent))
@@ -431,6 +488,13 @@ public class GuideService
 					{
 						log.warn("Wiki response was not valid JSON", e);
 						error = "Wiki response was not valid JSON";
+					}
+					catch (OutOfMemoryError | StackOverflowError e)
+					{
+						// must still settle the request - see parseGuide
+						log.warn("Wiki response exhausted memory or stack while decoding");
+						wikitext = null;
+						error = "Wiki response is too large or too deeply nested to read";
 					}
 				}
 
@@ -583,12 +647,11 @@ public class GuideService
 					response.close();
 					return;
 				}
-				// A pinned https URL only bounds where the request STARTS.
-				// OkHttp follows redirects by default, so verify the response
-				// actually came back from the host we asked for.
+				// A pinned https URL only bounds where the request STARTS, so
+				// verify the response - and every hop behind it - actually came
+				// back from the host we asked for.
 				okhttp3.HttpUrl finalUrl = response.request().url();
-				if (!finalUrl.isHttps()
-					|| !finalUrl.host().equals(call.request().url().host()))
+				if (!cameOnlyFrom(response, call.request().url().host()))
 				{
 					response.close();
 					safeError(settled, onError,
@@ -615,6 +678,13 @@ public class GuideService
 				{
 					log.warn("Reading guide response failed", e);
 					error = "Could not read the download: " + e.getMessage();
+				}
+				catch (OutOfMemoryError e)
+				{
+					// must still settle the request - see parseGuide
+					log.warn("Reading guide response ran out of memory");
+					text = null;
+					error = "Could not read the download: not enough memory";
 				}
 
 				if (error == null && requestStopped(call, requestCurrent))
@@ -718,7 +788,7 @@ public class GuideService
 	 * (backup == the snapshot the user still has) and the thrown message
 	 * says precisely that - the old backup is gone but nothing is corrupt.
 	 */
-	private static void saveSnapshot(String guideId, String wikitext) throws IOException
+	private void saveSnapshot(String guideId, String wikitext) throws IOException
 	{
 		saveSnapshot(guideId, wikitext, () -> true);
 	}
@@ -728,21 +798,35 @@ public class GuideService
 	 * stored file is replaced. Once that gate passes, both moves complete as
 	 * one logical commit even if shutdown begins between them.
 	 *
+	 * Serialized with every other change to the stored pair: two imports
+	 * finishing together must rotate one after the other, never interleave
+	 * their four moves.
+	 *
 	 * @return false when the originating request became stale before commit
 	 */
-	private static boolean saveSnapshot(String guideId, String wikitext,
+	private synchronized boolean saveSnapshot(String guideId, String wikitext,
 		java.util.function.BooleanSupplier mayCommit) throws IOException
 	{
 		validateGuideText(wikitext);
-		Files.createDirectories(GUIDES_DIR.toPath());
+		Files.createDirectories(guidesDir.toPath());
 		File snapshot = snapshotFile(guideId);
 		File backup = backupFile(guideId);
-		Path dir = GUIDES_DIR.toPath();
+		Path dir = guidesDir.toPath();
+		byte[] bytes = wikitext.getBytes(StandardCharsets.UTF_8);
+		// Importing what is already stored must not rotate: the backup slot
+		// would then hold a second copy of the same text, and the genuinely
+		// previous snapshot - all "Restore previous import" can bring back -
+		// would be gone.
+		if (sameContent(snapshot, bytes))
+		{
+			return mayCommit.getAsBoolean();
+		}
+		sweepStaleTemps();
 		Path newSnapshot = Files.createTempFile(dir, snapshot.getName(), ".tmp");
 		Path newBackup = null;
 		try
 		{
-			Files.write(newSnapshot, wikitext.getBytes(StandardCharsets.UTF_8));
+			Files.write(newSnapshot, bytes);
 			if (snapshot.isFile())
 			{
 				// keep the previous snapshot so a bad import can be undone
@@ -776,6 +860,45 @@ public class GuideService
 			if (newBackup != null)
 			{
 				Files.deleteIfExists(newBackup);
+			}
+		}
+	}
+
+	private static boolean sameContent(File file, byte[] bytes)
+	{
+		try
+		{
+			return file.isFile() && file.length() == bytes.length
+				&& java.util.Arrays.equals(Files.readAllBytes(file.toPath()), bytes);
+		}
+		catch (IOException e)
+		{
+			return false; // unreadable: treat as different and store normally
+		}
+	}
+
+	/** Best effort; see {@link #STALE_TEMP}. Only ever called while holding the store lock. */
+	private void sweepStaleTemps()
+	{
+		File[] files = guidesDir.listFiles();
+		if (files == null)
+		{
+			return;
+		}
+		long cutoff = System.currentTimeMillis() - STALE_TEMP_MILLIS;
+		for (File file : files)
+		{
+			if (file.isFile() && file.lastModified() < cutoff
+				&& STALE_TEMP.matcher(file.getName()).matches())
+			{
+				try
+				{
+					Files.deleteIfExists(file.toPath());
+				}
+				catch (IOException e)
+				{
+					// stays for the next save to retry
+				}
 			}
 		}
 	}

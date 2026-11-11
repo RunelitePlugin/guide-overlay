@@ -45,6 +45,21 @@ final class VideoLinks
 				return false;
 			}
 		}
+		// the browser launcher parses the string as a java.net.URI, so anything
+		// that is not one ('"', '|', '^', "%zz" ...) must never be accepted
+		String parsedHost;
+		try
+		{
+			parsedHost = new java.net.URI(u).getHost();
+		}
+		catch (java.net.URISyntaxException e)
+		{
+			return false;
+		}
+		if (parsedHost == null)
+		{
+			return false;
+		}
 		u = u.toLowerCase(Locale.ROOT);
 		String rest;
 		if (u.startsWith("https://"))
@@ -79,6 +94,11 @@ final class VideoLinks
 		if (colon >= 0)
 		{
 			host = host.substring(0, colon);
+		}
+		// both parsers must agree on which host this is
+		if (!host.equals(parsedHost.toLowerCase(Locale.ROOT)))
+		{
+			return false;
 		}
 		if (host.startsWith("www."))
 		{

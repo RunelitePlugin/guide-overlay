@@ -33,7 +33,8 @@ public final class WikiUrl
 		}
 		String s = input.trim();
 
-		if (s.contains("://") || s.startsWith("www."))
+		boolean link = s.contains("://") || s.startsWith("www.");
+		if (link)
 		{
 			Matcher m = URL.matcher(s.startsWith("www.") ? "https://" + s.substring(4) : s);
 			if (!m.matches())
@@ -53,15 +54,37 @@ public final class WikiUrl
 		{
 			// UTF-8 is always present; fall through with the raw value
 		}
+		catch (IllegalArgumentException e)
+		{
+			// a malformed escape: an error in a link, but a bare title may hold
+			// a literal '%' ("100%_run") and is then kept exactly as typed
+			if (link)
+			{
+				throw new IllegalArgumentException("Not a valid wiki link");
+			}
+		}
 		s = s.trim().replace(' ', '_');
-		// MediaWiki forbids these in titles; for us they're also the Swing-HTML
-		// injection characters - reject outright
-		if (s.isEmpty() || s.length() > 255 || s.contains("<") || s.contains(">")
-			|| s.contains("[") || s.contains("]") || s.contains("{") || s.contains("}") || s.contains("|"))
+		if (!isValidTitle(s))
 		{
 			throw new IllegalArgumentException("Not a valid wiki page title");
 		}
 		return s;
+	}
+
+	/**
+	 * True for a title exactly as {@link #pageTitle} returns it. Deliberately
+	 * NON-decoding: a stored title is already decoded, so it may legitimately
+	 * contain '%' ("100%_run", "A%41") and must validate as the same string it
+	 * was stored as - decoding it again would reject or silently change it.
+	 */
+	static boolean isValidTitle(String s)
+	{
+		// MediaWiki forbids these in titles; for us they're also the Swing-HTML
+		// injection characters - reject outright
+		return s != null && !s.isEmpty() && s.length() <= 255 && s.equals(s.trim())
+			&& s.indexOf(' ') < 0 && !s.contains("<") && !s.contains(">")
+			&& !s.contains("[") && !s.contains("]") && !s.contains("{") && !s.contains("}")
+			&& !s.contains("|");
 	}
 
 	/** Human-friendly display name for a page title ("Guide:Some_Guide" -> "Some Guide"). */

@@ -51,7 +51,7 @@ final class TeleportDirectory
 		t.add(new TeleportOption("Ardougne Teleport", SPELL, 2661, 3300, 0,
 			rune("law rune", 2), rune("water rune", 2)));
 		t.add(new TeleportOption("Kourend Castle Teleport", SPELL, 1643, 3673, 0,
-			rune("law rune", 2), rune("soul rune", 2), rune("water rune", 4)));
+			rune("law rune", 2), rune("water rune", 1), rune("fire rune", 1)));
 
 		// ---------------------------------------------------------- tablets
 		t.add(new TeleportOption("Varrock teleport tab", TAB, 3212, 3424, 0, item("varrock teleport")));

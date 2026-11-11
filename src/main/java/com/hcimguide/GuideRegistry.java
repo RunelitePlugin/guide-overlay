@@ -21,6 +21,14 @@ public class GuideRegistry
 	static final String BUILTIN_ID = "b0aty-hcim-v3";
 	static final String BRUHSAILER_ID = "bruhsailer";
 	private static final String REGISTRY_KEY = "guides";
+	/**
+	 * Guides removed from the dropdown whose snapshot and progress are still
+	 * stored under their id. An id listed here is only ever handed back to the
+	 * SAME source (same wiki page, or the same name for a file-only guide);
+	 * any other new guide gets a different id, so it can never open on another
+	 * page's stored text or inherit its ticks.
+	 */
+	private static final String REMOVED_KEY = "guidesRemoved";
 	private static final int MAX_REGISTRY_CHARS = 64 * 1024;
 	private static final int MAX_USER_GUIDES = 64;
 	private static final Logger log = LoggerFactory.getLogger(GuideRegistry.class);
@@ -119,21 +127,69 @@ public class GuideRegistry
 		return b == null ? null : b.sourceUrl;
 	}
 
-	private final ConfigManager configManager;
+	/** The registry's outside dependencies, narrowed so it can be exercised without a live client. */
+	interface Backing
+	{
+		String read(String key);
+
+		void write(String key, String value);
+
+		/** True when guide text is stored under this id, whether or not the id is registered. */
+		boolean hasSnapshot(String guideId);
+	}
+
+	private final Backing backing;
 	private final Gson gson;
 
 	@Inject
-	public GuideRegistry(ConfigManager configManager, Gson gson)
+	public GuideRegistry(ConfigManager configManager, Gson gson, GuideService guideService)
 	{
-		this.configManager = configManager;
+		this(new Backing()
+		{
+			@Override
+			public String read(String key)
+			{
+				return configManager.getConfiguration(HcimGuideConfig.GROUP, key);
+			}
+
+			@Override
+			public void write(String key, String value)
+			{
+				configManager.setConfiguration(HcimGuideConfig.GROUP, key, value);
+			}
+
+			@Override
+			public boolean hasSnapshot(String guideId)
+			{
+				return guideService.hasSnapshot(guideId);
+			}
+		}, gson);
+	}
+
+	GuideRegistry(Backing backing, Gson gson)
+	{
+		this.backing = backing;
 		this.gson = gson;
 	}
 
 	/** All guides, built-in first. Always returns at least the built-in entry. */
 	public synchronized List<Entry> list()
 	{
+		List<Entry> entries = readUserEntries(REGISTRY_KEY);
+		// built-ins first, in declared order
+		for (int i = BUILTINS.size() - 1; i >= 0; i--)
+		{
+			Entry b = BUILTINS.get(i);
+			entries.add(0, new Entry(b.id, b.title, b.wikiPage, b.sourceUrl));
+		}
+		return entries;
+	}
+
+	/** The validated user entries stored under one config key (the registry or the removed list). */
+	private List<Entry> readUserEntries(String key)
+	{
 		List<Entry> entries = new ArrayList<>();
-		String json = configManager.getConfiguration(HcimGuideConfig.GROUP, REGISTRY_KEY);
+		String json = backing.read(key);
 		if (json != null && !json.isEmpty() && json.length() <= MAX_REGISTRY_CHARS)
 		{
 			try
@@ -175,12 +231,6 @@ public class GuideRegistry
 		{
 			log.warn("Guide registry exceeds the safety cap and was ignored");
 		}
-		// built-ins first, in declared order
-		for (int i = BUILTINS.size() - 1; i >= 0; i--)
-		{
-			Entry b = BUILTINS.get(i);
-			entries.add(0, new Entry(b.id, b.title, b.wikiPage, b.sourceUrl));
-		}
 		return entries;
 	}
 
@@ -206,14 +256,7 @@ public class GuideRegistry
 		{
 			return true; // file-only guide
 		}
-		try
-		{
-			return WikiUrl.pageTitle(wikiPage).equals(wikiPage);
-		}
-		catch (IllegalArgumentException ex)
-		{
-			return false;
-		}
+		return WikiUrl.isValidTitle(wikiPage);
 	}
 
 	private static String sanitizeTitle(String title)
@@ -247,12 +290,32 @@ public class GuideRegistry
 		{
 			throw new IllegalStateException("At most " + MAX_USER_GUIDES + " user guides can be registered");
 		}
-		String base = slug(title);
-		String id = base;
-		int n = 2;
-		while (byIdIn(entries, id) != null)
+		List<Entry> removed = readUserEntries(REMOVED_KEY);
+		String id = null;
+		for (Entry r : removed)
 		{
-			id = base + "-" + n++;
+			// the same guide coming back: its stored text and progress are its own
+			if (byIdIn(entries, r.id) == null && (wikiPage != null
+				? wikiPage.equals(r.wikiPage) : r.wikiPage == null && title.equals(r.title)))
+			{
+				id = r.id;
+				removed.remove(r);
+				backing.write(REMOVED_KEY, gson.toJson(removed));
+				break;
+			}
+		}
+		if (id == null)
+		{
+			// Never an id that still has stored data behind it: not a removed
+			// guide's (a DIFFERENT source, or the loop above would have taken
+			// it), and not one with a snapshot on disk that no list accounts for.
+			String base = slug(title);
+			id = base;
+			int n = 2;
+			while (byIdIn(entries, id) != null || byIdIn(removed, id) != null || backing.hasSnapshot(id))
+			{
+				id = base + "-" + n++;
+			}
 		}
 		Entry entry = new Entry(id, title, wikiPage);
 		entries.add(entry);
@@ -268,12 +331,23 @@ public class GuideRegistry
 			return false;
 		}
 		List<Entry> entries = list();
-		boolean removed = entries.removeIf(e -> e.id.equals(id));
-		if (removed)
+		Entry gone = byIdIn(entries, id);
+		if (gone == null)
 		{
-			persist(entries);
+			return false;
 		}
-		return removed;
+		entries.remove(gone);
+		persist(entries);
+		// remember whose data stays stored under this id (newest kept when full)
+		List<Entry> removed = readUserEntries(REMOVED_KEY);
+		removed.removeIf(e -> e.id.equals(id));
+		removed.add(new Entry(gone.id, gone.title, gone.wikiPage));
+		while (removed.size() > MAX_USER_GUIDES)
+		{
+			removed.remove(0);
+		}
+		backing.write(REMOVED_KEY, gson.toJson(removed));
+		return true;
 	}
 
 	private void persist(List<Entry> entries)
@@ -287,7 +361,7 @@ public class GuideRegistry
 				userEntries.add(e);
 			}
 		}
-		configManager.setConfiguration(HcimGuideConfig.GROUP, REGISTRY_KEY, gson.toJson(userEntries));
+		backing.write(REGISTRY_KEY, gson.toJson(userEntries));
 	}
 
 	private static Entry byIdIn(List<Entry> entries, String id)
