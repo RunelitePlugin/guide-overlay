@@ -1103,4 +1103,170 @@ public class PanelOverlayRegressionTest
 		assertEquals(new Dimension(96, 96), compass(wild).render(graphics));
 		graphics.dispose();
 	}
+
+	// ------------------------------------------------------------------ guide screenshots
+
+	private static final String SHOT = "https://i.ibb.co/Abc1234/image.png";
+
+	/** Records screenshot traffic instead of touching a loader or a browser. */
+	private static class ShotStub extends Stub
+	{
+		final List<String> opened = new ArrayList<>();
+		final List<String> requested = new ArrayList<>();
+		final List<java.util.function.Consumer<BufferedImage>> callbacks = new ArrayList<>();
+		BufferedImage inMemory;
+
+		@Override
+		void openImageUrl(String url)
+		{
+			opened.add(url);
+		}
+
+		@Override
+		BufferedImage cachedGuideImage(String url, int thumbWidth)
+		{
+			return inMemory;
+		}
+
+		@Override
+		void loadGuideImage(String url, int thumbWidth, java.util.function.Consumer<BufferedImage> onDone)
+		{
+			requested.add(thumbWidth + " " + url);
+			callbacks.add(onDone);
+		}
+	}
+
+	private static final HcimGuideConfig SHOTS_ON = new HcimGuideConfig()
+	{
+		@Override
+		public boolean loadGuideScreenshots()
+		{
+			return true;
+		}
+	};
+
+	private static JLabel picture(Component root)
+	{
+		for (JLabel label : all(root, JLabel.class))
+		{
+			if (label.getIcon() instanceof javax.swing.ImageIcon)
+			{
+				return label;
+			}
+		}
+		return null;
+	}
+
+	private static JButton button(Component root, String text)
+	{
+		for (JButton b : all(root, JButton.class))
+		{
+			if (text.equals(b.getText()))
+			{
+				return b;
+			}
+		}
+		return null;
+	}
+
+	private static Guide shotGuide(ShotStub plugin)
+	{
+		Guide guide = guide(plugin, 2, 3, "Bank ", false);
+		guide.getEpisodes().get(0).getBanks().get(0).addImageUrl(SHOT);
+		return guide;
+	}
+
+	@Test
+	public void screenshotIsOnlyABrowserLinkByDefault() throws Exception
+	{
+		edt(() ->
+		{
+			ShotStub plugin = new ShotStub();
+			HcimGuidePanel panel = panel(plugin, DEFAULTS, shotGuide(plugin));
+			Container open = section(panel, 0);
+			assertTrue(expanded(open));
+			// the link sits above the steps, where the wiki shows the picture
+			JButton link = button(body(open).getComponent(0), "Guide screenshot");
+			assertTrue(link != null);
+			assertEquals(4, builtRows(open));
+			link.doClick();
+			assertEquals(Arrays.asList(SHOT), plugin.opened);
+			// nothing is downloaded unless the setting is on
+			assertTrue(plugin.requested.isEmpty());
+			assertNull(picture(panel));
+			// a section without a screenshot gets no link
+			click(header(section(panel, 1)));
+			assertNull(button(body(section(panel, 1)), "Guide screenshot"));
+		});
+	}
+
+	@Test
+	public void screenshotReplacesItsLinkOnceLoadedAndFitsThePanel() throws Exception
+	{
+		edt(() ->
+		{
+			ShotStub plugin = new ShotStub();
+			HcimGuidePanel panel = panel(plugin, SHOTS_ON, shotGuide(plugin));
+			Container open = section(panel, 0);
+			assertEquals(Arrays.asList(PanelLayout.screenshotWidth() + " " + SHOT), plugin.requested);
+			assertTrue("link stays until the picture arrives", button(open, "Guide screenshot") != null);
+			int before = open.getPreferredSize().height;
+
+			plugin.callbacks.get(0).accept(new BufferedImage(PanelLayout.screenshotWidth(), 120, BufferedImage.TYPE_INT_ARGB));
+			settle(panel);
+			JLabel shown = picture(open);
+			assertTrue(shown != null);
+			assertNull(button(open, "Guide screenshot"));
+			assertTrue("section grew to hold the picture", open.getPreferredSize().height >= before + 100);
+			assertTrue("picture wider than the section", shown.getPreferredSize().width <= open.getWidth());
+			assertEquals(4, builtRows(open));
+			// clicking the picture opens the full-size image
+			MouseEvent click = new MouseEvent(shown, MouseEvent.MOUSE_CLICKED, 0, 0, 5, 5, 1, false, MouseEvent.BUTTON1);
+			for (MouseListener listener : shown.getMouseListeners())
+			{
+				listener.mouseClicked(click);
+			}
+			assertEquals(Arrays.asList(SHOT), plugin.opened);
+		});
+	}
+
+	@Test
+	public void lateOrFailedScreenshotNeverLandsInAClosedOrRebuiltSection() throws Exception
+	{
+		edt(() ->
+		{
+			ShotStub plugin = new ShotStub();
+			HcimGuidePanel panel = panel(plugin, SHOTS_ON, shotGuide(plugin));
+			Container open = section(panel, 0);
+			// a failed download leaves the link in place
+			plugin.callbacks.get(0).accept(null);
+			assertTrue(button(open, "Guide screenshot") != null);
+
+			click(header(open));
+			assertFalse(expanded(open));
+			click(header(open));
+			settle(panel);
+			assertEquals(2, plugin.callbacks.size());
+			// the first open's download finishing now belongs to discarded rows
+			plugin.callbacks.get(0).accept(new BufferedImage(50, 50, BufferedImage.TYPE_INT_ARGB));
+			assertNull(picture(panel));
+			click(header(open));
+			plugin.callbacks.get(1).accept(new BufferedImage(50, 50, BufferedImage.TYPE_INT_ARGB));
+			assertNull(picture(panel));
+			assertEquals(0, builtRows(open));
+		});
+	}
+
+	@Test
+	public void screenshotAlreadyInMemoryShowsWithoutARequest() throws Exception
+	{
+		edt(() ->
+		{
+			ShotStub plugin = new ShotStub();
+			plugin.inMemory = new BufferedImage(100, 80, BufferedImage.TYPE_INT_ARGB);
+			HcimGuidePanel panel = panel(plugin, SHOTS_ON, shotGuide(plugin));
+			assertTrue(picture(section(panel, 0)) != null);
+			assertTrue(plugin.requested.isEmpty());
+		});
+	}
 }

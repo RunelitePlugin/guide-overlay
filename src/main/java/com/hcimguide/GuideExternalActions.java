@@ -27,7 +27,7 @@ import net.runelite.client.util.LinkBrowser;
  *
  * <p>URL opening is validated here rather than at the call sites. Guide content
  * is remote data, so a video link arrives from the same untrusted source as the
- * rest of a guide. {@link VideoLinks#isVideoUrl} already rejects anything that
+ * rest of a guide (and so does a screenshot link, see {@link GuideImageLinks}). {@link VideoLinks#isVideoUrl} already rejects anything that
  * is not an http(s) URL on an exact host allowlist, but before this class that
  * check ran when the guide was parsed while the browser call happened much
  * later, in a different file. Re-checking at the moment of opening turns a
@@ -108,6 +108,33 @@ public class GuideExternalActions
 	public boolean openVideoUrl(String url)
 	{
 		String accepted = VideoLinks.accepted(url);
+		if (accepted == null)
+		{
+			return false;
+		}
+		try
+		{
+			launcher.browse(accepted);
+		}
+		catch (RuntimeException e)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Open a guide screenshot in the user's browser. Same contract as
+	 * {@link #openVideoUrl}: only a URL {@link GuideImageLinks#accepted}
+	 * passes (HTTPS, the one image host, plain image path) is ever handed to
+	 * the browser, and the check runs here, at the moment of opening.
+	 *
+	 * @return true if the URL was accepted and handed to the browser. Never
+	 *     throws.
+	 */
+	public boolean openImageUrl(String url)
+	{
+		String accepted = GuideImageLinks.accepted(url);
 		if (accepted == null)
 		{
 			return false;

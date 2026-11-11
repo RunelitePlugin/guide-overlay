@@ -52,12 +52,16 @@ for label, pattern in {
     if re.search(pattern, all_java):
         fail(f"prohibited or review-sensitive mechanism found: {label}")
 
-# Network is deliberately owned by exactly two classes and is read-only.
+# Network is deliberately owned by exactly three classes and is read-only.
 network_owners: list[Path] = []
 for path in java_files:
     if "okhttp3" in read(path):
         network_owners.append(path)
-expected_network = [JAVA_ROOT / "GuideService.java", JAVA_ROOT / "LocationDbDownloader.java"]
+expected_network = [
+    JAVA_ROOT / "GuideImageLoader.java",
+    JAVA_ROOT / "GuideService.java",
+    JAVA_ROOT / "LocationDbDownloader.java",
+]
 if network_owners != expected_network:
     fail("network ownership changed: " + ", ".join(p.name for p in network_owners))
 
@@ -68,7 +72,7 @@ if re.search(
     network_text,
 ):
     fail("network owner contains an upload/request-body API or a non-GET verb")
-# Every URL the plugin can fetch: the literals in the two network owners PLUS
+# Every URL the plugin can fetch: the literals in the network owners PLUS
 # the built-in guide table in GuideRegistry.java, whose raw URL is handed to
 # GuideService.fetchUrl at runtime.
 fetch_sources = expected_network + [JAVA_ROOT / "GuideRegistry.java"]
@@ -105,6 +109,38 @@ for path in expected_network:
     ):
         if required not in text:
             fail(f"{path.name}: {label}")
+# Guide screenshots: the one fetch whose URL comes from guide text. It must be
+# opt-in (default off, behind a warning), gated at the only call site, limited
+# to URLs the validator passes on the one image host, and torn down on shutdown.
+image_loader = read(JAVA_ROOT / "GuideImageLoader.java")
+image_links = read(JAVA_ROOT / "GuideImageLinks.java")
+if 'HOST = "i.ibb.co"' not in image_links or '"https://" + HOST + "/"' not in image_links:
+    fail("guide screenshot host/scheme is not the fixed https://i.ibb.co/ prefix")
+if re.search(r'"https?://', image_loader):
+    fail("GuideImageLoader.java carries a URL literal")
+if image_loader.count(".url(") != 1 or ".url(accepted)" not in image_loader \
+        or "accepted = GuideImageLinks.accepted(url)" not in image_loader:
+    fail("GuideImageLoader requests something other than a validated screenshot URL")
+if "cameOnlyFrom(response, GuideImageLinks.HOST)" not in image_loader:
+    fail("GuideImageLoader does not check the response host")
+if not re.search(
+    r'keyName\s*=\s*"loadGuideScreenshots".*?warning\s*=\s*"[^"]*third-party[^"]*IP address[^"]*".*?'
+    r"default boolean loadGuideScreenshots\s*\(\)\s*\{\s*return\s+false\s*;",
+    config_text,
+    re.DOTALL,
+):
+    fail("guide screenshots are not opt-in/default false behind a third-party warning")
+load_calls = [m.start() for m in re.finditer(r"guideImageLoader\.load\s*\(", all_java)]
+if len(load_calls) != 1 or plugin_text.count("guideImageLoader.load(") != 1:
+    fail(f"expected one guide screenshot load call site in the plugin, found {len(load_calls)}")
+else:
+    at = plugin_text.index("guideImageLoader.load(")
+    if "config.loadGuideScreenshots()" not in plugin_text[max(0, at - 200) : at]:
+        fail("guide screenshot load is not visibly gated by loadGuideScreenshots")
+if re.search(r"GuideImageLoader\b", "\n".join(
+        read(p) for p in java_files if p.name not in ("GuideImageLoader.java", "HcimGuidePlugin.java"))):
+    fail("GuideImageLoader is referenced outside the plugin core")
+
 for forbidden_type in ("Client", "Player", "ItemContainer", "Skill", "Quest", "WorldPoint"):
     if re.search(rf"import\s+net\.runelite\.api\.{forbidden_type}\s*;", network_text):
         fail(f"network owner imports gameplay type {forbidden_type}")
@@ -183,6 +219,8 @@ else:
         "ItemGridPanel.clearInventoryBackground()",
         "guideService.cancelInFlight()",
         "locationDbDownloader.cancelInFlight()",
+        "guideImageLoader.cancelInFlight()",
+        "guideImageLoader.clear()",
         "inputHandler.unregister()",
         "tickFailuresLogged.clear()",
         "activePhaseIds.clear()",
@@ -239,6 +277,9 @@ required_caps = {
     "CustomLocationStore.java": ("MAX_JSON_CHARS", "MAX_READ_CHARS", "MAX_GUIDES", "MAX_STEPS", "MAX_WAYPOINTS"),
     "NpcLocationStore.java": ("MAX_IMPORT_ENTRIES", "MAX_IMPORT_CHARS", "MAX_STORE_BYTES"),
     "LocationDbDownloader.java": ("MAX_BODY_BYTES", "MAX_ENTRIES"),
+    "GuideImageLoader.java": ("MAX_IMAGE_BYTES", "MAX_IMAGE_SIDE", "MAX_IMAGE_PIXELS", "MAX_CACHED_IMAGES",
+                              "MAX_THUMB_HEIGHT"),
+    "GuideImageLinks.java": ("MAX_PER_BANK", "MAX_URL"),
     "WikitextParser.java": ("MAX_STEPS", "MAX_EPISODES", "MAX_BANKS_PER_EPISODE", "MAX_STEP_SOURCE_CHARS"),
     "JsonGuideParser.java": ("MAX_STEPS", "MAX_EPISODES"),
 }
@@ -338,8 +379,9 @@ if FAILURES:
 
 print("REVIEWER CHECKS PASS")
 print(f"- Java runtime files: {len(java_files)}")
-print("- Network owners: GuideService.java, LocationDbDownloader.java")
+print("- Network owners: GuideImageLoader.java, GuideService.java, LocationDbDownloader.java")
 print("- Runtime hosts: " + ", ".join(sorted(allowed_hosts)))
+print("- Opt-in host (guide screenshots, default off, behind a warning): i.ibb.co")
 print("- Fetchable URL literals (network owners + GuideRegistry.java):")
 for url in urls:
     print(f"    {url}")

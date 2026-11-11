@@ -986,6 +986,19 @@ public interface HcimGuideConfig extends Config
 		return new Color(255, 200, 87);
 	}
 
+	@ConfigItem(
+		keyName = "loadGuideScreenshots",
+		name = "Show guide screenshots",
+		description = "Show the guide's own inventory/bank screenshots inside each section. Off: sections only offer a link that opens the screenshot in your browser.",
+		warning = "Screenshots are downloaded from i.ibb.co, the third-party image host the guide's authors used. It is not controlled or verified by RuneLite or this plugin and will see your IP address. Images load only when you open a section that has one.",
+		position = 16,
+		section = uiSection
+	)
+	default boolean loadGuideScreenshots()
+	{
+		return false;
+	}
+
 	// ------------------------------------------------------------------ routing & teleports
 
 	@ConfigItem(

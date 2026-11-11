@@ -41,8 +41,9 @@ else
   echo "PASS: raw GitHub data URLs are commit-pinned"
 fi
 
-# GET only: neither network owner may select another HTTP verb or carry a body.
+# GET only: no network owner may select another HTTP verb or carry a body.
 if grep -nE '\.(post|put|patch|delete|method)[[:space:]]*\(|RequestBody|FormBody|MultipartBody' \
+  src/main/java/com/hcimguide/GuideImageLoader.java \
   src/main/java/com/hcimguide/GuideService.java \
   src/main/java/com/hcimguide/LocationDbDownloader.java > "$hit_file" 2>/dev/null; then
   echo "FAIL: network owners are GET only"
@@ -52,8 +53,10 @@ else
   echo "PASS: network owners are GET only"
 fi
 
-# Every URL the plugin can fetch. GuideRegistry.java is listed with the two
+# Every URL the plugin can fetch. GuideRegistry.java is listed with the
 # network owners because the built-in guide URL it declares is fetched at runtime.
+# GuideImageLoader.java has no URL literal: it requests only what
+# GuideImageLinks.accepted() passes (https, host i.ibb.co, plain image path).
 printf '\nURL literals in the network owners and the built-in guide table (including comments):\n'
 grep -hoE 'https://[^"[:space:]]+' \
   src/main/java/com/hcimguide/GuideService.java \

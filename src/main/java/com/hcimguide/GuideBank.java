@@ -20,6 +20,12 @@ public class GuideBank
 	 * step text, so progress keys are unaffected.
 	 */
 	private String videoUrl;
+	/**
+	 * Screenshots the guide shows for this section (its inventory or bank
+	 * setup), already validated by {@link GuideImageLinks}. Display metadata
+	 * only, like the video link.
+	 */
+	private final List<String> imageUrls = new ArrayList<>();
 
 	public GuideBank(String id, String title, int episodeNumber)
 	{
@@ -56,5 +62,20 @@ public class GuideBank
 	void setVideoUrl(String videoUrl)
 	{
 		this.videoUrl = videoUrl;
+	}
+
+	public List<String> getImageUrls()
+	{
+		return imageUrls;
+	}
+
+	/** Adds a screenshot once, up to the per-section cap. */
+	void addImageUrl(String imageUrl)
+	{
+		if (imageUrl != null && imageUrls.size() < GuideImageLinks.MAX_PER_BANK
+			&& !imageUrls.contains(imageUrl))
+		{
+			imageUrls.add(imageUrl);
+		}
 	}
 }

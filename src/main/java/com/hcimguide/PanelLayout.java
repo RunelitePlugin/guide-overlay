@@ -29,6 +29,16 @@ final class PanelLayout
 	static final int PANEL_CONTENT_WIDTH = 225;
 
 	/**
+	 * Width of an inline guide screenshot: the fixed content width minus both
+	 * content margins and a 4px inset each side, so it never needs a
+	 * horizontal scrollbar.
+	 */
+	static int screenshotWidth()
+	{
+		return PANEL_CONTENT_WIDTH - CONTENT_MARGIN_LEFT - CONTENT_MARGIN_RIGHT - 8;
+	}
+
+	/**
 	 * Conservative step-text width for the very first preferred-size pass,
 	 * before the layout has allocated the text component a real width: the
 	 * fixed content width minus both content margins, the deepest row border

@@ -180,6 +180,9 @@ public class HcimGuidePlugin extends Plugin
 	private LocationDbDownloader locationDbDownloader;
 
 	@Inject
+	private GuideImageLoader guideImageLoader;
+
+	@Inject
 	private WorldMapPointManager worldMapPointManager;
 
 	@Inject
@@ -889,6 +892,8 @@ public class HcimGuidePlugin extends Plugin
 		// running after the plugin is disabled
 		guideService.cancelInFlight();
 		locationDbDownloader.cancelInFlight();
+		guideImageLoader.cancelInFlight();
+		guideImageLoader.clear();
 		if (panel != null)
 		{
 			panel.dispose();
@@ -1774,6 +1779,39 @@ public class HcimGuidePlugin extends Plugin
 	void openVideoUrl(String url)
 	{
 		externalActions.openVideoUrl(url);
+	}
+
+	/** Open a guide screenshot in the browser; re-validated like a video link. */
+	void openImageUrl(String url)
+	{
+		externalActions.openImageUrl(url);
+	}
+
+	/** Thumbnail already in memory for a guide screenshot, or null. No request. */
+	java.awt.image.BufferedImage cachedGuideImage(String url, int thumbWidth)
+	{
+		return guideImageLoader.cached(url, thumbWidth);
+	}
+
+	/**
+	 * Download a guide screenshot for the side panel. Only when the user has
+	 * opted in; the callback (thumbnail, or null on failure) runs on the EDT
+	 * and is dropped if the plugin stopped or the setting was switched off
+	 * meanwhile.
+	 */
+	void loadGuideImage(String url, int thumbWidth, java.util.function.Consumer<java.awt.image.BufferedImage> onDone)
+	{
+		if (!active || !config.loadGuideScreenshots())
+		{
+			return;
+		}
+		guideImageLoader.load(url, thumbWidth, image -> runOnSwing(() ->
+		{
+			if (active && config.loadGuideScreenshots())
+			{
+				onDone.accept(image);
+			}
+		}));
 	}
 
 	/** Import NPC locations from shared JSON (community dataset or a friend's export). */
@@ -4547,8 +4585,15 @@ public class HcimGuidePlugin extends Plugin
 			|| "itemPresenceBorders".equals(key) || "colorTransportSteps".equals(key)
 			|| "transportStepColor".equals(key) || "colorDangerSteps".equals(key)
 			|| "dangerStepColor".equals(key) || "colorPreparationSteps".equals(key)
-			|| "preparationStepColor".equals(key) || "showLocationConfidence".equals(key))
+			|| "preparationStepColor".equals(key) || "showLocationConfidence".equals(key)
+			|| "loadGuideScreenshots".equals(key))
 		{
+			if ("loadGuideScreenshots".equals(key) && !config.loadGuideScreenshots())
+			{
+				// switched off: stop downloads and drop what was fetched
+				guideImageLoader.cancelInFlight();
+				guideImageLoader.clear();
+			}
 			runOnSwing(() -> panel.onConfigChanged());
 		}
 

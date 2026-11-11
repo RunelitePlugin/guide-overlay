@@ -1660,6 +1660,8 @@ public class HcimGuidePanel extends PluginPanel
 		private boolean lastComplete;
 		/** The player closed this section by hand: nothing reopens it for them. */
 		private boolean collapsedByUser;
+		/** Bumped whenever the rows are discarded; late screenshots check it. */
+		private int bodyGeneration;
 		private final JPanel headerPanel;
 
 		BankSection(GuideBank bank)
@@ -1730,6 +1732,14 @@ public class HcimGuidePanel extends PluginPanel
 				watchVideo.addActionListener(e -> plugin.openVideoUrl(bank.getVideoUrl()));
 				menu.add(watchVideo);
 			}
+			for (int i = 0; i < bank.getImageUrls().size(); i++)
+			{
+				String imageUrl = bank.getImageUrls().get(i);
+				JMenuItem openImage = new JMenuItem(screenshotLabel(i) + " (open in browser)");
+				openImage.setToolTipText(imageUrl);
+				openImage.addActionListener(e -> plugin.openImageUrl(imageUrl));
+				menu.add(openImage);
+			}
 			headerPanel.setComponentPopupMenu(menu);
 
 			headerPanel.addMouseListener(new MouseAdapter()
@@ -1797,6 +1807,10 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			releaseRows();
 			built = all;
+			if (all)
+			{
+				addScreenshots();
+			}
 			for (GuideStep step : steps)
 			{
 				StepRow row = new StepRow(this, step);
@@ -1825,6 +1839,85 @@ public class HcimGuidePanel extends PluginPanel
 			applyFontRecursively(body, panelFont());
 		}
 
+		private String screenshotLabel(int index)
+		{
+			return bank.getImageUrls().size() > 1 ? "Guide screenshot " + (index + 1) : "Guide screenshot";
+		}
+
+		/**
+		 * The guide's own screenshots of this section (its inventory or bank
+		 * setup), above the steps - where the wiki shows them. Always a link
+		 * that opens the image in the browser; with "Show guide screenshots"
+		 * on, the link is replaced by the image itself once it has loaded.
+		 */
+		private void addScreenshots()
+		{
+			List<String> images = bank.getImageUrls();
+			boolean inline = !images.isEmpty() && config.loadGuideScreenshots();
+			int width = PanelLayout.screenshotWidth();
+			for (int i = 0; i < images.size(); i++)
+			{
+				String url = images.get(i);
+				JPanel holder = new JPanel(new BorderLayout());
+				holder.setOpaque(false);
+				JButton link = new JButton(screenshotLabel(i));
+				link.setToolTipText("Open in browser: " + url);
+				link.setHorizontalAlignment(JButton.LEFT);
+				link.setBorderPainted(false);
+				link.setContentAreaFilled(false);
+				link.setFocusPainted(false);
+				link.setForeground(ColorScheme.BRAND_ORANGE);
+				link.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+				link.addActionListener(e -> plugin.openImageUrl(url));
+				holder.add(link, BorderLayout.CENTER);
+				body.add(holder);
+				if (!inline)
+				{
+					continue;
+				}
+				java.awt.image.BufferedImage ready = plugin.cachedGuideImage(url, width);
+				if (ready != null)
+				{
+					showScreenshot(holder, url, ready);
+					continue;
+				}
+				// the rows this holder belongs to may be gone (section closed,
+				// panel rebuilt) by the time the download finishes
+				int builtIn = bodyGeneration;
+				plugin.loadGuideImage(url, width, image ->
+				{
+					if (image != null && builtIn == bodyGeneration)
+					{
+						showScreenshot(holder, url, image);
+					}
+				});
+			}
+		}
+
+		private void showScreenshot(JPanel holder, String url, java.awt.image.BufferedImage image)
+		{
+			JLabel picture = new JLabel(new javax.swing.ImageIcon(image));
+			picture.setHorizontalAlignment(JLabel.CENTER);
+			picture.setBorder(BorderFactory.createEmptyBorder(4, 0, 4, 0));
+			picture.setToolTipText("Click to open full size in browser");
+			picture.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+			picture.addMouseListener(new MouseAdapter()
+			{
+				@Override
+				public void mouseClicked(MouseEvent e)
+				{
+					if (SwingUtilities.isLeftMouseButton(e))
+					{
+						plugin.openImageUrl(url);
+					}
+				}
+			});
+			holder.removeAll();
+			holder.add(picture, BorderLayout.CENTER);
+			holder.revalidate();
+			holder.repaint();
+		}
+
 		/**
 		 * Drop the rows of a closed section. Each row carries an HTML view, a
 		 * popup menu and an item grid; kept for every section ever opened they
@@ -1843,6 +1936,7 @@ public class HcimGuidePanel extends PluginPanel
 			rows.clear();
 			body.removeAll();
 			built = false;
+			bodyGeneration++;
 		}
 
 		boolean isComplete()

@@ -28,6 +28,10 @@ off in the settings.
   option) that opens the YouTube/Streamable link in your browser; sections
   with their own video guide show a "▶ Section video guide" link under
   their steps, plus a ▶ on the section header
+- Sections the guide illustrates with a screenshot (the B0aty guide shows
+  each bank's inventory setup) get a "Guide screenshot" link that opens it
+  in your browser. Turn on **Show guide screenshots** (Side panel settings)
+  to see the picture inside the section instead; click it for full size
 - Progress saves automatically and keeps across sessions
 - Search your guide (3 or more characters), or jump straight to your next
   unchecked step
@@ -320,7 +324,7 @@ requirements of Guide Overlay, and their Hub names may change independently.
 
 ## Network use
 
-The plugin connects to two places, and only to read:
+The plugin connects to two places by default, and only to read:
 
 - **The OSRS wiki**, for the built-in B0aty HCIM guide and for any guide you
   add by link. These are read live: an import fetches the page as it is at
@@ -331,6 +335,14 @@ The plugin connects to two places, and only to read:
 - **GitHub**, for the BRUHsailer guide data and the NPC location database.
   Both URLs are pinned to a fixed, reviewed commit, so the same content is
   fetched every time.
+
+One more host is strictly opt-in: with **Show guide screenshots** switched on
+(it is off by default and asks for confirmation), a section's screenshot is
+downloaded from **i.ibb.co**, the third-party image host the guide's authors
+used, when you open that section. That host is not run or checked by RuneLite
+or this plugin, and it sees your IP address, as any website you visit does.
+Left off, the plugin never contacts it - the screenshot link just opens your
+browser.
 
 Nothing is uploaded. No account name, character data, inventory, location or
 gameplay information is ever sent anywhere. The only thing a server learns is

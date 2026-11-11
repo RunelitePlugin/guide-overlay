@@ -3,7 +3,7 @@
 Displays an OSRS wiki guide as an in-client checklist, highlights the items and
 NPCs the current step needs, and points at the destination.
 
-70 main source files. Input, clipboard, audio and network are confined to five files. The rest is parsing, UI and data.
+72 main source files. Input, clipboard, audio and network are confined to six files. The rest is parsing, UI and data.
 
 Four scripts verify the claims below:
 
@@ -26,17 +26,18 @@ does not own it.
 | File | Capability |
 |---|---|
 | `GuideInputHandler` | Registers `HotkeyListener`s for next/previous step; handles left-clicks on the overlay's own buttons and consumes those clicks so they do not also reach the game. Never generates input. |
-| `GuideExternalActions` | Clipboard read/write for progress codes; `LinkBrowser` for guide video links. |
+| `GuideExternalActions` | Clipboard read/write for progress codes; `LinkBrowser` for guide video and screenshot links. |
 | `ChimePlayer` | Playback of a generated tone via the client's `AudioPlayer`. |
 | `GuideService` | HTTP GET for guide text; writes the guide snapshot to disk. |
 | `LocationDbDownloader` | HTTP GET for the optional NPC location dataset. |
+| `GuideImageLoader` | HTTP GET for guide screenshots. Opt-in, off by default. |
 
 ## Remaining files
 
 | Area | Files |
 |---|---|
 | Core | `HcimGuidePlugin` (~7,000 lines) — events, step tracking, completion, overlay and panel coordination |
-| Guide parsing | `WikitextParser`, `JsonGuideParser`, `ItemListParser`, `StepPhaseParser`, `TargetExtractor`, `ConditionParser`, `DialogSequenceParser` |
+| Guide parsing | `WikitextParser`, `GuideImageLinks`, `JsonGuideParser`, `ItemListParser`, `StepPhaseParser`, `TargetExtractor`, `ConditionParser`, `DialogSequenceParser` |
 | Item resolution | `ItemReq`, `ItemAliases`, `ItemCategory`, `ItemIconResolver`, `StepItemOverrides`, `ConceptItems`, `InventorySnapshot` |
 | Location | `PlaceDirectory`, `TransportResolver`, `StepLocationPlanner`, `StepLocationHint`, `NpcLocationStore`, `CustomLocationStore` |
 | Overlays | `HudOverlay`, `TargetOverlay`, `DirectionArrowOverlay`, `StepNavOverlay`, `DialogOptionOverlay` — read state, do not mutate it |
@@ -54,6 +55,7 @@ does not own it.
 | Built-in B0aty HCIM guide | `oldschool.runescape.wiki/api.php`, live page | User confirms import |
 | Built-in BRUHsailer guide data | `raw.githubusercontent.com`, commit-pinned | User confirms one-time import |
 | NPC location dataset | `raw.githubusercontent.com`, commit-pinned | User confirms optional download |
+| Guide screenshot (opt-in) | `i.ibb.co`, third party | "Show guide screenshots" enabled (off by default, warning dialog), then the user opens a section that has one |
 
 Wiki guides, the built-in B0aty guide included, are deliberately NOT pinned to
 a revision: an import reads the page as it stands at that moment, so the guide
@@ -80,6 +82,41 @@ content.
 `GuideService.java`, `LocationDbDownloader.java`. The BRUHsailer URL literal is
 declared in the built-in table in `GuideRegistry.java`; `GuideService.fetchUrl`
 re-checks its scheme and host before requesting it.
+
+### Guide screenshots
+
+The B0aty guide shows each bank's inventory setup with
+`{{Extimage|https://i.ibb.co/<id>/<file>.png|...}}`. The parser keeps those
+URLs (at most 4 per section) as display metadata; step text and progress keys
+are unaffected.
+
+- By default nothing is fetched. A section shows a "Guide screenshot" link that
+  opens the image in the user's browser through `GuideExternalActions`, exactly
+  like a video link.
+- With "Show guide screenshots" enabled (`loadGuideScreenshots`, default
+  `false`, RuneLite `warning` dialog naming the third-party host and the IP
+  disclosure), `GuideImageLoader` fetches the image when a section holding one
+  is opened. Never at startup, never for a closed section.
+- This is the only fetch whose URL comes from guide text, which is publicly
+  editable. `GuideImageLinks.accepted` therefore passes one shape only:
+  `https://i.ibb.co/<alphanumeric id>/<name>.(png|jpg|jpeg)` — no other scheme
+  or host, no userinfo, port, query, fragment, percent-escape, `..` or extra
+  path segment. The same check runs again in the loader and before a browser
+  launch. A rejected URL is neither shown nor requested.
+- GET only, no body, no auth or cookies, redirects not followed, response host
+  re-checked, 20 s wall-clock timeout.
+- The response is untrusted: 4 MiB cap while reading; must start with a PNG or
+  JPEG signature; declared dimensions (4,096 per side, 8 megapixels) are
+  checked from the header before any pixel is decoded; decoder failures are
+  caught. Only a scaled thumbnail (panel width, at most 480 px tall) is kept.
+- Cancelled and cleared on shutdown and when the setting is switched off. The
+  plugin writes no image to disk (RuneLite's shared HTTP cache may keep the
+  response, as for any request made through the client's `OkHttpClient`).
+- Which image a section shows is whatever the guide page said when the user
+  imported it - the same trust the guide's text already has. It changes only
+  on a user-triggered re-import.
+
+`GuideImageLinks.java`, `GuideImageLoader.java`, `GuideScreenshotTest`.
 
 ## File writes
 
@@ -214,6 +251,7 @@ that step.
 |---|---|---|
 | `OverlayFonts` | 128 entries, access-ordered LRU; also serves `PanelFonts` | font setting change, shutdown |
 | `ItemIconResolver` | keyed by the loaded guide's item names | `reset()` on shutdown |
+| `GuideImageLoader` | 12 thumbnails, access-ordered LRU; 256 failed URLs | setting switched off, shutdown |
 
 Font caches hold `java.awt.Font` for families already registered with the JVM.
 No font file is bundled, read, parsed or downloaded. A user-typed font name is
@@ -250,7 +288,9 @@ or creation/replacement of game menu entries; packet or protocol code;
 loading; `Class.forName`, `setAccessible`, `MethodHandles`, `URLClassLoader` and
 other dynamic class loading; Gson `TypeToken` and `java.lang.reflect` imports;
 raw sockets; request bodies and non-GET verbs; followed redirects; fetchable
-URLs outside the two allowed hosts or not commit-pinned on GitHub.
+URLs outside the two allowed hosts or not commit-pinned on GitHub; a guide
+screenshot fetch that is not opt-in, not gated at its one call site, or not
+limited to validated `https://i.ibb.co/` image URLs.
 
 Absent by review rather than by a script: outgoing chat insertion or
 modification (the plugin only adds local game messages to the player's own chat

@@ -36,7 +36,7 @@ expect_owner "audio output" \
 
 expect_owner "network" \
 	'okhttp3' \
-	"$ROOT/GuideService.java $ROOT/LocationDbDownloader.java"
+	"$ROOT/GuideImageLoader.java $ROOT/GuideService.java $ROOT/LocationDbDownloader.java"
 
 echo
 echo "== prohibited mechanisms =="

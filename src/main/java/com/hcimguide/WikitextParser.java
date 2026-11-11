@@ -1,6 +1,8 @@
 package com.hcimguide;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -236,6 +238,10 @@ public class WikitextParser
 		Map<String, Integer> legacyNotesOccurrence = new HashMap<>();
 		// true between a {{Checklist}} opener and its closing "}}"
 		boolean inChecklist = false;
+		// {{Extimage}} screenshots waiting for the section they illustrate: the
+		// wiki puts each one just BEFORE its {{Checklist}}, on either side of
+		// the "<!-- Bank N -->" comment
+		List<String> pendingImages = new ArrayList<>();
 
 		for (String rawLine : wikitext.split("\r\n|\r|\n"))
 		{
@@ -305,6 +311,7 @@ public class WikitextParser
 					banksById.clear();
 					legacyBankIds.clear();
 					pendingBank = null;
+					pendingImages.clear();
 					continue;
 				}
 
@@ -346,6 +353,18 @@ public class WikitextParser
 			// patterns are linear on real lines, but a megabyte line would still
 			// buy megabytes of matcher work per pattern
 			boolean oversized = line.length() > MAX_STEP_SOURCE_CHARS;
+			if (episode != null && !oversized)
+			{
+				String image = GuideImageLinks.fromExtimage(line);
+				if (image != null)
+				{
+					if (pendingImages.size() < GuideImageLinks.MAX_PER_BANK && !pendingImages.contains(image))
+					{
+						pendingImages.add(image);
+					}
+					continue;
+				}
+			}
 			if (episode != null)
 			{
 				Matcher bc = oversized ? null : BANK_COMMENT.matcher(line);
@@ -375,6 +394,10 @@ public class WikitextParser
 							bank = findOrCreateBank(guide, episode, banksById, legacyBankIds, id, title);
 						}
 						// empty/computed title: continuation of the current section
+					}
+					if (bank != null)
+					{
+						attachImages(bank, pendingImages);
 					}
 					// a checklist's FIRST item can sit on the opening line
 					// ("{{Checklist|title=|* If you didn't get your spade...")
@@ -483,6 +506,9 @@ public class WikitextParser
 				{
 					guide.getLegacySplitKeys().putIfAbsent(legacyNotesKey, java.util.Collections.singletonList(key));
 				}
+				// screenshots that preceded a checklist with no section of its
+				// own belong to the section its first step just opened
+				attachImages(bank, pendingImages);
 				GuideStep guideStep = new GuideStep(key, text, depth, bank.getId());
 				// video URLs become a per-step "watch in browser" action; text
 				// (and therefore keys) untouched. The RAW line is the fallback:
@@ -559,6 +585,15 @@ public class WikitextParser
 		}
 
 		return guide;
+	}
+
+	private static void attachImages(GuideBank bank, List<String> pending)
+	{
+		for (String image : pending)
+		{
+			bank.addImageUrl(image);
+		}
+		pending.clear();
 	}
 
 	private static GuideBank findOrCreateBank(Guide guide, GuideEpisode episode,
