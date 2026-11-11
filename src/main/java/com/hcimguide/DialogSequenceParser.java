@@ -29,6 +29,76 @@ final class DialogSequenceParser
 	private static final Pattern NAME_BEFORE = Pattern.compile(
 		"([A-Z][A-Za-z'’-]*(?:\\s+(?:(?:of|the)\\s+)?[A-Z][A-Za-z'’-]*)*)\\s*$");
 
+	/**
+	 * A single choice, "Talk to Morgan (1)" - as common in the guides as the
+	 * multi-choice form. The whitespace before the parenthesis is required:
+	 * a dose suffix is glued to its item ("Prayer potion(4)").
+	 */
+	private static final Pattern SINGLE = Pattern.compile("(?<=\\s)\\(\\s*([1-9])\\s*\\)");
+
+	/**
+	 * Words whose following "(4)" is a dose, charge or tier even when a space
+	 * separates them ("Waterskin (4)", "Decant into (4)", "Games necklace (8)").
+	 */
+	private static final Pattern DOSE_WORD = Pattern.compile(
+		"(?i)(?:potions?|waterskins?|antipoisons?|restores?|brews?|rings?|necklaces?|pendants?|"
+			+ "bracelets?|amulets?|glory|blessing|crystal|sceptre|rest|sickle|cloak|gloves|staminas?|"
+			+ "doses?|into|to|x)$");
+
+	/** A conversation verb earlier in the step vouches for a note that follows a lower-case word. */
+	private static final Pattern TALK_VERB = Pattern.compile("(?i)\\b(?:talk|talking|speak|speaking)\\b");
+
+	/** Real steps stay under 900 characters; nothing longer is scanned in full. */
+	private static final int MAX_SCAN_CHARS = 1000;
+
+	/**
+	 * The step's dialogue notation, positioned on it (group 1 holds the
+	 * comma-separated choices), or null. A multi-choice sequence anywhere in
+	 * the step wins over a single choice.
+	 */
+	private static Matcher locate(String stepText)
+	{
+		if (stepText == null || stepText.isEmpty())
+		{
+			return null;
+		}
+		if (stepText.length() > MAX_SCAN_CHARS)
+		{
+			stepText = stepText.substring(0, MAX_SCAN_CHARS);
+		}
+		Matcher m = SEQ.matcher(stepText);
+		if (m.find())
+		{
+			return m;
+		}
+		Matcher single = SINGLE.matcher(stepText);
+		while (single.find())
+		{
+			String before = stepText.substring(Math.max(0, single.start() - 24), single.start()).trim();
+			if (before.isEmpty() || DOSE_WORD.matcher(before).find()
+				|| Character.isDigit(before.charAt(before.length() - 1)))
+			{
+				continue;
+			}
+			// "pots (4)-dose": a unit follows, so the number is not a choice
+			if (single.end() < stepText.length()
+				&& (stepText.charAt(single.end()) == '-' || Character.isLetter(stepText.charAt(single.end()))))
+			{
+				continue;
+			}
+			// The note follows a name ("Morgan (1)", "Lovakengj (7)") - or,
+			// after a lower-case word, the step must at least be a conversation
+			// ("talk to Reldo again (1)"); "boots (5)" alone is an item tier.
+			int wordStart = before.lastIndexOf(' ') + 1;
+			if (Character.isUpperCase(before.charAt(wordStart))
+				|| TALK_VERB.matcher(stepText).region(0, single.start()).find())
+			{
+				return single;
+			}
+		}
+		return null;
+	}
+
 	/** The SEQ regex admits at most twelve entries, so this stays tiny. */
 	private static final Pattern COMMA = Pattern.compile(",");
 
@@ -42,12 +112,8 @@ final class DialogSequenceParser
 	/** First dialogue sequence in the text, or null when the step has none. */
 	static int[] extract(String stepText)
 	{
-		if (stepText == null || stepText.isEmpty())
-		{
-			return null;
-		}
-		Matcher m = SEQ.matcher(stepText);
-		if (!m.find())
+		Matcher m = locate(stepText);
+		if (m == null)
 		{
 			return null;
 		}
@@ -70,12 +136,8 @@ final class DialogSequenceParser
 	 */
 	static String npcBefore(String stepText)
 	{
-		if (stepText == null || stepText.isEmpty())
-		{
-			return null;
-		}
-		Matcher m = SEQ.matcher(stepText);
-		if (!m.find())
+		Matcher m = locate(stepText);
+		if (m == null)
 		{
 			return null;
 		}

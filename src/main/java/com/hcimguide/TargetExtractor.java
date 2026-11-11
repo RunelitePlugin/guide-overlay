@@ -14,11 +14,22 @@ import java.util.regex.Pattern;
 public final class TargetExtractor
 {
 	private static final Pattern VERB = Pattern.compile(
-		"(?i)\\b(?:talk to|talk with|talking to|talking with|speak to|speak with|speaking to|speaking with|trade with|trade|kill|attack|pickpocket|sell(?:\\s+[a-z0-9',]+){1,4}?\\s+to)\\s+(?:the\\s+)?([A-Z][A-Za-z'’()_-]*(?:\\s+[A-Z][A-Za-z'’()_-]*)*)");
+		"(?i)\\b(?:talk to|talk with|talking to|talking with|speak to|speak with|speaking to|speaking with|trade with|trade|kill|attack|pickpocket|sell(?:\\s+[a-z0-9',]+){1,4}?\\s+to)\\s+(?:(?:the|an?|any|some)\\s+)?([A-Z][A-Za-z'’()_-]*(?:\\s+[A-Z][A-Za-z'’()_-]*)*)");
 
 	// words that end a name if the guide continues the sentence in lowercase
 	private static final Pattern TRAILING = Pattern.compile(
-		"(?i)\\s+(?:and|&|in|at|for|to|then|with|on|near|inside|outside|again|whenever|north|south|east|west)\\b.*$");
+		"(?i)\\s+(?:and|&|in|at|for|to|then|with|on|near|inside|outside|again|whenever|north|south|east|west|"
+			+ "until|while|when|after|before|by|as|or|if|during|using|about|from|twice|instead|"
+			+ "upstairs|downstairs|nearby|first)\\b.*$");
+
+	/**
+	 * First words that show the verb's object is prose, not a name ("kill you
+	 * if ...", "kill it", "kill all"). The verb pattern is case-insensitive so
+	 * lower-case names ("Kill a cow") are found; these are what it over-matches.
+	 */
+	private static final java.util.Set<String> NOT_A_NAME = new java.util.HashSet<>(java.util.Arrays.asList(
+		"you", "it", "this", "that", "these", "those", "him", "her", "them", "all", "each", "both",
+		"one", "everything", "anything", "until", "to"));
 
 	private static final Pattern TRAILING_PAREN = Pattern.compile("\\s*\\([^)]*\\)\\s*$");
 	private static final Pattern TRAILING_JUNK = Pattern.compile("[^A-Za-z'’)]+$");
@@ -94,6 +105,12 @@ public final class TargetExtractor
 		name = TRAILING_PAREN.matcher(name).replaceAll("");
 		name = TRAILING_JUNK.matcher(name).replaceAll("").trim();
 		if (name.length() < 2 || name.length() > 32)
+		{
+			return null;
+		}
+		int firstWordEnd = name.indexOf(' ');
+		String firstWord = firstWordEnd < 0 ? name : name.substring(0, firstWordEnd);
+		if (NOT_A_NAME.contains(firstWord.toLowerCase(java.util.Locale.ROOT)))
 		{
 			return null;
 		}

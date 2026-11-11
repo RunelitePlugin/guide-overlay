@@ -15,6 +15,13 @@ public class GuideStep
 	 * (users' saved progress) are unaffected by link changes.
 	 */
 	private String videoUrl;
+	/**
+	 * The step's complete item list when the guide source supplies one
+	 * separately from the text (a JSON guide's items_needed), or null. Display
+	 * metadata only - the text may show a shortened copy, and the key is built
+	 * from the text alone.
+	 */
+	private String itemsNeeded;
 
 	public GuideStep(String key, String text, int depth, String bankId)
 	{
@@ -58,5 +65,15 @@ public class GuideStep
 	void setVideoUrl(String videoUrl)
 	{
 		this.videoUrl = videoUrl;
+	}
+
+	public String getItemsNeeded()
+	{
+		return itemsNeeded;
+	}
+
+	void setItemsNeeded(String itemsNeeded)
+	{
+		this.itemsNeeded = itemsNeeded;
 	}
 }

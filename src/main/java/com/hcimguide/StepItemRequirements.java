@@ -22,7 +22,30 @@ final class StepItemRequirements
 		{
 			return null;
 		}
-		StepCondition condition = ConditionParser.parse(step.getText());
+		return displayFor(step, ConditionParser.parse(step.getText()));
+	}
+
+	/**
+	 * Same projection for a caller that already holds the step's condition.
+	 * Prefer this over the text-only form: a JSON guide step carries its
+	 * complete item list separately, while its text shows at most the first
+	 * 120 characters of it.
+	 */
+	static List<ItemReq> displayFor(GuideStep step, StepCondition condition)
+	{
+		if (step == null)
+		{
+			return null;
+		}
+		if (step.getItemsNeeded() != null && (condition == null
+			|| condition.getType() != StepCondition.Type.ITEMS_IN_INVENTORY))
+		{
+			List<ItemReq> full = ItemListParser.parseItemsNeeded(step.getItemsNeeded());
+			if (full != null)
+			{
+				return full;
+			}
+		}
 		return displayFor(step.getText(), condition);
 	}
 

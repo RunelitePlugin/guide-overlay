@@ -132,12 +132,15 @@ final class StepItemOverrides
 		// case 76 (guide line 2189)
 		o("Withdraw: Coins, Dueling Ring, a knife, log or axe, ardy cloak, dramen staff.",
 			q("Coins", 1),
-			q("Ring of dueling(8)", 1),
+			any("Ring of dueling(8)", 1, null,
+				"Ring of dueling(8)", "Ring of dueling(7)", "Ring of dueling(6)", "Ring of dueling(5)",
+				"Ring of dueling(4)", "Ring of dueling(3)", "Ring of dueling(2)", "Ring of dueling(1)"),
 			q("Knife", 1),
 			any("Log or axe", 1, null,
 				"Logs", "Bronze axe", "Iron axe", "Steel axe", "Black axe",
 				"Mithril axe", "Adamant axe", "Rune axe", "Dragon axe"),
-			q("Ardougne cloak 1", 1),
+			any("Ardougne cloak 1", 1, null,
+				"Ardougne cloak 1", "Ardougne cloak 2", "Ardougne cloak 3", "Ardougne cloak 4"),
 			q("Dramen staff", 1));
 		// case 80 (guide line 3582)
 		o("Withdraw a Chisel & Uncut gems from Gauntlet.",
@@ -175,7 +178,10 @@ final class StepItemOverrides
 		// carried regardless.
 		o("Withdraw: Teleport Runes, Coins, Death Runes, Antipoison, Super Antipoison, Scrying Orb If 56/57/58 Magic; Wizard Mind Bomb, (9/10 Inventory Slots) + Food",
 			q("Law rune", 1), q("Coins", 1), q("Death rune", 1),
-			q("Antipoison(4)", 1), q("Superantipoison(4)", 1),
+			any("Antipoison(4)", 1, null,
+				"Antipoison(4)", "Antipoison(3)", "Antipoison(2)", "Antipoison(1)"),
+			any("Superantipoison(4)", 1, null,
+				"Superantipoison(4)", "Superantipoison(3)", "Superantipoison(2)", "Superantipoison(1)"),
 			q("Scrying orb", 1), q("Wizard\u0027s mind bomb", 1));
 
         // Trailing noun written once and meant to carry backwards. Handled as
@@ -218,6 +224,9 @@ final class StepItemOverrides
 			q("Rat's tail", 1));
 	}
 
+	/** Longest text looked up; the longest curated sentence is under 250 characters. */
+	private static final int MAX_OVERRIDE_CHARS = 1000;
+
 	/** Normalized lookup key: wiki markup stripped, lowercase alphanumeric. */
 	static String key(String stepText)
 	{
@@ -248,6 +257,12 @@ final class StepItemOverrides
 	 */
 	static List<ItemReq> forStep(String stepText)
 	{
+		if (stepText != null && stepText.length() > MAX_OVERRIDE_CHARS)
+		{
+			// no curated sentence is this long, and key() re-copies the text
+			// once per wiki link - never worth it on an oversized step
+			return null;
+		}
 		List<ItemReq> hit = OVERRIDES.get(key(stepText));
 		return hit == null ? null : new ArrayList<>(hit);
 	}

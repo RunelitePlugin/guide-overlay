@@ -43,6 +43,9 @@ final class StepTextSemantic
 		"(?i)\\b(?:\\d+ charges?|fully charged|partially charged|"
 			+ "in (?:your )?inventory|with [^.\\n]{1,80} equipped)\\b");
 
+	/** Real steps stay under 900 characters; nothing longer is scanned in full. */
+	private static final int MAX_SCAN_CHARS = 1000;
+
 	private StepTextSemantic()
 	{
 	}
@@ -52,6 +55,11 @@ final class StepTextSemantic
 		if (stepText == null || stepText.trim().isEmpty())
 		{
 			return Kind.NORMAL;
+		}
+		if (stepText.length() > MAX_SCAN_CHARS)
+		{
+			// presentation only: the lead of an oversized step decides its colour
+			stepText = stepText.substring(0, MAX_SCAN_CHARS);
 		}
 		if (DANGER.matcher(stepText).find())
 		{

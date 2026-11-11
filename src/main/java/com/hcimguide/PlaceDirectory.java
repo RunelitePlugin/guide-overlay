@@ -24,6 +24,8 @@ final class PlaceDirectory
 	private static final String RESOURCE = "place-locations-seed.json";
 	private static final Pattern NON_WORD = Pattern.compile("[^a-z0-9']+");
 	private static final Pattern SPACES = Pattern.compile("\\s+");
+	/** Real steps stay under 900 characters; nothing longer is scanned in full. */
+	private static final int MAX_SCAN_CHARS = 1000;
 	private static final Pattern MOVEMENT_INTENT = Pattern.compile(
 		"(?i)\\b(?:go|head|travel|teleport|run|walk|return|sail|enter|leave|"
 			+ "climb|descend|make your way|take (?:the )?(?:boat|ship|portal|minecart|quetzal|canoe|charter)|"
@@ -82,6 +84,12 @@ final class PlaceDirectory
 	 */
 	StepLocationHint find(String stepText)
 	{
+		if (stepText != null && stepText.length() > MAX_SCAN_CHARS)
+		{
+			// oversized text fails closed: the LAST place mentioned wins, so
+			// scanning only a prefix could name the wrong destination
+			return null;
+		}
 		String normalized = normalizeWords(stepText);
 		String haystack = " " + normalized + " ";
 		if (normalized.isEmpty())

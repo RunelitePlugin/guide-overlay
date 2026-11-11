@@ -30,6 +30,8 @@ final class TransportResolver
 {
 	private static final String RESOURCE = "transport-destinations.json";
 	private static final Pattern FAIRY_CODE = Pattern.compile("(?i)[a-d][i-l][p-s]");
+	/** Real steps stay under 900 characters; nothing longer is scanned in full. */
+	private static final int MAX_SCAN_CHARS = 1000;
 
 	private static final Pattern TRANSPORT_INTENT = Pattern.compile(
 		"(?i)\\b(?:tele(?:port)?(?:ed|ing|s)?|home tele(?:port)?|minigame tele(?:port)?|fairy ring|"
@@ -101,8 +103,10 @@ final class TransportResolver
 
 	StepLocationHint find(String stepText)
 	{
-		if (stepText == null || stepText.trim().isEmpty())
+		if (stepText == null || stepText.length() > MAX_SCAN_CHARS || stepText.trim().isEmpty())
 		{
+			// oversized text fails closed: the LAST transport mentioned wins, so
+			// scanning only a prefix could name the wrong destination
 			return null;
 		}
 
@@ -177,6 +181,10 @@ final class TransportResolver
 		if (stepText == null || stepText.isEmpty())
 		{
 			return false;
+		}
+		if (stepText.length() > MAX_SCAN_CHARS)
+		{
+			stepText = stepText.substring(0, MAX_SCAN_CHARS);
 		}
 		return TRANSPORT_INTENT.matcher(stepText).find()
 			|| TRANSPORT_ITEM_ACTION.matcher(stepText).find()

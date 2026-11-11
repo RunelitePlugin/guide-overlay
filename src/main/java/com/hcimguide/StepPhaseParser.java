@@ -99,8 +99,19 @@ final class StepPhaseParser
 		}
 	}
 
-	private static final Pattern WIKI_LINK = Pattern.compile("\\[\\[(?:[^|\\]]*\\|)?([^\\]]+)\\]\\]");
-	private static final Pattern BRACKET_TAG = Pattern.compile("\\[[^\\]]+\\]");
+	// possessive: each class is followed by a character it excludes, so a row
+	// of unclosed "[" cannot make a failed match re-walk the rest of the text
+	private static final Pattern WIKI_LINK = Pattern.compile("\\[\\[(?:[^|\\]]*+\\|)?([^\\]]++)\\]\\]");
+	private static final Pattern BRACKET_TAG = Pattern.compile("\\[[^\\]]++\\]");
+	/**
+	 * Longest row analysed. Clause splitting and classification run dozens of
+	 * patterns per clause; real rows stay under 900 characters, and anything
+	 * longer fails closed to MANUAL like every other ambiguous row.
+	 */
+	private static final int MAX_PARSE_CHARS = 1000;
+	private static final Pattern TRANSPORT_LEAD = Pattern.compile(
+		"(?i)\\s*(?:boat|ship|portal|minecart|glider|quetzal|canoe|ferry|"
+			+ "rowboat|raft|spirit\\s+tree|fairy\\s+ring)\\s+(?:to|towards?|into|back)\\b");
 	private static final Pattern ITEM_SUFFIX = Pattern.compile("(?is)\\(\\s*items?\\s*:\\s*.*?\\)\\s*$");
 	private static final Pattern OPTIONAL = Pattern.compile(
 		"(?i)\\b(?:optional(?:ly)?|if\\s+you\\s+(?:want|wish|prefer)|at\\s+(?:your|a)\\s+convenience|"
@@ -242,6 +253,10 @@ final class StepPhaseParser
 
 	static Parsed parse(String value)
 	{
+		if (value != null && value.length() > MAX_PARSE_CHARS)
+		{
+			return new Parsed(Collections.<Clause>emptyList(), Mode.MANUAL, false, false);
+		}
 		String text = normalizeExplicitFinalDestination(clean(value));
 		List<String> rawClauses = mergeAccessCodeClauses(splitClauses(text));
 		List<Clause> clauses = new ArrayList<>();
@@ -665,7 +680,7 @@ final class StepPhaseParser
 		{
 			if (!isProtected(protectedChars, conditional.start(), conditional.end())
 				&& (conditional.group().toLowerCase(Locale.ROOT).startsWith("there")
-					|| startsWithAction(text.substring(conditional.end()))))
+					|| startsWithActionAt(text, conditional.end())))
 			{
 				boundaries.add(new Boundary(conditional.start(), conditional.end()));
 			}
@@ -695,12 +710,15 @@ final class StepPhaseParser
 		return out;
 	}
 
-	private static boolean startsWithAction(String value)
+	/**
+	 * Whether an action starts at {@code from}. Matched in place through a
+	 * region: copying the remainder of the text once per separator would make
+	 * clause splitting quadratic in the number of commas.
+	 */
+	private static boolean startsWithActionAt(String text, int from)
 	{
-		String text = value == null ? "" : value;
-		return ACTION_HEAD.matcher(text).find()
-			|| text.matches("(?i)^\\s*(?:boat|ship|portal|minecart|glider|quetzal|canoe|ferry|"
-				+ "rowboat|raft|spirit\\s+tree|fairy\\s+ring)\\s+(?:to|towards?|into|back)\\b.*");
+		return ACTION_HEAD.matcher(text).region(from, text.length()).find()
+			|| TRANSPORT_LEAD.matcher(text).region(from, text.length()).lookingAt();
 	}
 
 	private static boolean isAcronymPeriod(String text, int index)

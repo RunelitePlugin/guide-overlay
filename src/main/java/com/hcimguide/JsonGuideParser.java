@@ -36,6 +36,10 @@ public class JsonGuideParser
 	private static final int MAX_EPISODES = 500;
 	private static final int MAX_SECTIONS_PER_CHAPTER = 500;
 	private static final int MAX_TEXT = 400;
+	/** Longest chapter/section title kept; real titles are under 80 characters. */
+	private static final int MAX_TITLE = 200;
+	/** Longest items_needed list carried on a step; the longest real one is 318 characters. */
+	private static final int MAX_ITEMS_NEEDED = 512;
 	/** Fragments shorter than this fold into their neighbor instead of standing alone. */
 	private static final int MIN_FRAGMENT = 12;
 	/** Sentences longer than this get a secondary split at comma boundaries. */
@@ -71,12 +75,19 @@ public class JsonGuideParser
 		for (int i = 0; i < text.length(); i++)
 		{
 			char c = text.charAt(i);
-			if (!Character.isWhitespace(c))
+			// a leading byte-order mark is not part of the document
+			if (!Character.isWhitespace(c) && !(i == 0 && c == '\uFEFF'))
 			{
 				return c == '{';
 			}
 		}
 		return false;
+	}
+
+	/** The parser library rejects a byte-order mark; files saved by some editors carry one. */
+	private static String withoutBom(String text)
+	{
+		return !text.isEmpty() && text.charAt(0) == '\uFEFF' ? text.substring(1) : text;
 	}
 
 	/** True when the text is a JSON guide this parser understands. */
@@ -90,7 +101,7 @@ public class JsonGuideParser
 		{
 			// instance API, not JsonParser.parseString: the client bundles an
 			// older gson where the static method does not exist
-			JsonElement root = new JsonParser().parse(text);
+			JsonElement root = new JsonParser().parse(withoutBom(text));
 			return root.isJsonObject() && root.getAsJsonObject().has("chapters");
 		}
 		catch (Exception e)
@@ -114,7 +125,7 @@ public class JsonGuideParser
 		JsonObject root;
 		try
 		{
-			JsonElement parsed = new JsonParser().parse(text);
+			JsonElement parsed = new JsonParser().parse(withoutBom(text));
 			if (!parsed.isJsonObject() || !parsed.getAsJsonObject().has("chapters"))
 			{
 				return null;
@@ -137,7 +148,7 @@ public class JsonGuideParser
 		JsonObject root;
 		try
 		{
-			JsonElement parsed = new JsonParser().parse(text);
+			JsonElement parsed = new JsonParser().parse(withoutBom(text));
 			if (!parsed.isJsonObject())
 			{
 				return new Guide();
@@ -176,7 +187,7 @@ public class JsonGuideParser
 				guide.markTruncated();
 				continue;
 			}
-			GuideEpisode episode = new GuideEpisode(chapterNo, WikitextParser.sanitizeDisplay(optString(chapter, "title", "Chapter " + chapterNo)));
+			GuideEpisode episode = new GuideEpisode(chapterNo, title(optString(chapter, "title", "Chapter " + chapterNo)));
 
 			// a chapter may hold sections, or steps directly. Banks and the
 			// episode itself attach to the model only once populated, so a
@@ -214,7 +225,7 @@ public class JsonGuideParser
 						guide.markTruncated();
 						continue;
 					}
-					String title = WikitextParser.sanitizeDisplay(optString(section, "title", "Section " + sectionNo));
+					String title = title(optString(section, "title", "Section " + sectionNo));
 					GuideBank bank = new GuideBank("C" + chapterNo + ".S" + sectionNo, title, chapterNo);
 					stepCount = addSteps(guide, bank, optArray(section, "steps"), stepCount);
 					if (!bank.getSteps().isEmpty())
@@ -245,7 +256,11 @@ public class JsonGuideParser
 		//   occByText   - the CURRENT (sentence-split) step texts
 		//   occByOld    - the pre-split verbatim paragraph texts
 		//   occByLegacy - the space-joined paragraph texts (oldest parser)
+		//   occByPrev   - the step texts of the previous generation (same
+		//                 sentence split, but every ">" dropped and every
+		//                 "!" ending a sentence, quest names included)
 		java.util.Map<String, Integer> occByText = new java.util.HashMap<>();
+		java.util.Map<String, Integer> occByPrev = new java.util.HashMap<>();
 		java.util.Map<String, Integer> occByOld = new java.util.HashMap<>();
 		java.util.Map<String, Integer> occByLegacy = new java.util.HashMap<>();
 		for (JsonElement stepEl : steps)
@@ -261,19 +276,20 @@ public class JsonGuideParser
 			}
 			JsonObject step = stepEl.getAsJsonObject();
 
-			String raw = joinContent(optArray(step, "content"), false);
-			String legacyRaw = joinContent(optArray(step, "content"), true);
-			String itemsSuffix = itemsSuffix(step);
+			String raw = joinContent(optArray(step, "content"), false, false);
+			String prevRaw = joinContent(optArray(step, "content"), false, true);
+			String legacyRaw = joinContent(optArray(step, "content"), true, true);
 			// KNOWN BOUNDED EDGE: a step is added (and all occurrence counters
-			// advanced) only when the NEW verbatim text is non-empty. If runs
+			// advanced) only when the verbatim text is non-empty. If runs
 			// concatenate into a fully-strippable tag while the old space-joined
 			// form did not (pathological input), later duplicate-text legacy
 			// keys shift and miss migration - the user re-ticks those steps.
-			if (!raw.isEmpty())
+			if (!raw.isEmpty() || !prevRaw.isEmpty())
 			{
-				stepCount = addParagraph(guide, bank, raw, legacyRaw, itemsSuffix, 0,
+				stepCount = addParagraph(guide, bank, raw, prevRaw, legacyRaw,
+					itemsSuffix(step, false), itemsSuffix(step, true), itemsNeeded(step), 0,
 					videoLinks(optArray(step, "content")),
-					occByText, occByOld, occByLegacy, stepCount);
+					occByText, occByPrev, occByOld, occByLegacy, stepCount);
 			}
 
 			JsonArray nested = optArray(step, "nestedContent");
@@ -291,14 +307,15 @@ public class JsonGuideParser
 						continue;
 					}
 					JsonObject n = nEl.getAsJsonObject();
-					String nRaw = joinContent(optArray(n, "content"), false);
-					String nLegacy = joinContent(optArray(n, "content"), true);
-					if (!nRaw.isEmpty())
+					String nRaw = joinContent(optArray(n, "content"), false, false);
+					String nPrev = joinContent(optArray(n, "content"), false, true);
+					String nLegacy = joinContent(optArray(n, "content"), true, true);
+					if (!nRaw.isEmpty() || !nPrev.isEmpty())
 					{
 						int depth = Math.max(1, Math.min(4, optInt(n, "level", 1)));
-						stepCount = addParagraph(guide, bank, nRaw, nLegacy, "", depth,
+						stepCount = addParagraph(guide, bank, nRaw, nPrev, nLegacy, "", "", null, depth,
 							videoLinks(optArray(n, "content")),
-							occByText, occByOld, occByLegacy, stepCount);
+							occByText, occByPrev, occByOld, occByLegacy, stepCount);
 					}
 				}
 			}
@@ -313,51 +330,60 @@ public class JsonGuideParser
 	 * Sentences still longer than LONG_FRAGMENT split again at comma
 	 * boundaries, the continuation chunks indented one level.
 	 *
-	 * Both generations of the paragraph's OLD key are recorded for progress
+	 * Every earlier generation of the paragraph's keys is recorded for progress
 	 * migration: the pre-split verbatim key maps to all split children via
 	 * {@link Guide#getLegacySplitKeys()}, and the oldest space-joined key
 	 * chains onto it via {@link Guide#getLegacyStepKeys()} (replayed first, so
-	 * either generation of saved progress lands on the split steps).
+	 * either generation of saved progress lands on the split steps). The
+	 * previous sentence-split generation is rebuilt from {@code prevRaw} and
+	 * mapped step by step through the split map too - it is replayed AFTER
+	 * the legacy map, so an oldest-generation key that chains onto an unsplit
+	 * paragraph's key still reaches the current step.
+	 *
+	 * @param raw     the paragraph as displayed now
+	 * @param prevRaw the paragraph as the previous generation sanitized it;
+	 *                every OLD key is computed from this, never from raw
 	 */
-	private static int addParagraph(Guide guide, GuideBank bank, String raw, String legacyRaw,
-		String itemsSuffix, int depth, java.util.List<String[]> videoLinks,
-		java.util.Map<String, Integer> occByText,
+	private static int addParagraph(Guide guide, GuideBank bank, String raw, String prevRaw, String legacyRaw,
+		String itemsSuffix, String prevSuffix, String itemsNeeded, int depth, java.util.List<String[]> videoLinks,
+		java.util.Map<String, Integer> occByText, java.util.Map<String, Integer> occByPrev,
 		java.util.Map<String, Integer> occByOld, java.util.Map<String, Integer> occByLegacy, int stepCount)
 	{
 		if (raw.length() > MAX_PARAGRAPH)
 		{
 			raw = raw.substring(0, MAX_PARAGRAPH - 1) + "…";
 		}
+		if (prevRaw.length() > MAX_PARAGRAPH)
+		{
+			prevRaw = prevRaw.substring(0, MAX_PARAGRAPH - 1) + "…";
+		}
 		java.util.List<String> newKeys = new java.util.ArrayList<>();
 		java.util.List<GuideStep> added = new java.util.ArrayList<>();
-		boolean first = true;
-		for (String fragment : splitDigestible(raw))
+		boolean cutShort = false;
+		for (String[] piece : paragraphTexts(raw, itemsSuffix, false))
 		{
-			boolean fragmentHead = true;
-			// the first fragment carries the items suffix: reserve room for it
-			// so the combined text can never reach the MAX_TEXT cap
-			for (String chunk : chunkAtCommas(fragment, first ? itemsSuffix.length() : 0))
+			if (stepCount >= MAX_STEPS)
 			{
-				if (stepCount >= MAX_STEPS)
-				{
-					// mid-paragraph cap: later chunks are dropped - admit it,
-					// this can be the LAST element with no outer check left
-					guide.markTruncated();
-					break;
-				}
-				// the items suffix stays on the paragraph's first step only
-				String text = first ? chunk + itemsSuffix : chunk;
-				int d = fragmentHead ? depth : Math.min(4, depth + 1);
-				GuideStep guideStep = addStep(bank, text, d, occByText);
-				// bare video URLs in the text itself (some runs carry the URL
-				// as their visible text)
-				guideStep.setVideoUrl(VideoLinks.firstVideoUrl(guideStep.getText()));
-				newKeys.add(guideStep.getKey());
-				added.add(guideStep);
-				stepCount++;
-				first = false;
-				fragmentHead = false;
+				// mid-paragraph cap: later chunks are dropped - admit it,
+				// this can be the LAST element with no outer check left
+				guide.markTruncated();
+				cutShort = true;
+				break;
 			}
+			int d = piece[1].isEmpty() ? Math.min(4, depth + 1) : depth;
+			GuideStep guideStep = addStep(bank, piece[0], d, occByText);
+			// bare video URLs in the text itself (some runs carry the URL
+			// as their visible text)
+			guideStep.setVideoUrl(VideoLinks.firstVideoUrl(guideStep.getText()));
+			if (added.isEmpty())
+			{
+				// the complete list: the "(Items: ...)" text above is cut to
+				// fit the row, this is what the item grid parses
+				guideStep.setItemsNeeded(itemsNeeded);
+			}
+			newKeys.add(guideStep.getKey());
+			added.add(guideStep);
+			stepCount++;
 		}
 
 		// linked runs ("Getting Rats for 2t Oaks" -> youtube): attach each
@@ -399,7 +425,12 @@ public class JsonGuideParser
 		// duplicate is indistinguishable from new-format progress on the
 		// child, so the identical-text child shows ticked in its place - the
 		// user re-ticks at most one step per duplicated sentence.
-		String oldText = cap(cap(raw) + itemsSuffix);
+		if (prevRaw.isEmpty())
+		{
+			// no earlier generation ever saw this paragraph
+			return stepCount;
+		}
+		String oldText = cap(cap(prevRaw) + prevSuffix);
 		int oldOcc = occByOld.merge(oldText, 1, Integer::sum) - 1;
 		String oldKey = bank.getId() + "#" + Integer.toHexString(oldText.hashCode()) + "#" + oldOcc;
 		if (!newKeys.isEmpty() && !(newKeys.size() == 1 && newKeys.get(0).equals(oldKey)))
@@ -407,10 +438,59 @@ public class JsonGuideParser
 			guide.getLegacySplitKeys().put(oldKey, newKeys);
 		}
 
+		// the previous sentence-split generation, step by step. Steps whose
+		// text is unchanged pair off from both ends; whatever differs in the
+		// middle (a reworded step, two steps now joined) maps each old key to
+		// every current step of that middle stretch.
+		java.util.List<String> prevTexts = new java.util.ArrayList<>();
+		java.util.List<String> prevKeys = new java.util.ArrayList<>();
+		for (String[] piece : paragraphTexts(prevRaw, prevSuffix, true))
+		{
+			int occ = occByPrev.merge(piece[0], 1, Integer::sum) - 1;
+			prevTexts.add(piece[0]);
+			prevKeys.add(bank.getId() + "#" + Integer.toHexString(piece[0].hashCode()) + "#" + occ);
+		}
+		if (!cutShort && !newKeys.isEmpty() && !prevKeys.equals(newKeys))
+		{
+			int n = prevKeys.size();
+			int m = newKeys.size();
+			int head = 0;
+			while (head < n && head < m && prevTexts.get(head).equals(added.get(head).getText()))
+			{
+				head++;
+			}
+			int tail = 0;
+			while (tail < n - head && tail < m - head
+				&& prevTexts.get(n - 1 - tail).equals(added.get(m - 1 - tail).getText()))
+			{
+				tail++;
+			}
+			for (int i = 0; i < n; i++)
+			{
+				java.util.List<String> targets;
+				if (i < head)
+				{
+					targets = java.util.Collections.singletonList(newKeys.get(i));
+				}
+				else if (i >= n - tail)
+				{
+					targets = java.util.Collections.singletonList(newKeys.get(m - (n - i)));
+				}
+				else
+				{
+					targets = new java.util.ArrayList<>(newKeys.subList(head, m - tail));
+				}
+				if (!targets.isEmpty() && !(targets.size() == 1 && targets.get(0).equals(prevKeys.get(i))))
+				{
+					guide.getLegacySplitKeys().putIfAbsent(prevKeys.get(i), targets);
+				}
+			}
+		}
+
 		// the OLDEST parser joined formatting runs with spaces; its key chains
 		// onto the previous parser's key (migrateLegacyKeys runs before
 		// migrateSplitKeys, so gen1 -> gen2 -> split children resolves fully)
-		String legacyText = cap(cap(legacyRaw) + itemsSuffix);
+		String legacyText = cap(cap(legacyRaw) + prevSuffix);
 		int legacyOcc = occByLegacy.merge(legacyText, 1, Integer::sum) - 1;
 		if (!legacyText.equals(oldText) || legacyOcc != oldOcc)
 		{
@@ -482,6 +562,15 @@ public class JsonGuideParser
 	 */
 	static java.util.List<String> splitDigestible(String text)
 	{
+		return splitDigestible(text, false);
+	}
+
+	/**
+	 * @param legacy split exactly as the previous generation did (every "!"
+	 *               and "?" ends a sentence), for rebuilding its step keys
+	 */
+	static java.util.List<String> splitDigestible(String text, boolean legacy)
+	{
 		boolean[] prot = protectedSpans(text);
 		java.util.List<String> parts = new java.util.ArrayList<>();
 		int start = 0;
@@ -490,7 +579,8 @@ public class JsonGuideParser
 		{
 			char c = text.charAt(i);
 			if ((c == '.' || c == '!' || c == '?') && !prot[i] && i + 1 < n
-				&& text.charAt(i + 1) == ' ' && !abbreviationBefore(text, i))
+				&& text.charAt(i + 1) == ' ' && !abbreviationBefore(text, i)
+				&& (legacy || c == '.' || !continuesSentence(text, i + 1)))
 			{
 				String frag = text.substring(start, i + 1).trim();
 				if (!frag.isEmpty())
@@ -519,6 +609,50 @@ public class JsonGuideParser
 			}
 		}
 		return merged;
+	}
+
+	/**
+	 * One paragraph as its ordered step texts: {text, "h" when the step heads
+	 * a sentence, "" for a continuation chunk}. The items suffix rides on the
+	 * first step only.
+	 */
+	private static java.util.List<String[]> paragraphTexts(String raw, String itemsSuffix, boolean legacy)
+	{
+		java.util.List<String[]> out = new java.util.ArrayList<>();
+		if (raw.isEmpty())
+		{
+			return out;
+		}
+		boolean first = true;
+		for (String fragment : splitDigestible(raw, legacy))
+		{
+			boolean fragmentHead = true;
+			// the first fragment carries the items suffix: reserve room for it
+			// so the combined text can never reach the MAX_TEXT cap
+			for (String chunk : chunkAtCommas(fragment, first ? itemsSuffix.length() : 0))
+			{
+				out.add(new String[]{cap(first ? chunk + itemsSuffix : chunk), fragmentHead ? "h" : ""});
+				first = false;
+				fragmentHead = false;
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * True when the text after a "!" or "?" carries the same sentence on - it
+	 * resumes in lower case or with a parenthetical. Quest names end in those
+	 * marks ("Start Wanted! and continue it until ..."), and splitting there
+	 * strands the rest of the instruction as its own checkbox.
+	 */
+	private static boolean continuesSentence(String text, int from)
+	{
+		int i = from;
+		while (i < text.length() && text.charAt(i) == ' ')
+		{
+			i++;
+		}
+		return i < text.length() && (Character.isLowerCase(text.charAt(i)) || text.charAt(i) == '(');
 	}
 
 	/**
@@ -672,7 +806,7 @@ public class JsonGuideParser
 	 * own spacing. legacySpacing reproduces the old space-inserting behavior
 	 * solely so progress keys recorded under it can be migrated.
 	 */
-	private static String joinContent(JsonArray content, boolean legacySpacing)
+	private static String joinContent(JsonArray content, boolean legacySpacing, boolean legacySanitize)
 	{
 		if (content == null)
 		{
@@ -700,11 +834,41 @@ public class JsonGuideParser
 		}
 		// NOT capped here: the sentence splitter needs the full paragraph.
 		// Old-parser keys re-apply the cap via cap() where they are rebuilt.
-		return WikitextParser.sanitizeDisplay(sb.toString());
+		return WikitextParser.sanitizeDisplay(sb.toString(), legacySanitize);
 	}
 
 	/** " (Items: ...)" from metadata.items_needed when it's a real list. */
-	private static String itemsSuffix(JsonObject step)
+	private static String itemsSuffix(JsonObject step, boolean legacySanitize)
+	{
+		String items = rawItems(step);
+		if (items.isEmpty())
+		{
+			return "";
+		}
+		String clean = WikitextParser.sanitizeDisplay(items, legacySanitize);
+		if (clean.length() > 120)
+		{
+			clean = clean.substring(0, 119) + "…";
+		}
+		return " (Items: " + clean + ")";
+	}
+
+	/**
+	 * The whole items_needed list, or null when the step has none. The step
+	 * TEXT keeps only the first 120 characters (it is part of the step key and
+	 * has to fit the row); two in five real lists are longer than that.
+	 */
+	private static String itemsNeeded(JsonObject step)
+	{
+		String clean = WikitextParser.sanitizeDisplay(rawItems(step));
+		if (clean.isEmpty())
+		{
+			return null;
+		}
+		return clean.length() > MAX_ITEMS_NEEDED ? clean.substring(0, MAX_ITEMS_NEEDED) : clean;
+	}
+
+	private static String rawItems(JsonObject step)
 	{
 		JsonElement m = step.get("metadata");
 		if (m == null || !m.isJsonObject())
@@ -712,16 +876,17 @@ public class JsonGuideParser
 			return "";
 		}
 		String items = optString(m.getAsJsonObject(), "items_needed", "");
-		if (items.isEmpty() || items.equalsIgnoreCase("none") || items.equalsIgnoreCase("n/a"))
+		if (items.equalsIgnoreCase("none") || items.equalsIgnoreCase("n/a"))
 		{
 			return "";
 		}
-		String clean = WikitextParser.sanitizeDisplay(items);
-		if (clean.length() > 120)
-		{
-			clean = clean.substring(0, 119) + "…";
-		}
-		return " (Items: " + clean + ")";
+		return items;
+	}
+
+	private static String title(String raw)
+	{
+		String clean = WikitextParser.sanitizeDisplay(raw);
+		return clean.length() > MAX_TITLE ? clean.substring(0, MAX_TITLE - 1) + "…" : clean;
 	}
 
 	private static JsonArray optArray(JsonObject o, String key)
