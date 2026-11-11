@@ -46,6 +46,7 @@ import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ClientShutdown;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.events.ProfileChanged;
 import net.runelite.client.events.RuneScapeProfileChanged;
@@ -386,7 +387,15 @@ public class HcimGuidePlugin extends Plugin
 	private enum GuidanceBand { NEAR, MEDIUM, FAR }
 	private GuidanceBand guidanceBand = GuidanceBand.FAR;
 	private volatile boolean questHelperActiveCached;
-	private volatile int questHelperCheckedTick = Integer.MIN_VALUE;
+	/** Quest Helper's enabled state is re-read at most once per this many ticks. */
+	static final int QUEST_HELPER_RECHECK_TICKS = 20;
+	/**
+	 * "Never checked" value. Must stay within one interval of tick 0: a far
+	 * sentinel such as Integer.MIN_VALUE overflows the age subtraction and
+	 * makes the never-filled cache look fresh forever.
+	 */
+	static final int QUEST_HELPER_NEVER_CHECKED = -QUEST_HELPER_RECHECK_TICKS;
+	private volatile int questHelperCheckedTick = QUEST_HELPER_NEVER_CHECKED;
 
 	// icon prefetch (small buffer of upcoming banks; executor-side warm-up)
 	private volatile String lastPrefetchKey;
@@ -844,6 +853,14 @@ public class HcimGuidePlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		// overlays come out of the render list FIRST: they render on the
+		// client thread, and the caches and component lists cleared below (on
+		// the EDT) are ones a frame still in the list would be reading
+		overlayManager.remove(targetOverlay);
+		overlayManager.remove(hudOverlay);
+		overlayManager.remove(directionArrowOverlay);
+		overlayManager.remove(stepNavOverlay);
+		overlayManager.remove(dialogOptionOverlay);
 		PanelFonts.clear();
 		OverlayFonts.clear();
 		iconResolver.reset();
@@ -866,11 +883,6 @@ public class HcimGuidePlugin extends Plugin
 		warnedLoggedOutEdit = false;
 		active = false;
 		lifecycle.end();
-		overlayManager.remove(targetOverlay);
-		overlayManager.remove(hudOverlay);
-		overlayManager.remove(directionArrowOverlay);
-		overlayManager.remove(stepNavOverlay);
-		overlayManager.remove(dialogOptionOverlay);
 		inputHandler.unregister();
 		// stop in-flight downloads: guarded callbacks would decline to apply
 		// their results anyway, but the requests themselves should not keep
@@ -912,6 +924,7 @@ public class HcimGuidePlugin extends Plugin
 			undoSkipped = null;
 			undoPhaseIds = null;
 			undoGuideId = null;
+			undoProfileKey = null;
 			undoLabel = null;
 		}
 		tripReadyVisible = false;
@@ -939,6 +952,7 @@ public class HcimGuidePlugin extends Plugin
 		clearLocationSuppression();
 		locationSnoozeUntilTick = 0;
 		waypointArrivalTracker.reset();
+		waypointArrivalTracker.requireLeaveBeforeArrival(null);
 		activeWaypointIndexes.clear();
 		activeBankCache = null;
 		activeBankCacheGuide = null;
@@ -1123,7 +1137,22 @@ public class HcimGuidePlugin extends Plugin
 	 */
 	void importSelectedFromWiki()
 	{
-		GuideRegistry.Entry entry = guideRegistry.byId(currentGuideId);
+		importGuideFromWiki(currentGuideId);
+	}
+
+	/**
+	 * Download+import for one explicitly named guide. The id is a parameter,
+	 * never "whatever is selected by now": a caller that just added a guide
+	 * must not be able to fetch into - and overwrite the snapshot of - a
+	 * different, previously selected one.
+	 */
+	private void importGuideFromWiki(String requestedGuideId)
+	{
+		if (!active)
+		{
+			return;
+		}
+		GuideRegistry.Entry entry = guideRegistry.byId(requestedGuideId);
 		if (entry == null || !entry.isDownloadable())
 		{
 			runOnSwing(() ->
@@ -1187,14 +1216,25 @@ public class HcimGuidePlugin extends Plugin
 				GuideRegistry.Entry entry = guideRegistry.add(WikiUrl.displayName(pageTitle), pageTitle);
 				runOnSwing(() -> panel.setGuides(guideRegistry.list(), entry.getId()));
 				selectGuideInternal(entry.getId(), false);
+				if (!entry.getId().equals(currentGuideId))
+				{
+					// the selection did not take, so the previous guide is
+					// still the selected one - importing must not touch it
+					runOnSwing(() ->
+						panel.setStatus("Could not select the new guide - nothing was imported"));
+					return;
+				}
 				if (!guideService.hasSnapshot(entry.getId()))
 				{
-					importSelectedFromWiki();
+					importGuideFromWiki(entry.getId());
 				}
 			}
-			catch (IllegalArgumentException e)
+			catch (RuntimeException e)
 			{
-				runOnSwing(() -> panel.setStatus(e.getMessage()));
+				// a bad link (IllegalArgumentException) or a full guide list
+				// (IllegalStateException): either way say why nothing was added
+				final String reason = e.getMessage() != null ? e.getMessage() : "Could not add the guide";
+				runOnSwing(() -> panel.setStatus(reason));
 			}
 		});
 	}
@@ -1225,7 +1265,18 @@ public class HcimGuidePlugin extends Plugin
 	{
 		runAsync(() ->
 		{
-			GuideRegistry.Entry entry = guideRegistry.add(title, null);
+			final GuideRegistry.Entry entry;
+			try
+			{
+				entry = guideRegistry.add(title, null);
+			}
+			catch (RuntimeException e)
+			{
+				// e.g. the guide list is full - say why nothing was added
+				final String reason = e.getMessage() != null ? e.getMessage() : "Could not add the guide";
+				runOnSwing(() -> panel.setStatus(reason));
+				return;
+			}
 			runOnSwing(() -> panel.setGuides(guideRegistry.list(), entry.getId()));
 			selectGuideInternal(entry.getId(), false);
 			runOnSwing(() -> panel.setStatus("Importing guide from file..."));
@@ -1559,20 +1610,8 @@ public class HcimGuidePlugin extends Plugin
 				final String note = decoded.guideId != null && !decoded.guideId.equals(destinationGuideId)
 					? " (note: exported from a different guide)"
 					: "";
-				Set<String> validKeys = new HashSet<>();
-				for (GuideEpisode episode : destinationGuide.getEpisodes())
-				{
-					for (GuideBank bank : episode.getBanks())
-					{
-						for (GuideStep step : bank.getSteps())
-						{
-							validKeys.add(step.getKey());
-						}
-					}
-				}
-				Set<String> imported = new HashSet<>(decoded.keys);
-				imported.retainAll(validKeys);
-				int ignored = decoded.keys.size() - imported.size();
+				Set<String> imported = importableProgressKeys(destinationGuide, decoded.keys);
+				int ignored = Math.max(0, decoded.keys.size() - imported.size());
 				// Decoding and validation run off the EDT and may take long enough for
 				// the user to switch guides. Re-check immediately before mutating the
 				// shared progress set so another guide can never receive this import.
@@ -1620,6 +1659,33 @@ public class HcimGuidePlugin extends Plugin
 				runOnSwing(() -> panel.setStatus("Import failed: " + e.getMessage()));
 			}
 		});
+	}
+
+	/**
+	 * The keys of a decoded progress code that apply to {@code guide}. A code
+	 * may have been exported under an earlier parser's keys, so it replays
+	 * through the same migrations as stored progress BEFORE unknown keys are
+	 * dropped - otherwise a backup taken before a re-key restores incomplete.
+	 */
+	static Set<String> importableProgressKeys(Guide guide, Set<String> decodedKeys)
+	{
+		Set<String> imported = new HashSet<>(decodedKeys);
+		ProgressKeyMigration.migrateLegacyNotes(guide, imported);
+		ProgressKeyMigration.migrateLegacyKeys(guide, imported);
+		ProgressKeyMigration.migrateSplitKeys(guide, imported);
+		Set<String> validKeys = new HashSet<>();
+		for (GuideEpisode episode : guide.getEpisodes())
+		{
+			for (GuideBank bank : episode.getBanks())
+			{
+				for (GuideStep step : bank.getSteps())
+				{
+					validKeys.add(step.getKey());
+				}
+			}
+		}
+		imported.retainAll(validKeys);
+		return imported;
 	}
 
 	/**
@@ -1923,6 +1989,15 @@ public class HcimGuidePlugin extends Plugin
 		loadWaypointIndexes(locations);
 		targetNamesNorm = namesNorm;
 		currentGuide = guide;
+		// A pin whose step is not in this model (a re-import changed its text)
+		// can never resolve to guidance, and no row would show it as pinned
+		// for the user to clear - so it would silence every arrow for good.
+		String pinned = pinnedStepKey;
+		if (pinned != null && !parsedSteps.containsKey(pinned))
+		{
+			pinStep(null);
+			runOnSwing(() -> panel.onPinChanged(null));
+		}
 		hudItemsKey = null; // re-derive the HUD's current-step items
 		boolean restoredNotesProgress = migrateLegacyNotesProgress(guide);
 		activeBankDirty = true;
@@ -2014,11 +2089,19 @@ public class HcimGuidePlugin extends Plugin
 
 	private void loadWaypointIndexes(Map<String, StepLocationPlan> plans)
 	{
-		activeWaypointIndexes.clear();
 		if (!config.persistWaypointIndex())
 		{
+			// nothing stored to reload from: keep this session's positions
+			// that still fit the rebuilt plans, rather than restarting every
+			// route whenever the plans are rebuilt
+			activeWaypointIndexes.entrySet().removeIf(e ->
+			{
+				StepLocationPlan plan = plans.get(e.getKey());
+				return plan == null || e.getValue() >= plan.size();
+			});
 			return;
 		}
+		activeWaypointIndexes.clear();
 		// one store parse for the whole guide, not one per plan entry
 		Map<String, Integer> saved = customLocationStore.getActiveIndexesForGuide(currentGuideId);
 		for (Map.Entry<String, StepLocationPlan> entry : plans.entrySet())
@@ -2151,9 +2234,11 @@ public class HcimGuidePlugin extends Plugin
 						{
 							break outer;
 						}
-						if (isCompleted(step.getKey()))
+						// skipped steps are stepped OVER, not unticked - also when
+						// they carry a tick from before they were skipped
+						if (isCompleted(step.getKey()) && !isSkipped(step.getKey()))
 						{
-							lastDone = step; // skipped steps are stepped OVER, not unticked
+							lastDone = step;
 						}
 					}
 				}
@@ -2192,6 +2277,11 @@ public class HcimGuidePlugin extends Plugin
 				}
 			}
 			resetGuidanceForNavigation();
+			// Arrival is a level, not an edge: the player is usually still
+			// standing where the step completed, and would be "arrived" again
+			// two ticks later. The rewound step re-arms only once they leave.
+			final String rewoundKey = lastDone.getKey();
+			runOnClientThread(() -> waypointArrivalTracker.requireLeaveBeforeArrival(rewoundKey));
 		}
 		runOnSwing(() ->
 		{
@@ -2841,9 +2931,10 @@ public class HcimGuidePlugin extends Plugin
 						pinnedChanged = s.getKey();
 					}
 				}
-				else
+				else if (completedSteps.remove(s.getKey()))
 				{
-					completedSteps.remove(s.getKey());
+					// only a step this call actually unticks is vetoed: a
+					// never-completed one must keep its auto-completion
 					autoSuppressed.add(s.getKey());
 				}
 			}
@@ -2910,11 +3001,9 @@ public class HcimGuidePlugin extends Plugin
 		}
 		resetExecutionPhase(stepKey, false);
 		persistExecutionPhaseCursors();
-		if (skipped)
-		{
-			// a skipped step must never auto-complete out from under the player
-			autoSuppressed.add(stepKey);
-		}
+		// No auto-completion veto is recorded for a skip: isStepDone() already
+		// keeps a skipped step out of every automatic path, and a veto would
+		// outlive the unskip and silently disable the step for the session.
 		activeBankDirty = true;
 		stepHighlightsDirty = true;
 		persistSkippedSteps();
@@ -2968,7 +3057,8 @@ public class HcimGuidePlugin extends Plugin
 		{
 			json = configManager.getRSProfileConfiguration(HcimGuideConfig.GROUP, key);
 		}
-		if (json == null)
+		if (json == null && (!config.perCharacterProgress()
+			|| configManager.getRSProfileKey() == null || sharedStoreMaySeed(key, null)))
 		{
 			json = configManager.getConfiguration(HcimGuideConfig.GROUP, key);
 		}
@@ -2994,7 +3084,15 @@ public class HcimGuidePlugin extends Plugin
 		// persistCompletedSteps; same per-character routing as progress
 		synchronized (skippedSteps)
 		{
+			if (!active || progressBoundToAnotherStore())
+			{
+				return;
+			}
 			String json = gson.toJson(skippedSteps);
+			if (!storableState(skippedSteps.size(), skippedSteps, json))
+			{
+				return;
+			}
 			if (config.perCharacterProgress() && configManager.getRSProfileKey() != null)
 			{
 				configManager.setRSProfileConfiguration(HcimGuideConfig.GROUP, skippedKey(), json);
@@ -3078,21 +3176,38 @@ public class HcimGuidePlugin extends Plugin
 		{
 			return;
 		}
-		String json = gson.toJson(new HashMap<>(activePhaseIds));
-		if (config.perCharacterProgress() && configManager.getRSProfileKey() != null)
+		// snapshot AND write under one lock: the EDT (checkbox) and the client
+		// thread (phase advance) both persist, and an older snapshot landing
+		// after a newer one would leave a stale cursor in the store
+		synchronized (activePhaseIds)
 		{
-			// same cross-profile guard as writeProgressJson: phase cursors and
+			if (!active)
+			{
+				return;
+			}
+			// same cross-store guard as writeProgressJson: phase cursors and
 			// completions must not desynchronize across a character switch
-			if (!java.util.Objects.equals(loadedProgressProfileKey, configManager.getRSProfileKey()))
+			if (progressBoundToAnotherStore())
 			{
 				profileReloadPending = true;
 				return;
 			}
-			configManager.setRSProfileConfiguration(HcimGuideConfig.GROUP, executionPhaseKey(), json);
-		}
-		else
-		{
-			configManager.setConfiguration(HcimGuideConfig.GROUP, executionPhaseKey(), json);
+			Map<String, String> snapshot = new HashMap<>(activePhaseIds);
+			String json = gson.toJson(snapshot);
+			List<String> stored = new ArrayList<>(snapshot.keySet());
+			stored.addAll(snapshot.values());
+			if (!storableState(snapshot.size(), stored, json))
+			{
+				return;
+			}
+			if (config.perCharacterProgress() && configManager.getRSProfileKey() != null)
+			{
+				configManager.setRSProfileConfiguration(HcimGuideConfig.GROUP, executionPhaseKey(), json);
+			}
+			else
+			{
+				configManager.setConfiguration(HcimGuideConfig.GROUP, executionPhaseKey(), json);
+			}
 		}
 	}
 
@@ -3172,10 +3287,7 @@ public class HcimGuidePlugin extends Plugin
 		boolean guided = stepKey.equals(guidedStepKey());
 		activePhaseIds.put(stepKey, next.getId());
 		activeWaypointIndexes.remove(stepKey);
-		if (config.persistWaypointIndex())
-		{
-			customLocationStore.setActiveIndex(currentGuideId, stepKey, 0);
-		}
+		persistWaypointIndex(stepKey, 0);
 		persistExecutionPhaseCursors();
 		routeDirty = true;
 		stepHighlightsDirty = true;
@@ -3226,7 +3338,35 @@ public class HcimGuidePlugin extends Plugin
 		{
 			persistExecutionPhaseCursors();
 		}
-		activeWaypointIndexes.remove(stepKey);
+		if (activeWaypointIndexes.remove(stepKey) != null)
+		{
+			// the remembered stop belongs to the run that just ended: a step
+			// reopened later must start at its first waypoint, and the stored
+			// copy would otherwise bring the old stop back after a restart
+			persistWaypointIndex(stepKey, 0);
+		}
+	}
+
+	/**
+	 * Store a step's active waypoint when that setting is on (0 clears the
+	 * entry). Never throws: the store refuses writes while no character
+	 * profile exists (early login), and losing only the remembered index must
+	 * not abort the caller's guidance hand-off half way.
+	 */
+	void persistWaypointIndex(String stepKey, int index)
+	{
+		if (stepKey == null || currentGuideId == null || !config.persistWaypointIndex())
+		{
+			return;
+		}
+		try
+		{
+			customLocationStore.setActiveIndex(currentGuideId, stepKey, index);
+		}
+		catch (RuntimeException e)
+		{
+			log.debug("Waypoint index persist unavailable", e);
+		}
 	}
 
 	String getExecutionPhaseStatus(String stepKey)
@@ -3247,6 +3387,8 @@ public class HcimGuidePlugin extends Plugin
 	private Set<String> undoSkipped;
 	private Map<String, String> undoPhaseIds;
 	private String undoGuideId;
+	/** Progress store ({@link #loadedProgressProfileKey}) the snapshot was taken from. */
+	private String undoProfileKey;
 	private String undoLabel;
 
 	/**
@@ -3256,6 +3398,15 @@ public class HcimGuidePlugin extends Plugin
 	 */
 	void snapshotBeforeBulk(String label)
 	{
+		// a bulk action the store is about to refuse must not replace the
+		// previous snapshot with one that undoes nothing
+		if (!canMutateProgressStore())
+		{
+			return;
+		}
+		// bulk administrative changes are not gameplay progress: the
+		// section-complete notice re-baselines instead of announcing the jump
+		sectionNoticeResetPending = true;
 		Set<String> completed;
 		Set<String> skipped;
 		Map<String, String> phaseIds = new HashMap<>(activePhaseIds);
@@ -3273,7 +3424,22 @@ public class HcimGuidePlugin extends Plugin
 			undoSkipped = skipped;
 			undoPhaseIds = phaseIds;
 			undoGuideId = currentGuideId;
+			undoProfileKey = loadedProgressProfileKey;
 			undoLabel = label;
+		}
+	}
+
+	/** Drop the bulk-undo snapshot (its progress store is no longer the active one). */
+	private void clearUndoSnapshot()
+	{
+		synchronized (undoLock)
+		{
+			undoCompleted = null;
+			undoSkipped = null;
+			undoPhaseIds = null;
+			undoGuideId = null;
+			undoProfileKey = null;
+			undoLabel = null;
 		}
 	}
 
@@ -3294,7 +3460,11 @@ public class HcimGuidePlugin extends Plugin
 		String label;
 		synchronized (undoLock)
 		{
-			if (undoCompleted == null || !currentGuideId.equals(undoGuideId))
+			// the snapshot restores only into the store it was taken from:
+			// after a character switch it would overwrite the other
+			// character's progress with this one's
+			if (undoCompleted == null || !currentGuideId.equals(undoGuideId)
+				|| !java.util.Objects.equals(undoProfileKey, loadedProgressProfileKey))
 			{
 				runOnSwing(() -> panel.setStatus("Nothing to undo"));
 				return false;
@@ -3387,6 +3557,11 @@ public class HcimGuidePlugin extends Plugin
 			{
 				return v;
 			}
+			if (configManager.getRSProfileKey() != null
+				&& !sharedStoreMaySeed(key, builtin ? HcimGuideConfig.COMPLETED_STEPS_KEY : null))
+			{
+				return null; // another character already took the shared copy
+			}
 		}
 		String v = configManager.getConfiguration(HcimGuideConfig.GROUP, key);
 		if (v == null && builtin)
@@ -3396,25 +3571,55 @@ public class HcimGuidePlugin extends Plugin
 		return v;
 	}
 
+	/**
+	 * The shared store is a template for the FIRST character only, so turning
+	 * per-character progress on does not appear to wipe an existing checklist.
+	 * Once any character holds its own value for the key, a character without
+	 * one starts fresh instead of inheriting the shared copy.
+	 */
+	private boolean sharedStoreMaySeed(String key, String legacyKey)
+	{
+		for (net.runelite.client.config.RuneScapeProfile profile : configManager.getRSProfiles())
+		{
+			if (configManager.getConfiguration(HcimGuideConfig.GROUP, profile.getKey(), key) != null
+				|| (legacyKey != null && configManager.getConfiguration(
+					HcimGuideConfig.GROUP, profile.getKey(), legacyKey) != null))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * True while the in-memory sets still represent a different store than the
+	 * one a write would land in. ConfigManager swaps the RS profile key before
+	 * RuneScapeProfileChanged reloads the sets, and drops it on logout: a write
+	 * in either window would stamp one character's progress onto another
+	 * character's store, or onto the shared one.
+	 */
+	private boolean progressBoundToAnotherStore()
+	{
+		return config.perCharacterProgress()
+			&& !java.util.Objects.equals(loadedProgressProfileKey, configManager.getRSProfileKey());
+	}
+
 	private void writeProgressJson(String json)
 	{
 		if (!canMutateProgressStore())
 		{
 			return;
 		}
+		// refuse and let the reload path re-sync
+		if (progressBoundToAnotherStore())
+		{
+			profileReloadPending = true;
+			log.warn("Guide Overlay: progress write skipped - store still bound "
+				+ "to the previous character; reload pending");
+			return;
+		}
 		if (config.perCharacterProgress() && configManager.getRSProfileKey() != null)
 		{
-			// During a character switch ConfigManager swaps the RS profile key
-			// before RuneScapeProfileChanged reloads the in-memory sets; a write
-			// in that window would stamp the OLD character's progress onto the
-			// NEW character's store. Refuse and let the reload path re-sync.
-			if (!java.util.Objects.equals(loadedProgressProfileKey, configManager.getRSProfileKey()))
-			{
-				profileReloadPending = true;
-				log.warn("Guide Overlay: progress write skipped - store still bound "
-					+ "to the previous character; reload pending");
-				return;
-			}
 			configManager.setRSProfileConfiguration(HcimGuideConfig.GROUP, progressKey(), json);
 		}
 		else
@@ -3496,8 +3701,59 @@ public class HcimGuidePlugin extends Plugin
 		// completedSteps, so holding it here is safe.
 		synchronized (completedSteps)
 		{
-			writeProgressJson(gson.toJson(completedSteps));
+			// shutDown clears this set under the same lock after dropping
+			// `active`: a mutation still in flight on another thread must not
+			// persist the emptied set over the real progress
+			if (!active)
+			{
+				return;
+			}
+			String json = gson.toJson(completedSteps);
+			if (storableState(completedSteps.size(), completedSteps, json))
+			{
+				writeProgressJson(json);
+			}
 		}
+	}
+
+	/** One-time flag so a state that cannot be stored does not log per write. */
+	private volatile boolean warnedUnstorableState;
+
+	/**
+	 * Whether a value may be written: the same caps the loaders enforce. A
+	 * value the next load would drop or truncate is refused here, visibly -
+	 * written, it would only look saved until the next restart.
+	 */
+	private boolean storableState(int entries, Iterable<String> keys, String json)
+	{
+		boolean storable = entries <= MAX_STORED_STATE_ENTRIES && json.length() <= MAX_STORED_STATE_CHARS;
+		if (storable)
+		{
+			for (String key : keys)
+			{
+				if (!validStoredStateKey(key))
+				{
+					storable = false;
+					break;
+				}
+			}
+		}
+		if (!storable)
+		{
+			if (!warnedUnstorableState)
+			{
+				warnedUnstorableState = true;
+				log.warn("Guide Overlay: saved state exceeds the storage limits and was not written");
+			}
+			runOnSwing(() ->
+			{
+				if (active && panel != null)
+				{
+					panel.setStatus("Not saved - this guide's progress exceeds the storage limits");
+				}
+			});
+		}
+		return storable;
 	}
 
 	/**
@@ -3513,6 +3769,15 @@ public class HcimGuidePlugin extends Plugin
 		log.debug("Guide Overlay: RuneScape profile event, hadPrevious={} hasNew={} managerKeyPresent={}",
 			event.getPreviousProfile() != null, event.getNewProfile() != null,
 			managerKey != null);
+		// the bank on record belongs to the previous character
+		stockTracker.resetBankColumn();
+		runAsync(() ->
+		{
+			if (active)
+			{
+				stockTracker.loadBankColumn();
+			}
+		});
 		if (!config.perCharacterProgress())
 		{
 			reloadProgressStore("RuneScapeProfileChanged/shared");
@@ -3520,9 +3785,10 @@ public class HcimGuidePlugin extends Plugin
 		}
 		if (event.getNewProfile() == null || managerKey == null)
 		{
-			profileProgressReady = false;
-			profileReloadPending = client.getGameState() == GameState.LOGGED_IN;
 			profileReloadAttempts = 0;
+			// no character selected: while still logged in this arms the tick
+			// retry; once logged out it swaps the sets to the shared store
+			reloadProgressStore("RuneScapeProfileChanged/none");
 			return;
 		}
 
@@ -3534,7 +3800,8 @@ public class HcimGuidePlugin extends Plugin
 			profileProgress = configManager.getRSProfileConfiguration(
 				HcimGuideConfig.GROUP, HcimGuideConfig.COMPLETED_STEPS_KEY);
 		}
-		if (profileProgress == null)
+		if (profileProgress == null && sharedStoreMaySeed(key,
+			GuideRegistry.BUILTIN_ID.equals(currentGuideId) ? HcimGuideConfig.COMPLETED_STEPS_KEY : null))
 		{
 			String shared = configManager.getConfiguration(HcimGuideConfig.GROUP, key);
 			if (shared == null && GuideRegistry.BUILTIN_ID.equals(currentGuideId))
@@ -3549,7 +3816,8 @@ public class HcimGuidePlugin extends Plugin
 		}
 
 		String skey = skippedKey();
-		if (configManager.getRSProfileConfiguration(HcimGuideConfig.GROUP, skey) == null)
+		if (configManager.getRSProfileConfiguration(HcimGuideConfig.GROUP, skey) == null
+			&& sharedStoreMaySeed(skey, null))
 		{
 			String sharedSkip = configManager.getConfiguration(HcimGuideConfig.GROUP, skey);
 			if (sharedSkip != null && !sharedSkip.isEmpty())
@@ -3575,17 +3843,61 @@ public class HcimGuidePlugin extends Plugin
 		// the newly activated config profile may still hold pre-parity panel
 		// font keys that startUp's one-time migration never saw
 		migratePanelFontConfig();
+		// the bulk-undo snapshot was taken from the previous profile's store
+		clearUndoSnapshot();
 		reloadProgressStore("RuneLite ProfileChanged");
 		customLocationStore.invalidate();
-		// Location pins are config-profile scoped too, so always rebuild them even
-		// when the two progress sets happen to compare equal.
+		// The managed bank tag, the fonts and every panel styling option are
+		// config-profile scoped as well; none of them arrives as a ConfigChanged
+		// the plugin reacts to when the whole profile is swapped or merged.
+		bankTagIntegration.invalidate();
+		PanelFonts.clear();
+		OverlayFonts.clear();
+		runOnSwing(() ->
+		{
+			if (panel != null)
+			{
+				panel.onConfigChanged();
+			}
+		});
 		runAsync(() ->
 		{
-			if (active)
+			if (!active)
 			{
+				return;
+			}
+			// So are the guide list and the selected guide: keep showing the
+			// previous profile's selection and progress would be read and
+			// written for a guide the new profile never selected.
+			String selected = configManager.getConfiguration(HcimGuideConfig.GROUP, "selectedGuide");
+			if (selected == null || guideRegistry.byId(selected) == null)
+			{
+				selected = GuideRegistry.BUILTIN_ID;
+			}
+			final String selectedFinal = selected;
+			runOnSwing(() -> panel.setGuides(guideRegistry.list(), selectedFinal));
+			if (!selected.equals(currentGuideId))
+			{
+				selectGuideInternal(selected, false);
+			}
+			else
+			{
+				// Location pins are config-profile scoped too, so always rebuild
+				// them even when the two progress sets happen to compare equal.
 				rebuildLocationPlans();
 			}
 		});
+	}
+
+	/**
+	 * RuneLite does not run shutDown when the client exits, and a session
+	 * usually ends by closing the window while still logged in - so the
+	 * locations learned since login are flushed here or lost.
+	 */
+	@Subscribe
+	public void onClientShutdown(ClientShutdown event)
+	{
+		event.waitFor(executor.submit(locationStore::saveIfDirty));
 	}
 
 	// ------------------------------------------------------------------ inventory tracking
@@ -3916,7 +4228,15 @@ public class HcimGuidePlugin extends Plugin
 			// switch) must not strand the pipeline with both flags down -
 			// that silently disables ALL auto-completion until relog
 			profileReloadPending = client.getGameState() == GameState.LOGGED_IN;
-			return;
+			if (profileReloadPending || loadedProgressProfileKey == null)
+			{
+				return;
+			}
+			// Logged out with a character's sets still in memory: fall
+			// through and load the shared store (a null profileKey selects
+			// it). The login screen edits the shared store by design, and an
+			// edit made against the previous character's sets would copy that
+			// character's whole progress into it.
 		}
 
 		Set<String> beforeCompleted = completedSnapshot();
@@ -3926,6 +4246,18 @@ public class HcimGuidePlugin extends Plugin
 
 		loadCompletedSteps();
 		loadSkippedSteps();
+		// the sets now represent the selected store: bind them before
+		// anything below may write
+		loadedProgressProfileKey = profileKey;
+		// Keys written by an earlier parser are replayed on EVERY store load,
+		// not only when the guide model loads: on a normal boot the model is
+		// applied at the login screen, against the shared store, before any
+		// character's own progress has been read.
+		Guide loadedGuide = currentGuide;
+		if (loadedGuide != null)
+		{
+			migrateLegacyNotesProgress(loadedGuide);
+		}
 		if (!stepExecutionPlans.isEmpty())
 		{
 			loadExecutionPhaseCursors(stepExecutionPlans);
@@ -3940,7 +4272,6 @@ public class HcimGuidePlugin extends Plugin
 			|| !beforeSkipped.equals(afterSkipped)
 			|| !beforePhases.equals(afterPhases);
 
-		loadedProgressProfileKey = profileKey;
 		profileReloadPending = false;
 		profileReloadAttempts = 0;
 
@@ -3960,9 +4291,19 @@ public class HcimGuidePlugin extends Plugin
 
 		if (profileChanged)
 		{
-			lastRsProfileKey = profileKey;
-			autoSuppressed.clear();
-			rewindArmPending.clear();
+			// Manual-control state is per character. Logging out swaps to the
+			// shared store and the same character's return swaps back; neither
+			// is a character switch, so a manual untick still wins after a relog.
+			boolean characterChanged = profileKey != null && !profileKey.equals(lastRsProfileKey);
+			if (profileKey != null)
+			{
+				lastRsProfileKey = profileKey;
+			}
+			if (characterChanged)
+			{
+				autoSuppressed.clear();
+				rewindArmPending.clear();
+			}
 			customLocationStore.invalidate();
 			runAsync(() ->
 			{
@@ -4024,7 +4365,8 @@ public class HcimGuidePlugin extends Plugin
 			seed = configManager.getConfiguration(HcimGuideConfig.GROUP,
 				HcimGuideConfig.COMPLETED_STEPS_KEY);
 		}
-		if (seed == null)
+		if (seed == null || !sharedStoreMaySeed(progressKey(),
+			GuideRegistry.BUILTIN_ID.equals(currentGuideId) ? HcimGuideConfig.COMPLETED_STEPS_KEY : null))
 		{
 			seed = "[]";
 		}
@@ -4070,7 +4412,9 @@ public class HcimGuidePlugin extends Plugin
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
-		if (event.getGameState() == GameState.LOGGED_IN)
+		// LOGGED_IN also follows every scene load, so the store is only re-read
+		// when the in-memory sets are not already bound to the selected one.
+		if (event.getGameState() == GameState.LOGGED_IN && !progressStoreCurrent())
 		{
 			// RuneScapeProfileChanged is authoritative, but it may have fired
 			// before a late plugin enable. Check the current key immediately and
@@ -4108,7 +4452,37 @@ public class HcimGuidePlugin extends Plugin
 			// here or the next character's first frames show the old target
 			pathfinder.clear();
 			runAsync(locationStore::saveIfDirty);
+			// The next login may be a different character. Its containers
+			// arrive as fresh events; until then nothing cached from this one
+			// may satisfy an item check or a teleport suggestion.
+			lastInventoryItems = new Item[0];
+			lastWornItems = new Item[0];
+			rebuildInventorySnapshot();
+			stockTracker.update(BankStockTracker.SRC_INVENTORY, null);
+			stockTracker.update(BankStockTracker.SRC_EQUIPMENT, null);
+			// covers the ordering where the profile key was dropped while the
+			// game state still read LOGGED_IN
+			if (config.perCharacterProgress() && configManager.getRSProfileKey() == null
+				&& loadedProgressProfileKey != null)
+			{
+				reloadProgressStore("logout");
+			}
 		}
+	}
+
+	/** True when the in-memory progress already represents the selected store. */
+	private boolean progressStoreCurrent()
+	{
+		if (profileReloadPending || !profileProgressReady)
+		{
+			return false;
+		}
+		if (!config.perCharacterProgress())
+		{
+			return loadedProgressProfileKey == null;
+		}
+		String key = configManager.getRSProfileKey();
+		return key != null && key.equals(loadedProgressProfileKey);
 	}
 
 	@Subscribe
@@ -4172,7 +4546,7 @@ public class HcimGuidePlugin extends Plugin
 			|| "itemPresenceBorders".equals(key) || "colorTransportSteps".equals(key)
 			|| "transportStepColor".equals(key) || "colorDangerSteps".equals(key)
 			|| "dangerStepColor".equals(key) || "colorPreparationSteps".equals(key)
-			|| "preparationStepColor".equals(key))
+			|| "preparationStepColor".equals(key) || "showLocationConfidence".equals(key))
 		{
 			runOnSwing(() -> panel.onConfigChanged());
 		}
@@ -5535,8 +5909,11 @@ public class HcimGuidePlugin extends Plugin
 	 * First bank (in guide order) that still has an unchecked step. The result
 	 * is cached because this is consulted every tick and by every bank header
 	 * on the EDT; the cache is invalidated whenever completion state or the
-	 * guide changes. A benign race (two threads recomputing the same value)
-	 * is acceptable; the fields are volatile.
+	 * guide changes. The cached read is lock-free (the fields are volatile);
+	 * recomputation is serialized, because two overlapping walks with an
+	 * invalidation between them could otherwise let the OLDER result be stored
+	 * last with the dirty flag already cleared - pinning the active bank to a
+	 * finished section until the next change.
 	 */
 	private GuideBank findActiveBank(Guide guide)
 	{
@@ -5545,29 +5922,39 @@ public class HcimGuidePlugin extends Plugin
 			return activeBankCache;
 		}
 
-		// clear the flag BEFORE walking: a concurrent invalidation during the
-		// walk then lands after this write and forces the next call to recompute
-		activeBankDirty = false;
-		GuideBank found = null;
-		outer:
-		for (GuideEpisode ep : guide.getEpisodes())
+		synchronized (activeBankLock)
 		{
-			for (GuideBank bank : ep.getBanks())
+			if (!activeBankDirty && activeBankCacheGuide == guide)
 			{
-				for (GuideStep step : bank.getSteps())
+				return activeBankCache;
+			}
+			// clear the flag BEFORE walking: a concurrent invalidation during the
+			// walk then lands after this write and forces the next call to recompute
+			activeBankDirty = false;
+			GuideBank found = null;
+			outer:
+			for (GuideEpisode ep : guide.getEpisodes())
+			{
+				for (GuideBank bank : ep.getBanks())
 				{
-					if (!isStepDone(step.getKey()))
+					for (GuideStep step : bank.getSteps())
 					{
-						found = bank;
-						break outer;
+						if (!isStepDone(step.getKey()))
+						{
+							found = bank;
+							break outer;
+						}
 					}
 				}
 			}
+			activeBankCache = found;
+			activeBankCacheGuide = guide;
+			return found;
 		}
-		activeBankCache = found;
-		activeBankCacheGuide = guide;
-		return found;
 	}
+
+	/** Serializes active-bank recomputation. Lock order: this, then the progress-set locks - never the reverse. */
+	private final Object activeBankLock = new Object();
 
 	String getActiveBankId()
 	{
@@ -5974,10 +6361,7 @@ public class HcimGuidePlugin extends Plugin
 			return;
 		}
 		activeWaypointIndexes.put(key, next);
-		if (config.persistWaypointIndex())
-		{
-			customLocationStore.setActiveIndex(currentGuideId, key, next);
-		}
+		persistWaypointIndex(key, next);
 		waypointArrivalTracker.reset();
 		// An AUTOMATIC advance must not clear a hide: progression continues
 		// silently on hidden routes (that's the whole point of decoupling
@@ -6908,9 +7292,16 @@ public class HcimGuidePlugin extends Plugin
 		return hint == null ? null : hint.getPoint();
 	}
 
+	/** Whether the cached Quest Helper state read at {@code checkedTick} is still usable. */
+	static boolean questHelperCacheFresh(int tick, int checkedTick)
+	{
+		// long arithmetic: the age must not wrap for any pair of int ticks
+		return (long) tick - checkedTick < QUEST_HELPER_RECHECK_TICKS;
+	}
+
 	private boolean isQuestHelperActive()
 	{
-		if (tickCounter - questHelperCheckedTick < 20)
+		if (questHelperCacheFresh(tickCounter, questHelperCheckedTick))
 		{
 			return questHelperActiveCached;
 		}
@@ -7066,13 +7457,17 @@ public class HcimGuidePlugin extends Plugin
 	/** Idempotent: same point and label -> no churn; changed label replaces it. */
 	private void setMarker(WorldPoint point, String name)
 	{
-		if (point != null && point.equals(markerPoint) && mapMarker != null
+		// The display gate is evaluated BEFORE the same-marker shortcut: a
+		// marker already up must come down when the display mode or distance
+		// band stops allowing it, not survive because its point is unchanged.
+		boolean allowed = point != null && config.showWorldMapMarker() && allowWorldMapGuidance(point);
+		if (allowed && point.equals(markerPoint) && mapMarker != null
 			&& (name == null ? markerName == null : name.equals(markerName)))
 		{
 			return;
 		}
 		removeMapMarker();
-		if (point == null || !config.showWorldMapMarker() || !allowWorldMapGuidance(point))
+		if (!allowed)
 		{
 			return;
 		}

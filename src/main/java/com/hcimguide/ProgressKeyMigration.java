@@ -33,6 +33,22 @@ final class ProgressKeyMigration
 			return false;
 		}
 
+		// A guide can still contain a real "-notes" section beside numbered
+		// banks. Its live keys have the legacy shape, so a legacy key that some
+		// current step owns is genuine progress and must never be moved onto a
+		// same-text step elsewhere in the episode.
+		Set<String> currentKeys = new java.util.HashSet<>();
+		for (GuideEpisode episode : guide.getEpisodes())
+		{
+			for (GuideBank bank : episode.getBanks())
+			{
+				for (GuideStep step : bank.getSteps())
+				{
+					currentKeys.add(step.getKey());
+				}
+			}
+		}
+
 		boolean migrated = false;
 		Map<String, Integer> occurrence = new HashMap<>();
 		for (GuideEpisode episode : guide.getEpisodes())
@@ -46,7 +62,8 @@ final class ProgressKeyMigration
 					int occ = occurrence.merge(occKey, 1, Integer::sum) - 1;
 					String legacyKey = notesId + "#"
 						+ Integer.toHexString(step.getText().hashCode()) + "#" + occ;
-					if (!legacyKey.equals(step.getKey()) && completedSteps.remove(legacyKey))
+					if (!legacyKey.equals(step.getKey()) && !currentKeys.contains(legacyKey)
+						&& completedSteps.remove(legacyKey))
 					{
 						completedSteps.add(step.getKey());
 						migrated = true;

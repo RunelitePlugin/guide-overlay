@@ -20,8 +20,9 @@ import org.slf4j.LoggerFactory;
  * route suggester can offer only teleports the player can actually use.
  *
  * Updates arrive on the client thread from container-change events; the
- * bank column is also persisted to config so suggestions can say "in bank"
- * across sessions (it refreshes the next time the bank opens - a stale
+ * bank column is also persisted to the CHARACTER's config so suggestions can
+ * say "in bank" across sessions without one character's bank answering for
+ * another (it refreshes the next time the bank opens - a stale
  * count between sessions only affects a suggestion's wording, nothing
  * game-state-critical). Only the ~15 name prefixes from the teleport
  * directory are ever tracked - a bank pass is one name comparison per
@@ -160,9 +161,17 @@ public class BankStockTracker
 
 	// ---------------------------------------------------------- persistence
 
-	/** Persist the bank column (call off the client thread). */
+	/**
+	 * Persist the bank column for the logged-in character (call off the client
+	 * thread). A bank belongs to one character, so nothing is written while no
+	 * character profile is selected - never to the shared config.
+	 */
 	public void saveBankColumn()
 	{
+		if (configManager.getRSProfileKey() == null)
+		{
+			return;
+		}
 		Map<String, int[]> bank = new HashMap<>();
 		synchronized (this)
 		{
@@ -178,7 +187,7 @@ public class BankStockTracker
 		}
 		try
 		{
-			configManager.setConfiguration(HcimGuideConfig.GROUP, STOCK_KEY, gson.toJson(bank));
+			configManager.setRSProfileConfiguration(HcimGuideConfig.GROUP, STOCK_KEY, gson.toJson(bank));
 		}
 		catch (Exception e)
 		{
@@ -186,7 +195,11 @@ public class BankStockTracker
 		}
 	}
 
-	/** Load the persisted bank column (any thread; validated and bounded). */
+	/**
+	 * Load the current character's persisted bank column (any thread; validated
+	 * and bounded). The pre-per-character shared value is deliberately not read:
+	 * it cannot be attributed to a character.
+	 */
 	public void loadBankColumn()
 	{
 		if (bankSeenLive)
@@ -195,7 +208,7 @@ public class BankStockTracker
 			// beat last session's persisted counts - never overwrite them
 			return;
 		}
-		String json = configManager.getConfiguration(HcimGuideConfig.GROUP, STOCK_KEY);
+		String json = configManager.getRSProfileConfiguration(HcimGuideConfig.GROUP, STOCK_KEY);
 		if (json == null || json.isEmpty() || json.length() > 8192)
 		{
 			return; // absent, or implausibly large for ~15 tracked prefixes
@@ -251,6 +264,23 @@ public class BankStockTracker
 			// suggestion cache convinced nothing changed
 			revision++;
 		}
+	}
+
+	/**
+	 * Forget the bank column only (character switch or logout): the bank on
+	 * record belongs to the previous character. Carried and worn columns are
+	 * left alone - they are refreshed by the login's own container events,
+	 * which can arrive before the profile change that calls this.
+	 */
+	public synchronized void resetBankColumn()
+	{
+		for (int[] row : counts.values())
+		{
+			row[SRC_BANK * 2] = 0;
+			row[SRC_BANK * 2 + 1] = 0;
+		}
+		bankSeenLive = false;
+		revision++;
 	}
 
 	/** Forget everything (plugin shutdown; the persisted bank column remains). */

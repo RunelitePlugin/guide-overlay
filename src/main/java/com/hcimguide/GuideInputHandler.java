@@ -5,6 +5,7 @@ import java.util.Objects;
 import java.awt.event.MouseEvent;
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import net.runelite.client.config.Keybind;
 import net.runelite.client.input.KeyManager;
 import net.runelite.client.input.MouseAdapter;
 import net.runelite.client.input.MouseManager;
@@ -83,7 +84,11 @@ public class GuideInputHandler
 		this.config = config;
 		this.keyManager = keyManager;
 		this.mouseManager = mouseManager;
-		this.nextStepHotkey = new HotkeyListener(() -> this.config.nextStepKeybind())
+		// A HotkeyListener consumes every key event its keybind matches, so
+		// with the keybinds switched off the supplier must report no keybind
+		// at all - gating only the action would still swallow the key.
+		this.nextStepHotkey = new HotkeyListener(() -> this.config.navKeybindsEnabled()
+			? this.config.nextStepKeybind() : Keybind.NOT_SET)
 		{
 			@Override
 			public void hotkeyPressed()
@@ -93,8 +98,19 @@ public class GuideInputHandler
 					GuideInputHandler.this.actions.navigateStep(true);
 				}
 			}
+
+			@Override
+			public void focusLost()
+			{
+				super.focusLost();
+				// a press captured before the window lost focus never gets its
+				// release: drop the capture so it cannot own a later gesture
+				navPressConsumed = false;
+				clearPendingClick();
+			}
 		};
-		this.prevStepHotkey = new HotkeyListener(() -> this.config.prevStepKeybind())
+		this.prevStepHotkey = new HotkeyListener(() -> this.config.navKeybindsEnabled()
+			? this.config.prevStepKeybind() : Keybind.NOT_SET)
 		{
 			@Override
 			public void hotkeyPressed()
@@ -151,6 +167,9 @@ public class GuideInputHandler
 			// previous capture must not survive to eat the Alt gesture's click.
 			if (actions == null || e.getButton() != MouseEvent.BUTTON1 || e.isAltDown())
 			{
+				// ANY press starts a new gesture: a capture whose release never
+				// arrived must not consume this other button's drag
+				navPressConsumed = false;
 				clearPendingClick();
 				return e;
 			}

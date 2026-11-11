@@ -103,6 +103,31 @@ public class ProgressKeyMigrationTest
 		assertTrue(newTick.size() == 1);
 	}
 
+	@Test
+	public void aLiveTickOnARealNotesStepIsNotMovedToASameTextStepInABank()
+	{
+		// a real "-notes" section beside a numbered bank, both with the same
+		// step text: the notes step's CURRENT key has the legacy shape
+		String liveNotesKey = legacy("E1-notes", "same step", 0);
+		Guide guide = new Guide();
+		GuideEpisode episode = new GuideEpisode(1, "Episode 1");
+		GuideBank bank = new GuideBank("E1.B1", "Bank 1", 1);
+		bank.getSteps().add(new GuideStep("E1.B1#" + Integer.toHexString("same step".hashCode()) + "#0",
+			"same step", 0, "E1.B1"));
+		GuideBank notes = new GuideBank("E1-notes", "Notes", 1);
+		notes.getSteps().add(new GuideStep(liveNotesKey, "same step", 0, "E1-notes"));
+		episode.getBanks().add(bank);
+		episode.getBanks().add(notes);
+		guide.getEpisodes().add(episode);
+		assertTrue(guide.numberedBanks() > 0);
+		Set<String> completed = new HashSet<>();
+		completed.add(liveNotesKey);
+
+		assertFalse(ProgressKeyMigration.migrateLegacyNotes(guide, completed));
+		assertTrue(completed.contains(liveNotesKey));
+		assertTrue(completed.size() == 1);
+	}
+
 	private static String legacy(String notesId, String text, int occurrence)
 	{
 		return notesId + "#" + Integer.toHexString(text.hashCode()) + "#" + occurrence;
