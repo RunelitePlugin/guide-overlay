@@ -108,8 +108,8 @@ within multi-stop routes (`waypointIndexesV1`), the list of user-added guides
 (`guides`) and of removed guides whose data is still stored (`guidesRemoved`),
 a teleport-stock note (`teleportBankStock`: item names and counts the player
 banked, for the trip-ready check), and three UI flags: `selectedGuide`,
-`importPrompted`, `fullDbPrompted`. All through `ConfigManager`. Progress is
-RS-profile scoped. No credentials or chat content.
+`importPrompted`, `fullDbPrompted`. All through `ConfigManager`. Progress and
+the teleport-stock note are RS-profile scoped. No credentials or chat content.
 
 Every import path is bounded before it allocates per entry. How stored JSON is
 read:

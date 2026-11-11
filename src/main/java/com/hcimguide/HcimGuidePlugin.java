@@ -1905,7 +1905,7 @@ public class HcimGuidePlugin extends Plugin
 					// This includes condition-backed item steps and JSON guide
 					// display-only "(Items: ...)" suffixes.
 					List<ItemReq> displayItems =
-						StepItemRequirements.displayFor(step.getText(), c);
+						StepItemRequirements.displayFor(step, c);
 					if (displayItems != null && !displayItems.isEmpty())
 					{
 						items.put(step.getKey(), displayItems);
@@ -4495,6 +4495,7 @@ public class HcimGuidePlugin extends Plugin
 			|| key.startsWith("skippedSteps")
 			|| "selectedGuide".equals(key)
 			|| "guides".equals(key)
+			|| "guidesRemoved".equals(key)
 			|| "fullDbPrompted".equals(key)
 			// the plugin's own bulk-written persistence keys: waypoint
 			// navigation, phase advancement, bank-stock tracking and one-shot

@@ -29,7 +29,8 @@ off in the settings.
   with their own video guide show a "▶ Section video guide" link under
   their steps, plus a ▶ on the section header
 - Progress saves automatically and keeps across sessions
-- Search your guide, or jump straight to your next unchecked step
+- Search your guide (3 or more characters), or jump straight to your next
+  unchecked step
 - When a finished bank auto-collapses, the next one opens and scrolls into
   view by itself
 - Starting mid-guide? One click syncs the checklist to your account's
@@ -40,6 +41,8 @@ off in the settings.
 - Optional steps you don't want? Right-click "skip" excludes a step from
   progress without pretending you did it
 - Separate progress per character — if your hardcore dies, the new one starts fresh
+  (on the login screen the sidebar shows the shared checklist, not the last
+  character's)
 - Back up your progress to the clipboard and restore it anywhere
 
 ### Using the guide on multiple computers
@@ -86,6 +89,8 @@ equipped Dramen staff or Ardougne cloak satisfies a step that needs one.
 - Small ◀ ▶ arrow buttons check off your current step or un-check the last
   one — attached at the top of the on-screen box, free-floating anywhere
   (Alt+drag), or hidden, your choice
+- Un-checking a step that completed itself on arrival keeps it open until you
+  leave that spot and come back
 - Moving forward or backward hands guidance over cleanly: the old step's
   arrow, route and tracking clear immediately and the newly current step's
   destination takes over, with a rewound step starting again from its first
