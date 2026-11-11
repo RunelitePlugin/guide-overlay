@@ -418,7 +418,7 @@ public interface HcimGuideConfig extends Config
 	@ConfigItem(
 		keyName = "distanceAwareGuidance",
 		name = "Distance-aware guidance",
-		description = "Far away: map/path. Nearby: compass, colored target arrow and scene highlights. Uses hysteresis to avoid flicker.",
+		description = "Far away: compass, world map marker and Shortest Path. Nearby: colored target arrow and scene highlights. Uses hysteresis to avoid flicker.",
 		position = 15,
 		section = targetSection
 	)

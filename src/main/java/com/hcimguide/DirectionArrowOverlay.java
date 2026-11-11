@@ -30,7 +30,9 @@ import net.runelite.client.ui.overlay.OverlayPosition;
  */
 public class DirectionArrowOverlay extends Overlay
 {
-	private static final int TEXT_HEIGHT = 14;
+	/** Bounds of the compass size setting; the stored value is not trusted. */
+	private static final int MIN_SIZE = 32;
+	private static final int MAX_SIZE = 96;
 
 	private final Client client;
 	private final HcimGuidePlugin plugin;
@@ -110,11 +112,39 @@ public class DirectionArrowOverlay extends Overlay
 		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 		OverlayFonts.apply(g, config);
 
-		final int size = config.compassSize();
+		final int size = Math.max(MIN_SIZE, Math.min(MAX_SIZE, config.compassSize()));
 		final double opacity = config.compassOpacity() / 100.0;
 		final boolean showDistance = config.compassShowDistance();
 
-		int cx = size / 2;
+		String label = null;
+		if (showDistance)
+		{
+			if (planeDelta != 0 && distance == 0)
+			{
+				// standing on the target's tile with the target on another
+				// floor: a "0 tiles" bearing is meaningless - show only the
+				// floor cue
+				label = planeDelta > 0 ? "above" : "below";
+			}
+			else if (planeDelta != 0)
+			{
+				label = distance + " tiles " + (planeDelta > 0 ? "(above)" : "(below)");
+			}
+			else
+			{
+				label = distance + " tiles";
+			}
+		}
+		// The overlay is as wide as its widest part, with the dial and the
+		// label both centred in it, and as tall as the dial plus one text line
+		// in the CONFIGURED font: everything drawn must lie inside the returned
+		// size, which is all RuneLite uses to place and stack overlays.
+		final java.awt.FontMetrics metrics = g.getFontMetrics();
+		// +2: the drop shadow's one-pixel offset and a pixel of glyph overhang
+		final int labelWidth = label == null ? 0 : metrics.stringWidth(label) + 2;
+		final int width = Math.max(size, labelWidth);
+
+		int cx = width / 2;
 		int cy = size / 2;
 		int r = size / 2 - 3;
 		// the compass has its own colour so it can be told apart from the NPC
@@ -150,33 +180,18 @@ public class DirectionArrowOverlay extends Overlay
 			drawHead(g, tipX, tipY, screenAngle, Math.max(8, size / 4));
 		}
 
-		if (showDistance)
+		if (label == null)
 		{
-			String label;
-			if (planeDelta != 0 && distance == 0)
-			{
-				// standing on the target's tile with the target on another
-				// floor: a "0 tiles" bearing is meaningless - show only the
-				// floor cue
-				label = planeDelta > 0 ? "above" : "below";
-			}
-			else if (planeDelta != 0)
-			{
-				label = distance + " tiles " + (planeDelta > 0 ? "(above)" : "(below)");
-			}
-			else
-			{
-				label = distance + " tiles";
-			}
-			int w = g.getFontMetrics().stringWidth(label);
-			int tx = Math.max(0, (size - w) / 2);
-			g.setColor(withOpacity(Color.BLACK, opacity));
-			g.drawString(label, tx + 1, size + TEXT_HEIGHT - 3 + 1);
-			g.setColor(withOpacity(Color.WHITE, opacity));
-			g.drawString(label, tx, size + TEXT_HEIGHT - 3);
+			return new Dimension(width, size);
 		}
-
-		return new Dimension(size, size + (showDistance ? TEXT_HEIGHT : 0));
+		int tx = (width - labelWidth) / 2;
+		int baseline = size + metrics.getAscent();
+		g.setColor(withOpacity(Color.BLACK, opacity));
+		g.drawString(label, tx + 1, baseline + 1);
+		g.setColor(withOpacity(Color.WHITE, opacity));
+		g.drawString(label, tx, baseline);
+		// +1: the shadow sits one pixel below the text
+		return new Dimension(width, size + metrics.getHeight() + 1);
 	}
 
 	/** Prefer the destination actually represented by Shortest Path. */

@@ -140,12 +140,12 @@ public class ItemGridPanel extends JPanel
 	}
 
 	/**
-	 * Resolve icons via the item manager. Call from any thread; icon updates
-	 * hop to the EDT when each image loads. Slots are also REORDERED so
-	 * anything with a picture - real items AND sprite-backed concepts like
-	 * "Combat Gear" - comes first, and only textual chips ("2 Food") sink to
-	 * the end of the grid; stable order within each group, idempotent across
-	 * re-resolution passes.
+	 * Resolve icons via the item manager. Call from any thread; every Swing
+	 * change hops to the EDT (icon updates when each image loads). Slots are
+	 * also REORDERED so anything with a picture - real items AND
+	 * sprite-backed concepts like "Combat Gear" - comes first, and only
+	 * textual chips ("2 Food") sink to the end of the grid; stable order
+	 * within each group, idempotent across re-resolution passes.
 	 *
 	 * @param ids one resolved item id per slot, -1 for unresolved
 	 */
@@ -251,7 +251,14 @@ public class ItemGridPanel extends JPanel
 			boolean openQty = slot.req.hasQuantityLabel();
 			if (ItemIconResolver.isSpriteId(slot.itemId))
 			{
-				setConceptBorder(slot);
+				final Slot conceptSlot = slot;
+				SwingUtilities.invokeLater(() ->
+				{
+					if (!disposed)
+					{
+						setConceptBorder(conceptSlot);
+					}
+				});
 				applySpriteSlot(spriteManager, slot);
 				continue;
 			}
@@ -289,8 +296,9 @@ public class ItemGridPanel extends JPanel
 				finalSlot.label.revalidate();
 				finalSlot.label.repaint();
 			};
+			// onLoaded runs its callback exactly once, also for an image that
+			// has already loaded - a second direct apply would only redo it
 			img.onLoaded(() -> SwingUtilities.invokeLater(apply));
-			SwingUtilities.invokeLater(apply);
 		}
 	}
 

@@ -3,19 +3,24 @@ package com.hcimguide;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.Container;
 import java.awt.Cursor;
+import java.awt.Dimension;
 import java.awt.FlowLayout;
-import java.awt.GridBagConstraints;
-import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.LayoutManager;
 import java.awt.Rectangle;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -23,6 +28,7 @@ import javax.swing.DefaultListCellRenderer;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
+import javax.swing.JComponent;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JList;
@@ -34,7 +40,9 @@ import javax.swing.JPopupMenu;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextField;
+import javax.swing.JViewport;
 import javax.swing.SwingUtilities;
+import javax.swing.ToolTipManager;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import net.runelite.client.ui.ColorScheme;
@@ -49,7 +57,8 @@ public class HcimGuidePanel extends PluginPanel
 	private final HcimGuidePlugin plugin;
 	private final HcimGuideConfig config;
 
-	private final JLabel statusLabel = new JLabel(" ");
+	/** Wraps instead of truncating: warnings are appended to the END of a status. */
+	private final WrappingTextLabel statusLabel = new WrappingTextLabel();
 	private final JLabel targetLabel = new JLabel(" ");
 	private final JProgressBar overallProgress = new JProgressBar();
 	private final JTextField searchField = new JTextField();
@@ -57,17 +66,30 @@ public class HcimGuidePanel extends PluginPanel
 	private final javax.swing.Timer searchDebounce =
 		new javax.swing.Timer(200, e -> applyFilter());
 	/**
-	 * Matching steps beyond this many are shown as visible-but-collapsed
-	 * sections instead of force-built rows: a broad query over a 2,000+ step
-	 * guide must not construct thousands of Swing rows in one EDT pass.
+	 * Rows a search may show in sections that were not already open. Only the
+	 * MATCHING rows of such a section are built, and a section whose matches
+	 * do not fit what is left of the budget stays visible but collapsed: a
+	 * broad query over a 2,000+ step guide must not construct thousands of
+	 * Swing rows in one EDT pass.
 	 */
 	private static final int SEARCH_EXPAND_BUDGET = 400;
+	/** Shorter queries match nearly every step and are treated as no search. */
+	private static final int SEARCH_MIN_CHARS = 3;
 	/** True while the status line shows this filter's own broad-search note. */
 	private boolean searchStatusShown;
+	/**
+	 * Bank ids that were open when the current search began (kept in step
+	 * with header clicks made during it); null while no search is active.
+	 * Clearing the search restores exactly this set.
+	 */
+	private Set<String> preSearchExpanded;
+	/** Guide and active bank the current sections were built for. */
+	private String builtGuideId;
+	private String builtActiveBankId;
 	private final JComboBox<GuideRegistry.Entry> guideBox = new JComboBox<>();
 	/** Jump-to-bank dropdown: every bank in the guide, flat - no episode grouping. */
 	private final JComboBox<GuideBank> sectionBox = new JComboBox<>();
-	private final JPanel banksContainer = new JPanel(new GridBagLayout());
+	private final JPanel banksContainer = new JPanel(new VerticalStackLayout(6));
 
 	private Guide guide;
 	private final List<BankSection> bankSections = new ArrayList<>();
@@ -91,6 +113,98 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			return new java.awt.Dimension(net.runelite.client.ui.PluginPanel.PANEL_WIDTH,
 				super.getPreferredSize().height);
+		}
+	}
+
+	/**
+	 * Stacks the visible children top to bottom, each at the container's full
+	 * width and its own preferred height. It never consults a preferred or
+	 * minimum WIDTH: a layout that does (GridBagLayout) drops every row to its
+	 * minimum size as soon as one child is wider than the list - a long
+	 * section title, or a link button at a large font - which clips wrapped
+	 * step text. The list's width is whatever the sidebar gives it.
+	 */
+	private static final class VerticalStackLayout implements LayoutManager
+	{
+		private final int gap;
+
+		VerticalStackLayout(int gap)
+		{
+			this.gap = gap;
+		}
+
+		@Override
+		public void addLayoutComponent(String name, Component comp)
+		{
+		}
+
+		@Override
+		public void removeLayoutComponent(Component comp)
+		{
+		}
+
+		@Override
+		public Dimension preferredLayoutSize(Container parent)
+		{
+			synchronized (parent.getTreeLock())
+			{
+				Insets in = parent.getInsets();
+				int height = in.top + in.bottom;
+				for (Component child : parent.getComponents())
+				{
+					if (child.isVisible())
+					{
+						height += child.getPreferredSize().height + gap;
+					}
+				}
+				return new Dimension(in.left + in.right, height);
+			}
+		}
+
+		@Override
+		public Dimension minimumLayoutSize(Container parent)
+		{
+			return preferredLayoutSize(parent);
+		}
+
+		@Override
+		public void layoutContainer(Container parent)
+		{
+			synchronized (parent.getTreeLock())
+			{
+				Insets in = parent.getInsets();
+				int width = Math.max(0, parent.getWidth() - in.left - in.right);
+				int y = in.top;
+				for (Component child : parent.getComponents())
+				{
+					if (!child.isVisible())
+					{
+						continue;
+					}
+					int height = child.getPreferredSize().height;
+					child.setBounds(in.left, y, width, height);
+					y += height + gap;
+				}
+			}
+		}
+	}
+
+	/**
+	 * What the player was looking at before the checklist is rebuilt: a
+	 * section (and optionally one of its step rows) plus how far below the
+	 * viewport top it sat, so the same content can be put back there.
+	 */
+	private static final class ScrollAnchor
+	{
+		private final String bankId;
+		private final String stepKey;
+		private final int offset;
+
+		ScrollAnchor(String bankId, String stepKey, int offset)
+		{
+			this.bankId = bankId;
+			this.stepKey = stepKey;
+			this.offset = offset;
 		}
 	}
 
@@ -147,6 +261,22 @@ public class HcimGuidePanel extends PluginPanel
 		header.add(guideBox);
 
 		statusLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		// a changed width changes the wrap point, so the height must be re-asked
+		statusLabel.addComponentListener(new ComponentAdapter()
+		{
+			private int lastWidth = -1;
+
+			@Override
+			public void componentResized(ComponentEvent event)
+			{
+				int width = statusLabel.getWidth();
+				if (width > 0 && width != lastWidth)
+				{
+					lastWidth = width;
+					statusLabel.revalidate();
+				}
+			}
+		});
 		header.add(statusLabel);
 
 		targetLabel.setForeground(ColorScheme.BRAND_ORANGE);
@@ -160,7 +290,7 @@ public class HcimGuidePanel extends PluginPanel
 
 		header.add(Box.createVerticalStrut(4));
 
-		searchField.setToolTipText("Search steps");
+		searchField.setToolTipText("Search steps (" + SEARCH_MIN_CHARS + "+ characters)");
 		// debounced: each keystroke restarts the timer, so only the final
 		// state of a fast-typed query pays the filter/row-build cost
 		searchField.getDocument().addDocumentListener(new DocumentListener()
@@ -196,6 +326,8 @@ public class HcimGuidePanel extends PluginPanel
 				GuideBank bank = (GuideBank) sectionBox.getSelectedItem();
 				if (bank != null)
 				{
+					// a filtered-out bank is hidden: jumping to it must lift the filter
+					clearSearch();
 					scrollToBank(bank.getId());
 				}
 			}
@@ -211,6 +343,14 @@ public class HcimGuidePanel extends PluginPanel
 		header.add(resume);
 
 		header.add(Box.createVerticalStrut(6));
+
+		// ONE shared alignment: BoxLayout places a left-aligned child at the
+		// centre line of centre-aligned siblings, which would indent the labels
+		// and the jump button by an amount that changes with the status text
+		for (Component child : header.getComponents())
+		{
+			((JComponent) child).setAlignmentX(Component.LEFT_ALIGNMENT);
+		}
 
 		add(header, BorderLayout.NORTH);
 
@@ -677,7 +817,12 @@ public class HcimGuidePanel extends PluginPanel
 
 	void setStatus(String text)
 	{
-		statusLabel.setText(text);
+		// whatever is shown from here on is no longer the search filter's note
+		searchStatusShown = false;
+		boolean blank = text == null || text.trim().isEmpty();
+		// HTML so the label wraps to the header width; statuses carry guide
+		// titles and exception messages, so the text is always escaped
+		statusLabel.setText(blank ? " " : "<html>" + escapeHtml(text) + "</html>");
 	}
 
 	/** Populate the guide dropdown (EDT only). */
@@ -733,6 +878,9 @@ public class HcimGuidePanel extends PluginPanel
 		banksContainer.removeAll();
 		bankSections.clear();
 		episodeVideoRows.clear();
+		preSearchExpanded = null;
+		builtGuideId = null;
+		builtActiveBankId = null;
 		overallProgress.setValue(0);
 		overallProgress.setString("no guide");
 		setTargetStatus(null, false); // the old guide's pin no longer exists
@@ -797,12 +945,13 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				row.syncFromModel();
 			}
-			// headers are refreshed by updateProgress() below - no duplicate pass
-			if (config.autoCollapseCompleted() && section.isComplete() && section.expanded
+			// headers are refreshed by updateProgress() below - no duplicate pass.
+			// Only the completion EDGE collapses: a finished section the player
+			// re-opened to review stays open through every later refresh.
+			if (section.becameComplete() && config.autoCollapseCompleted() && section.expanded
 				&& !section.bank.getSteps().isEmpty())
 			{
-				section.setExpanded(false);
-				expandNextAfterAutoCollapse(section);
+				autoCollapse(section);
 			}
 		}
 		updateProgress();
@@ -823,7 +972,12 @@ public class HcimGuidePanel extends PluginPanel
 		{
 			summary = summary + " · " + waypoint;
 		}
-		setTargetStatus(summary != null ? summary : newTargetName, false);
+		// no "nearby" verdict here: only the plugin's target tracking knows it
+		// and reports it through setTargetStatus when it changes. Guessing "not
+		// nearby" would mislabel a target that is still in view, and a place
+		// (which is never reported) would keep the guess for good.
+		String label = summary != null ? summary : newTargetName;
+		targetLabel.setText(label == null ? " " : "Tracking: " + label);
 	}
 
 	/** Re-create rows so config toggles (item grids, dimming, fonts) apply immediately. */
@@ -936,6 +1090,33 @@ public class HcimGuidePanel extends PluginPanel
 
 	private void rebuildBanks()
 	{
+		rebuildBanks(captureScrollAnchor());
+	}
+
+	/**
+	 * @param anchor what to put back at its current viewport offset once the
+	 *     new rows have laid out; null leaves the scroll position alone
+	 */
+	private void rebuildBanks(ScrollAnchor anchor)
+	{
+		// A rebuild of the SAME guide (config toggle, bulk action, re-import)
+		// keeps the player's place: which sections were open, which they closed
+		// by hand, and what they were looking at. Another guide starts fresh.
+		String guideId = plugin.getCurrentGuideId();
+		Map<String, BankSection> previous = new HashMap<>();
+		if (guideId != null && guideId.equals(builtGuideId))
+		{
+			for (BankSection section : bankSections)
+			{
+				previous.put(section.bank.getId(), section);
+			}
+		}
+		else
+		{
+			preSearchExpanded = null;
+		}
+		String previousActiveId = builtActiveBankId;
+
 		// detach async icon callbacks of the old generation so discarded
 		// component trees can't be resurrected by late image loads
 		disposeGrids();
@@ -944,17 +1125,11 @@ public class HcimGuidePanel extends PluginPanel
 		episodeVideoRows.clear();
 
 		// every bank in the whole guide, flat - collapsed section headers are
-		// cheap, rows only build on first expand
+		// cheap, rows only build while a section is open
+		String activeId = null;
 		if (guide != null)
 		{
-			GridBagConstraints gbc = new GridBagConstraints();
-			gbc.gridx = 0;
-			gbc.gridy = 0;
-			gbc.weightx = 1;
-			gbc.fill = GridBagConstraints.HORIZONTAL;
-			gbc.insets = new Insets(0, 0, 6, 0);
-
-			String activeId = plugin.getActiveBankId();
+			activeId = plugin.getActiveBankId();
 			for (GuideEpisode ep : guide.getEpisodes())
 			{
 				// optional clickable episode video guide link, shown at the
@@ -963,47 +1138,176 @@ public class HcimGuidePanel extends PluginPanel
 				{
 					JPanel row = buildEpisodeVideoRow(ep);
 					episodeVideoRows.add(row);
-					banksContainer.add(row, gbc);
-					gbc.gridy++;
+					banksContainer.add(row);
 				}
 				for (GuideBank bank : ep.getBanks())
 				{
 					BankSection section = new BankSection(bank);
 					bankSections.add(section);
-					banksContainer.add(section, gbc);
-					gbc.gridy++;
+					banksContainer.add(section);
+					boolean active = bank.getId().equals(activeId);
+					BankSection old = previous.get(bank.getId());
 					// only the bank you're actually working on opens (and builds) by default
-					if (bank.getId().equals(activeId))
+					boolean open = active;
+					if (old != null)
+					{
+						section.collapsedByUser = old.collapsedByUser;
+						// a section this rebuild found newly finished follows the
+						// auto-collapse rule, like any other completion
+						boolean autoCollapsed = config.autoCollapseCompleted()
+							&& section.lastComplete && !old.lastComplete;
+						// "built" = fully open; a search's partial view is re-derived by applyFilter
+						open = old.built && !autoCollapsed;
+						if (active && !bank.getId().equals(previousActiveId))
+						{
+							open = true; // the work moved here: show it
+						}
+					}
+					if (open)
 					{
 						section.setExpanded(true);
 					}
 				}
 			}
 		}
+		builtGuideId = guide == null ? null : guideId;
+		builtActiveBankId = activeId;
 
 		applyFilter();
 		updateProgress();
 		applyPanelFont();
 		banksContainer.revalidate();
 		banksContainer.repaint();
+		if (anchor != null && !previous.isEmpty())
+		{
+			// after the fresh rows have laid out
+			SwingUtilities.invokeLater(() -> restoreScrollAnchor(anchor, 3));
+		}
+	}
+
+	/** The topmost section header or step row currently in view, or null. */
+	private ScrollAnchor captureScrollAnchor()
+	{
+		JViewport viewport = checklistScroll.getViewport();
+		Component view = viewport.getView();
+		if (view == null)
+		{
+			return null;
+		}
+		int top = viewport.getViewPosition().y;
+		for (BankSection section : bankSections)
+		{
+			if (!section.isVisible() || section.getParent() == null)
+			{
+				continue;
+			}
+			Rectangle sectionBounds = SwingUtilities.convertRectangle(
+				section.getParent(), section.getBounds(), view);
+			if (sectionBounds.y + sectionBounds.height <= top)
+			{
+				continue; // entirely above the viewport
+			}
+			if (sectionBounds.y < top)
+			{
+				// header scrolled out: the first row still in view is the anchor
+				for (StepRow row : section.rows)
+				{
+					if (!row.isVisible() || row.getParent() == null)
+					{
+						continue;
+					}
+					Rectangle rowBounds = SwingUtilities.convertRectangle(
+						row.getParent(), row.getBounds(), view);
+					if (rowBounds.y + rowBounds.height > top)
+					{
+						return new ScrollAnchor(section.bank.getId(), row.step.getKey(), rowBounds.y - top);
+					}
+				}
+			}
+			return new ScrollAnchor(section.bank.getId(), null, sectionBounds.y - top);
+		}
+		return null;
+	}
+
+	/** Anchor on one specific row (the row a menu action was invoked on). */
+	private ScrollAnchor anchorOn(BankSection section, StepRow row)
+	{
+		Component view = checklistScroll.getViewport().getView();
+		Component target = row != null ? row : section;
+		if (view == null || target.getParent() == null)
+		{
+			return null;
+		}
+		Rectangle bounds = SwingUtilities.convertRectangle(target.getParent(), target.getBounds(), view);
+		return new ScrollAnchor(section.bank.getId(), row == null ? null : row.step.getKey(),
+			bounds.y - checklistScroll.getViewport().getViewPosition().y);
+	}
+
+	/**
+	 * Scroll so the anchored row (or its section header when the row is no
+	 * longer shown) sits at the viewport offset it had before the rebuild.
+	 * Scrolling only; re-run while wrap heights are still settling, bounded
+	 * like {@link #centerRowInViewport(StepRow, int)}.
+	 */
+	private void restoreScrollAnchor(ScrollAnchor anchor, int settlePasses)
+	{
+		JViewport viewport = checklistScroll.getViewport();
+		Component view = viewport.getView();
+		Component target = null;
+		for (BankSection section : bankSections)
+		{
+			if (!section.bank.getId().equals(anchor.bankId))
+			{
+				continue;
+			}
+			target = section;
+			for (StepRow row : section.rows)
+			{
+				if (row.isVisible() && row.step.getKey().equals(anchor.stepKey))
+				{
+					target = row;
+					break;
+				}
+			}
+			break;
+		}
+		if (view == null || target == null || !target.isVisible() || target.getParent() == null)
+		{
+			return;
+		}
+		checklistScroll.validate();
+		Rectangle bounds = SwingUtilities.convertRectangle(target.getParent(), target.getBounds(), view);
+		int y = PanelLayout.anchoredViewPosition(bounds.y, anchor.offset,
+			viewport.getExtentSize().height, view.getHeight());
+		boolean moved = y != viewport.getViewPosition().y;
+		viewport.setViewPosition(new java.awt.Point(viewport.getViewPosition().x, y));
+		if (settlePasses > 0 && (moved || settlePasses == 3))
+		{
+			SwingUtilities.invokeLater(() -> restoreScrollAnchor(anchor, settlePasses - 1));
+		}
+	}
+
+	/** Collapse a section that just finished and move on to the next one. */
+	private void autoCollapse(BankSection section)
+	{
+		section.setExpanded(false);
+		if (preSearchExpanded != null)
+		{
+			// finished mid-search: it must not reopen when the search clears
+			preSearchExpanded.remove(section.bank.getId());
+		}
+		expandNextAfterAutoCollapse(section);
 	}
 
 	/**
 	 * After a section auto-collapses on completion, open the next section
 	 * that still has work and scroll to it - the checklist flows straight
 	 * into the next bank with no extra clicks. Called only at the moment an
-	 * AUTO-collapse happens, so sections the player collapsed by hand are
-	 * never reopened.
+	 * AUTO-collapse happens, and a section the player collapsed by hand is
+	 * scrolled to but never reopened.
 	 */
 	private void expandNextAfterAutoCollapse(BankSection collapsed)
 	{
-		// while a search filter is active, sections are hidden/shown by match:
-		// expanding (and scrolling to) a filtered-out section would fight the
-		// filter and scroll against stale layout - skip until the search clears
-		if (!searchField.getText().trim().isEmpty())
-		{
-			return;
-		}
 		int from = bankSections.indexOf(collapsed);
 		if (from < 0)
 		{
@@ -1014,7 +1318,19 @@ public class HcimGuidePanel extends PluginPanel
 			BankSection next = bankSections.get(i);
 			if (!next.isComplete())
 			{
-				if (!next.expanded)
+				if (!searchQuery().isEmpty())
+				{
+					// while a search filter is active, sections are hidden/shown
+					// by match: expanding (and scrolling to) a filtered-out
+					// section would fight the filter and scroll against stale
+					// layout - open it when the search clears instead
+					if (preSearchExpanded != null && !next.collapsedByUser)
+					{
+						preSearchExpanded.add(next.bank.getId());
+					}
+					return;
+				}
+				if (!next.expanded && !next.collapsedByUser)
 				{
 					next.setExpanded(true);
 				}
@@ -1035,6 +1351,7 @@ public class HcimGuidePanel extends PluginPanel
 			section.setExpanded(isTarget);
 			if (isTarget)
 			{
+				section.collapsedByUser = false; // an explicit jump reopens it
 				// scroll after the collapse/expand relayout settles
 				SwingUtilities.invokeLater(() -> section.scrollRectToVisible(
 					new Rectangle(0, 0, section.getWidth(), section.getHeight())));
@@ -1059,6 +1376,7 @@ public class HcimGuidePanel extends PluginPanel
 			{
 				continue;
 			}
+			section.collapsedByUser = false; // an explicit jump reopens it
 			SwingUtilities.invokeLater(() ->
 			{
 				StepRow target = null;
@@ -1125,50 +1443,92 @@ public class HcimGuidePanel extends PluginPanel
 		}
 	}
 
-	private void applyFilter()
+	/**
+	 * The effective search query: trimmed, lower-cased, and empty until it is
+	 * long enough to be selective. With the whole guide flat in one list, a
+	 * one- or two-character query matches nearly every step.
+	 */
+	private String searchQuery()
 	{
 		String q = searchField.getText().trim().toLowerCase(Locale.ROOT);
-		// with the whole guide flat in one list, a 1-char query would match
-		// (and force-build) nearly every section at once - require 2+ chars
-		if (q.length() == 1)
+		return q.length() < SEARCH_MIN_CHARS ? "" : q;
+	}
+
+	/** Apply the search field's current text now instead of after the debounce. */
+	void flushSearch()
+	{
+		searchDebounce.stop();
+		applyFilter();
+	}
+
+	/** Drop an active search and its filtering at once. */
+	private void clearSearch()
+	{
+		if (!searchField.getText().isEmpty())
 		{
-			q = "";
+			// setText only restarts the 200ms debounce - apply it immediately
+			searchField.setText("");
+			flushSearch();
 		}
-		// row-building budget: matching sections beyond it stay visible but
-		// collapsed (expandable by hand), so one broad query can't stall the
-		// EDT constructing every row in the guide
-		int budget = SEARCH_EXPAND_BUDGET;
+	}
+
+	private void applyFilter()
+	{
+		String q = searchQuery();
 		boolean collapsedSome = false;
-		for (BankSection section : bankSections)
+		if (q.isEmpty())
 		{
-			boolean expand = budget > 0;
-			int matched = section.filter(q, expand);
-			if (matched > 0)
+			if (preSearchExpanded != null)
 			{
-				if (expand)
+				// search over: back to exactly the sections that were open
+				Set<String> open = preSearchExpanded;
+				preSearchExpanded = null;
+				for (BankSection section : bankSections)
 				{
-					// expansion builds EVERY row of the section, matching or
-					// not - charge the budget what it actually costs, or a
-					// sparse query across many sections would build them all
-					budget -= section.stepCount();
-				}
-				else
-				{
-					collapsedSome = true;
+					section.clearFilter(open.contains(section.bank.getId()));
 				}
 			}
 		}
-		if (!q.isEmpty() && collapsedSome)
+		else
 		{
-			setStatus("Broad search - later matching sections are shown collapsed");
+			if (preSearchExpanded == null)
+			{
+				preSearchExpanded = new HashSet<>();
+				for (BankSection section : bankSections)
+				{
+					if (section.built)
+					{
+						preSearchExpanded.add(section.bank.getId());
+					}
+				}
+			}
+			// row-building budget: a section whose matches no longer fit stays
+			// visible but collapsed (expandable by hand), so one broad query
+			// can't stall the EDT constructing every row in the guide
+			int budget = SEARCH_EXPAND_BUDGET;
+			for (BankSection section : bankSections)
+			{
+				int shown = section.filter(q, budget);
+				if (shown < 0)
+				{
+					collapsedSome = true;
+				}
+				else
+				{
+					budget -= shown;
+				}
+			}
+		}
+		if (collapsedSome)
+		{
+			setStatus("Broad search - some matching sections are shown collapsed");
 			searchStatusShown = true;
 		}
 		else if (searchStatusShown)
 		{
-			// reclaim only a status this filter itself put up - anything else
-			// showing (import warnings etc.) stays
+			// reclaim only a status this filter itself put up - setStatus drops
+			// the claim, so anything shown since (import warnings etc.) stays
 			setStatus(" ");
-			searchStatusShown = false;
 		}
 		// episode video rows have no steps to match - hide them while filtering
 		for (JPanel row : episodeVideoRows)
@@ -1241,13 +1601,10 @@ public class HcimGuidePanel extends PluginPanel
 				{
 					if (!plugin.isStepDone(step.getKey()))
 					{
-						// clear an active search NOW: setText only restarts the
-						// 200ms debounce, and centering against a half-filtered
-						// layout either finds the row hidden or centers on
-						// bounds the deferred filter pass then shifts
-						searchField.setText("");
-						searchDebounce.stop();
-						applyFilter();
+						// clear an active search NOW: centering against a
+						// half-filtered layout either finds the row hidden or
+						// centers on bounds the deferred filter pass then shifts
+						clearSearch();
 						// keep the dropdown in sync without re-triggering a jump
 						rebuilding = true;
 						sectionBox.setSelectedItem(bank);
@@ -1285,15 +1642,24 @@ public class HcimGuidePanel extends PluginPanel
 	private class BankSection extends JPanel
 	{
 		private final GuideBank bank;
-		private final JPanel body = new JPanel(new GridBagLayout());
+		private final JPanel body = new JPanel(new VerticalStackLayout(0));
 		private final JLabel chevron = new JLabel(EXPANDED);
 		private final JLabel headerTitle = new JLabel();
 		private final JLabel headerCount = new JLabel();
 		private final List<StepRow> rows = new ArrayList<>();
 		private boolean expanded;
-		/** Rows and item grids are created on FIRST expand, so a guide with
-		 * hundreds of steps loads instantly - only the ~50 headers are built. */
+		/**
+		 * True while {@link #rows} holds EVERY step of the bank. Rows and item
+		 * grids exist only while the section is open (a guide with thousands
+		 * of steps loads as a list of headers) and are dropped on collapse; a
+		 * search may show a section with just its matching rows, in which case
+		 * it is expanded but not built.
+		 */
 		private boolean built;
+		/** Completeness last seen, so auto-collapse fires once per completion. */
+		private boolean lastComplete;
+		/** The player closed this section by hand: nothing reopens it for them. */
+		private boolean collapsedByUser;
 		private final JPanel headerPanel;
 
 		BankSection(GuideBank bank)
@@ -1303,7 +1669,18 @@ public class HcimGuidePanel extends PluginPanel
 			setBackground(ColorScheme.DARKER_GRAY_COLOR);
 
 			// header
-			headerPanel = new JPanel(new BorderLayout(6, 0));
+			headerPanel = new JPanel(new BorderLayout(6, 0))
+			{
+				@Override
+				public String getToolTipText()
+				{
+					// the title label truncates to the header width; offer the
+					// full text exactly when it did (decided at hover time)
+					return headerTitle.getPreferredSize().width > headerTitle.getWidth()
+						? bank.getTitle() : null;
+				}
+			};
+			ToolTipManager.sharedInstance().registerComponent(headerPanel);
 			headerPanel.setBackground(ColorScheme.DARKER_GRAY_COLOR);
 			headerPanel.setBorder(BorderFactory.createEmptyBorder(5, 6, 5, 6));
 			headerPanel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
@@ -1363,10 +1740,25 @@ public class HcimGuidePanel extends PluginPanel
 					if (SwingUtilities.isLeftMouseButton(e))
 					{
 						setExpanded(!expanded);
-						// expanding an over-budget section mid-search builds
-						// its rows with default (all-visible) state - re-apply
-						// the filter so they match every other section
-						if (expanded && !searchField.getText().trim().isEmpty())
+						collapsedByUser = !expanded;
+						boolean searching = !searchQuery().isEmpty();
+						if (searching && preSearchExpanded != null)
+						{
+							// opened or closed by hand mid-search: that choice
+							// is what clearing the search goes back to
+							if (expanded)
+							{
+								preSearchExpanded.add(bank.getId());
+							}
+							else
+							{
+								preSearchExpanded.remove(bank.getId());
+							}
+						}
+						// expanding mid-search builds every row with default
+						// (all-visible) state - re-apply the filter so they
+						// match every other section
+						if (expanded && searching)
 						{
 							applyFilter();
 						}
@@ -1383,32 +1775,38 @@ public class HcimGuidePanel extends PluginPanel
 			add(body, BorderLayout.CENTER);
 
 			updateHeader();
+			lastComplete = isComplete();
 		}
 
-		/** Builds the step rows the first time the section is opened. */
+		/** Builds every step row when the section is opened. */
 		private void ensureBuilt()
 		{
-			if (built)
+			if (!built)
 			{
-				return;
+				buildRows(bank.getSteps(), true);
 			}
-			built = true;
-			GridBagConstraints gbc = new GridBagConstraints();
-			gbc.gridx = 0;
-			gbc.gridy = 0;
-			gbc.weightx = 1;
-			gbc.fill = GridBagConstraints.HORIZONTAL;
-			for (GuideStep step : bank.getSteps())
+		}
+
+		/**
+		 * Replace the section's rows with rows for the given steps.
+		 *
+		 * @param all true when {@code steps} is the whole bank; false for a
+		 *     search's matching subset
+		 */
+		private void buildRows(List<GuideStep> steps, boolean all)
+		{
+			releaseRows();
+			built = all;
+			for (GuideStep step : steps)
 			{
 				StepRow row = new StepRow(this, step);
 				rows.add(row);
-				body.add(row, gbc);
-				gbc.gridy++;
+				body.add(row);
 			}
 			// the section's video guide as a visible row under the steps, not
 			// only the small header ▶ - in the wiki the video sits right under
 			// the section's content, so this is where users look for it
-			if (bank.getVideoUrl() != null)
+			if (all && bank.getVideoUrl() != null)
 			{
 				JButton link = new JButton("▶ Section video guide");
 				link.setToolTipText("Open in browser: " + bank.getVideoUrl());
@@ -1420,11 +1818,31 @@ public class HcimGuidePanel extends PluginPanel
 				link.setFont(panelFont());
 				link.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 				link.addActionListener(e -> plugin.openVideoUrl(bank.getVideoUrl()));
-				body.add(link, gbc);
+				body.add(link);
 			}
 			// rows are built lazily, after the panel-wide font pass - bring
 			// every component of this fresh section body onto the configured font
 			applyFontRecursively(body, panelFont());
+		}
+
+		/**
+		 * Drop the rows of a closed section. Each row carries an HTML view, a
+		 * popup menu and an item grid; kept for every section ever opened they
+		 * add up to tens of megabytes on a large guide. Late icon callbacks
+		 * are detached first so they cannot touch the discarded rows.
+		 */
+		private void releaseRows()
+		{
+			for (StepRow row : rows)
+			{
+				if (row.grid != null)
+				{
+					row.grid.dispose();
+				}
+			}
+			rows.clear();
+			body.removeAll();
+			built = false;
 		}
 
 		boolean isComplete()
@@ -1434,12 +1852,34 @@ public class HcimGuidePanel extends PluginPanel
 			return p[0] == p[1];
 		}
 
+		/**
+		 * True exactly once per transition from unfinished to finished. Must
+		 * be asked after every change that can alter completeness, since it
+		 * also records the state the next transition is measured against.
+		 */
+		boolean becameComplete()
+		{
+			boolean complete = isComplete();
+			boolean edge = complete && !lastComplete;
+			lastComplete = complete;
+			return edge;
+		}
+
 		void setExpanded(boolean value)
 		{
 			if (value)
 			{
 				ensureBuilt();
 			}
+			else
+			{
+				releaseRows();
+			}
+			showBody(value);
+		}
+
+		private void showBody(boolean value)
+		{
 			expanded = value;
 			body.setVisible(value);
 			chevron.setText(value ? EXPANDED : COLLAPSED);
@@ -1460,61 +1900,92 @@ public class HcimGuidePanel extends PluginPanel
 				BorderFactory.createEmptyBorder(5, active ? 3 : 6, 5, 6)));
 		}
 
-		/** Rows an expansion would build - what filtering actually costs. */
-		int stepCount()
-		{
-			return bank.getSteps().size();
-		}
-
 		/**
-		 * Applies the search query and returns how many steps matched.
-		 * Matching runs against the MODEL, so unbuilt (collapsed) sections
-		 * are searched without constructing their rows; only when
-		 * {@code expand} is true does a matching section actually build and
-		 * show its rows - the panel budgets that across sections, leaving
-		 * the tail of a very broad query visible but collapsed.
+		 * Applies a non-empty search query. Matching runs against the MODEL,
+		 * so closed sections are searched without constructing their rows. A
+		 * section that is already fully open only hides its non-matching
+		 * rows; any other matching section shows JUST its matching rows, and
+		 * only while they fit the panel's row budget.
+		 *
+		 * @param budget rows this section may still show
+		 * @return rows charged to the budget, or -1 when the section matched
+		 *     but was left collapsed because its matches exceed the budget
 		 */
-		int filter(String query, boolean expand)
+		int filter(String query, int budget)
 		{
-			if (query.isEmpty())
-			{
-				setVisible(true);
-				for (StepRow row : rows)
-				{
-					row.setVisible(true);
-				}
-				return 0;
-			}
-			int matched = 0;
+			List<GuideStep> matches = new ArrayList<>();
 			for (GuideStep step : bank.getSteps())
 			{
 				if (step.getText().toLowerCase(Locale.ROOT).contains(query))
 				{
-					matched++;
+					matches.add(step);
 				}
 			}
-			setVisible(matched > 0);
-			if (matched == 0)
+			Set<GuideStep> matched = new HashSet<>(matches);
+			setVisible(!matches.isEmpty());
+			if (built)
 			{
-				return 0;
-			}
-			if (expand)
-			{
-				setExpanded(true); // builds rows on demand
+				// opened before or during the search: every row already exists
 				for (StepRow row : rows)
 				{
-					row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
+					row.setVisible(matched.contains(row.step));
+				}
+				return 0;
+			}
+			if (matches.isEmpty())
+			{
+				if (expanded)
+				{
+					setExpanded(false); // an earlier query's partial view
+				}
+				return 0;
+			}
+			Set<GuideStep> present = new HashSet<>();
+			for (StepRow row : rows)
+			{
+				present.add(row.step);
+			}
+			// a narrowed query reuses the rows the broader one built
+			if (!present.containsAll(matched))
+			{
+				if (matches.size() > budget)
+				{
+					if (expanded)
+					{
+						setExpanded(false);
+					}
+					return -1;
+				}
+				buildRows(matches, false);
+				showBody(true);
+			}
+			for (StepRow row : rows)
+			{
+				row.setVisible(matched.contains(row.step));
+			}
+			return matches.size();
+		}
+
+		/**
+		 * Search over: the section and all of its rows are visible again, and
+		 * it is open exactly when {@code open} - a search's partial view is
+		 * either completed into the full section or dropped.
+		 */
+		void clearFilter(boolean open)
+		{
+			setVisible(true);
+			if (open)
+			{
+				setExpanded(true);
+				for (StepRow row : rows)
+				{
+					row.setVisible(true);
 				}
 			}
 			else if (expanded)
 			{
-				// over budget but the rows already exist: still filter them
-				for (StepRow row : rows)
-				{
-					row.setVisible(row.step.getText().toLowerCase(Locale.ROOT).contains(query));
-				}
+				setExpanded(false);
 			}
-			return matched;
 		}
 
 		private void bulk(boolean completed)
@@ -1535,10 +2006,10 @@ public class HcimGuidePanel extends PluginPanel
 				row.syncFromModel();
 			}
 			updateProgress();
+			becameComplete(); // record the new state; an explicit mark collapses either way
 			if (completed && config.autoCollapseCompleted())
 			{
-				setExpanded(false);
-				expandNextAfterAutoCollapse(this);
+				autoCollapse(this);
 			}
 		}
 
@@ -1579,7 +2050,8 @@ public class HcimGuidePanel extends PluginPanel
 			}
 			plugin.snapshotBeforeBulk("mark everything before this bank");
 			plugin.setCompletedBulk(steps, true);
-			rebuildBanks();
+			// keep the header this was invoked on under the pointer
+			rebuildBanks(anchorOn(this, null));
 		}
 	}
 
@@ -1632,6 +2104,15 @@ public class HcimGuidePanel extends PluginPanel
 			int h = (int) Math.ceil(view.getPreferredSpan(javax.swing.text.View.Y_AXIS));
 			return new java.awt.Dimension(width, h + in.top + in.bottom);
 		}
+
+		@Override
+		public java.awt.Dimension getMaximumSize()
+		{
+			// take whatever width the layout offers and wrap to it: a layout
+			// that clamps to the maximum (BoxLayout) would otherwise pin the
+			// label at the first-pass estimate
+			return new java.awt.Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+		}
 	}
 
 	private class StepRow extends JPanel
@@ -1671,13 +2152,14 @@ public class HcimGuidePanel extends PluginPanel
 			checkBox.addActionListener(e ->
 			{
 				plugin.setCompleted(step.getKey(), checkBox.isSelected());
+				// show what the MODEL now holds, not what was clicked: the store
+				// refuses writes while character progress is still loading
 				lastRenderedState = -1; // force re-render
-				refreshText();
+				syncFromModel();
 				updateProgress(); // refreshes every bank header including ours
-				if (checkBox.isSelected() && config.autoCollapseCompleted() && section.isComplete())
+				if (section.becameComplete() && config.autoCollapseCompleted())
 				{
-					section.setExpanded(false);
-					expandNextAfterAutoCollapse(section);
+					autoCollapse(section);
 				}
 			});
 
@@ -1692,11 +2174,16 @@ public class HcimGuidePanel extends PluginPanel
 			textLabel.addMouseListener(new java.awt.event.MouseAdapter()
 			{
 				@Override
-				public void mouseClicked(java.awt.event.MouseEvent e)
+				public void mouseReleased(java.awt.event.MouseEvent e)
 				{
-					if (javax.swing.SwingUtilities.isLeftMouseButton(e) && checkBox.isEnabled())
+					// release inside the label, not mouseClicked: a click is
+					// dropped when the pointer moves at all between press and
+					// release. doClick(0): the default holds the EDT for its
+					// 68ms "pressed" animation.
+					if (javax.swing.SwingUtilities.isLeftMouseButton(e) && checkBox.isEnabled()
+						&& textLabel.contains(e.getPoint()))
 					{
-						checkBox.doClick();
+						checkBox.doClick(0);
 					}
 				}
 			});
@@ -1723,8 +2210,10 @@ public class HcimGuidePanel extends PluginPanel
 					"Complete previous steps", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
 				if (choice == JOptionPane.OK_OPTION)
 				{
+					// keep the row this was invoked on under the pointer
+					ScrollAnchor anchor = anchorOn(section, StepRow.this);
 					plugin.completeAllStepsBefore(step.getKey());
-					rebuildBanks();
+					rebuildBanks(anchor);
 				}
 			});
 			rowMenu.add(upToHere);
@@ -1741,8 +2230,9 @@ public class HcimGuidePanel extends PluginPanel
 					"Clear later steps", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
 				if (choice == JOptionPane.OK_OPTION)
 				{
+					ScrollAnchor anchor = anchorOn(section, StepRow.this);
 					plugin.clearAllStepsAfter(step.getKey());
-					rebuildBanks();
+					rebuildBanks(anchor);
 				}
 			});
 			rowMenu.add(clearAfter);
@@ -1756,10 +2246,9 @@ public class HcimGuidePanel extends PluginPanel
 				lastRenderedState = -1; // force re-render
 				syncFromModel();
 				updateProgress();
-				if (nowSkipped && config.autoCollapseCompleted() && section.isComplete())
+				if (section.becameComplete() && config.autoCollapseCompleted())
 				{
-					section.setExpanded(false);
-					expandNextAfterAutoCollapse(section);
+					autoCollapse(section);
 				}
 			});
 			rowMenu.add(skipItem);
