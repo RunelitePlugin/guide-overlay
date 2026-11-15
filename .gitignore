@@ -6,3 +6,6 @@ out/
 .vscode/
 .DS_Store
 __pycache__/
+
+# Claude Code per-machine permissions; can hold approved commands verbatim, never commit
+.claude/settings.local.json
